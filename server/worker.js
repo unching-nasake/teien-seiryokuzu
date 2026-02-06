@@ -18,23 +18,38 @@ if (fs.existsSync(fontPath)) {
   console.warn("[Worker] Japanese font not found at:", fontPath);
 }
 
-// 絵文字フォントを登録（node-canvas用）
-const emojiFontPath = path.join(__dirname, "fonts", "NotoEmoji-Bold.ttf");
-if (fs.existsSync(emojiFontPath)) {
-  try {
-    registerFont(emojiFontPath, { family: "NotoEmoji", weight: "bold" });
-    console.log("[Worker] Emoji font registered:", emojiFontPath);
-  } catch (e) {
-    console.warn("[Worker] Failed to register emoji font:", e.message);
+// 絵文字フォントを登録（node-canvas用）- 複数のフォールバックで試行
+const emojiFontFiles = [
+  "NotoEmoji-VariableFont.ttf", // Variable Font（最も互換性が高い）
+  "NotoEmoji-Bold.ttf", // Bold版
+];
+
+let emojiFontRegistered = false;
+for (const fontFile of emojiFontFiles) {
+  const fontPath = path.join(__dirname, "fonts", fontFile);
+  if (fs.existsSync(fontPath)) {
+    try {
+      registerFont(fontPath, { family: "NotoEmoji" });
+      console.log("[Worker] Emoji font registered:", fontPath);
+      emojiFontRegistered = true;
+      break;
+    } catch (e) {
+      console.warn(`[Worker] Failed to register ${fontFile}:`, e.message);
+    }
   }
-} else {
-  console.warn("[Worker] Emoji font not found at:", emojiFontPath);
+}
+if (!emojiFontRegistered) {
+  console.warn(
+    "[Worker] No emoji font could be registered. Emoji will be removed from labels.",
+  );
 }
 
-// 絵文字を除去するヘルパー関数（node-canvasでの確実な表示のため）
+// 絵文字を除去するヘルパー関数（フォント登録失敗時のフォールバック用）
 // Unicode絵文字範囲を除去し、テキストのみを返す
 function removeEmoji(str) {
   if (!str) return str;
+  // 絵文字フォントが登録されている場合はそのまま返す
+  if (emojiFontRegistered) return str;
   // 絵文字（Emoji）と修飾子を除去する正規表現
   return str
     .replace(/[\u{1F600}-\u{1F64F}]/gu, "") // 顔文字
