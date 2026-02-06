@@ -1,9 +1,22 @@
 const { parentPort } = require("worker_threads");
 const fs = require("fs");
 const path = require("path");
-const { createCanvas } = require("canvas");
+const { createCanvas, registerFont } = require("canvas");
 const shared = require("./shared");
 const { LockManager, MAP_SIZE, getTilePoints, calculateFactionPoints } = shared;
+
+// 日本語フォントを登録（node-canvas用）
+const fontPath = path.join(__dirname, "fonts", "NotoSansJP-Bold.ttf");
+if (fs.existsSync(fontPath)) {
+  try {
+    registerFont(fontPath, { family: "NotoSansJP", weight: "bold" });
+    console.log("[Worker] Japanese font registered:", fontPath);
+  } catch (e) {
+    console.warn("[Worker] Failed to register font:", e.message);
+  }
+} else {
+  console.warn("[Worker] Japanese font not found at:", fontPath);
+}
 
 // ===== キャッシュシステム (Workerレベル) =====
 const jsonCache = new Map();
@@ -1800,7 +1813,7 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
           28,
           Math.max(14, Math.floor(Math.sqrt(center.count) * 1.5)),
         );
-        ctx.font = `bold ${fontSize}px sans-serif`;
+        ctx.font = `bold ${fontSize}px NotoSansJP, sans-serif`;
 
         ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
         ctx.fillText(alliance.name, centerX + 1, centerY + 1);
@@ -1826,7 +1839,7 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
           24,
           Math.max(8, Math.floor(Math.sqrt(center.count) * 2)),
         );
-        ctx.font = `bold ${fontSize}px sans-serif`;
+        ctx.font = `bold ${fontSize}px NotoSansJP, sans-serif`;
 
         ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
         ctx.fillText(faction.name, centerX + 1, centerY + 1);
@@ -1838,7 +1851,7 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
 
   // ネームドセルのラベルを描画（faction_fullモードのみ）
   if (mode === "faction_full") {
-    ctx.font = "bold 10px sans-serif";
+    ctx.font = "bold 10px NotoSansJP, sans-serif";
     Object.values(namedCells).forEach((cell) => {
       const screenX = cell.x * TILE_SIZE + TILE_SIZE / 2;
       const screenY = cell.y * TILE_SIZE + TILE_SIZE / 2;
