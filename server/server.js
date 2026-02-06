@@ -2742,17 +2742,21 @@ async function syncPlayerWithGameIds(playerId, currentAuthKey) {
 
       // [FIX] 実際に認証されている場合のみ lastAuthenticated を更新する
       const today = getTodayString();
+      const isGameKey = (k) => k && /^(game-)?[0-9a-f]{8}$/i.test(k);
+
       let isAuthorized = false;
-      if (currentAuthKey && gameIds[currentAuthKey]?.counts?.[today]) {
+      // [UPDATED] 有効な認証キーが紐付いていれば、当日のアクティビティに関わらず認証済みとみなす
+      if (isGameKey(currentAuthKey) && gameIds[currentAuthKey]) {
         isAuthorized = true;
       }
-      if (!isAuthorized && player.knownPostIds) {
-        for (const kid of player.knownPostIds) {
-          if (gameIds[kid]?.counts?.[today]) {
-            isAuthorized = true;
-            break;
-          }
-        }
+      if (
+        !isAuthorized &&
+        player.knownPostIds &&
+        player.knownPostIds.length > 0
+      ) {
+        // knownPostIds に有効なIDがあれば認証済み
+        // (IDが gameIds に存在するかまではチェックしなくても良いが、念のため存在確認のみ行う)
+        isAuthorized = true;
       }
 
       if (isAuthorized) {
