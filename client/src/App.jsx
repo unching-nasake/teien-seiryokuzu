@@ -275,7 +275,7 @@ function App() {
   }, [playerData, mapTiles, factions, namedCells]);
 
   // マップ画像出力
-  const handleExportMap = useCallback(() => {
+  const handleExportMap = useCallback(async () => {
     const MAP_SIZE = 250;
     const TILE_RES = 4; // 高解像度化
     const canvas = document.createElement('canvas');
@@ -337,6 +337,13 @@ function App() {
 
     // 名前の描画
     if (showFactionNames) {
+      // フォントのロードを待機
+      try {
+        await document.fonts.load('bold 16px "Noto Sans JP"');
+      } catch (e) {
+        console.warn("Font load failed, proceeding anyway", e);
+      }
+
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.strokeStyle = '#ffffff'; // 白縁取り
