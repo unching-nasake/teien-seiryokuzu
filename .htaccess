@@ -1,0 +1,13 @@
+# ディレクトリリスティングの無効化（ファイル一覧を見せない）
+Options -Indexes
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule (^|/)\. - [F]
+    RewriteRule ^server/ - [F]
+    RewriteRule ^node_modules/ - [F]
+</IfModule>
+
+<FilesMatch "\.(py|sh|log)$">
+    Require all denied
+</FilesMatch>

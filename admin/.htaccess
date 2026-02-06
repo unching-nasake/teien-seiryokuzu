@@ -1,0 +1,4 @@
+AuthType Basic
+AuthName "Admin Area - Authentication Required"
+AuthUserFile /absolute/path/to/.htpasswd
+Require valid-user
