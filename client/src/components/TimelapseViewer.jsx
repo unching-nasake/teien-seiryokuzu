@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import GameMap from './GameMap';
 import Leaderboard from './Leaderboard';
 
-function TimelapseViewer({ onClose, factions, showFactionNames: initialShowFactionNames = true }) {
+function TimelapseViewer({ onClose, factions, showFactionNames: initialShowFactionNames = true, workerPool }) {
   const [historyList, setHistoryList] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -184,7 +184,8 @@ function TimelapseViewer({ onClose, factions, showFactionNames: initialShowFacti
                 showAllianceNames={showFactionNames}
                 allianceDisplayMode={allianceDisplayMode}
                 limitZoomOut={false}
-             />
+                workerPool={workerPool}
+              />
 
              {/* リーダーボード表示 */}
              {showLeaderboard && (

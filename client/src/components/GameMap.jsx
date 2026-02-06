@@ -236,6 +236,8 @@ function GameMap({
     // Workerでクラスタリング計算
     // calculateClustersRef.currentを使用することで、Worker関数の参照変更による再実行を防ぐ
     // 依存配列は [tiles] のみ
+    if (typeof calculateClustersRef.current !== 'function') return;
+
     calculateClustersRef.current(tiles)
       .then(clusterMap => {
         if (!isMounted) return;

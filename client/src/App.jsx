@@ -3299,6 +3299,7 @@ function App() {
           onClose={() => setShowTimelapse(false)}
           showFactionNames={showFactionNames}
           allianceDisplayMode={allianceDisplayMode}
+          workerPool={mapWorkerPool}
         />
       )}
 
