@@ -339,7 +339,7 @@ function App() {
     if (showFactionNames) {
       // フォントのロードを待機
       try {
-        await document.fonts.load('bold 16px "Noto Sans JP"');
+        await document.fonts.load('700 16px "Noto Sans JP"');
       } catch (e) {
         console.warn("Font load failed, proceeding anyway", e);
       }
@@ -360,7 +360,7 @@ function App() {
           const avgY = (data.sumY / data.count) * TILE_RES;
 
           const fontSize = Math.min(60, Math.max(12, Math.sqrt(data.count) * 2));
-          ctx.font = `bold ${fontSize}px "Noto Sans JP", sans-serif`;
+          ctx.font = `700 ${fontSize}px "Noto Sans JP", sans-serif`;
 
           ctx.strokeText(alliance.name, avgX, avgY);
           ctx.fillText(alliance.name, avgX, avgY);
@@ -375,7 +375,7 @@ function App() {
           const avgY = (data.sumY / data.count) * TILE_RES;
 
           const fontSize = Math.min(60, Math.max(12, Math.sqrt(data.count) * 2));
-          ctx.font = `bold ${fontSize}px "Noto Sans JP", sans-serif`;
+          ctx.font = `700 ${fontSize}px "Noto Sans JP", sans-serif`;
 
           ctx.strokeText(faction.name, avgX, avgY);
           ctx.fillText(faction.name, avgX, avgY);
@@ -390,7 +390,7 @@ function App() {
           const avgY = (data.sumY / data.count) * TILE_RES;
 
           const fontSize = Math.min(60, Math.max(12, Math.sqrt(data.count) * 2));
-          ctx.font = `bold ${fontSize}px "Noto Sans JP", sans-serif`;
+          ctx.font = `700 ${fontSize}px "Noto Sans JP", sans-serif`;
 
           ctx.strokeText(faction.name, avgX, avgY);
           ctx.fillText(faction.name, avgX, avgY);
