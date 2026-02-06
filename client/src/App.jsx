@@ -337,8 +337,10 @@ function App() {
 
     // 名前の描画
     if (showFactionNames) {
-      // フォントのロードを待機
+      // すべてのフォントのロード完了を待機
       try {
+        await document.fonts.ready;
+        // 追加で明示的にロードを試みる
         await document.fonts.load('700 16px "Noto Sans JP"');
       } catch (e) {
         console.warn("Font load failed, proceeding anyway", e);
