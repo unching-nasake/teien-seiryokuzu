@@ -1379,10 +1379,9 @@ function calculateFactionSharedAPLimit(
     }
   }
 
-  // 計算式: base * validCount (庭園モードかつvalidCount=0なら0)
-  // Plan: `sharedBase * 有効メンバー数`
-  // 庭園モード有効時、有効メンバー=0なら上限0
-  let limit = baseShared * validCount;
+  // 計算式: baseShared * validCount
+  // validCount が 0 の場合は baseShared を最小値として返す (ソロ活動用)
+  let limit = baseShared * Math.max(1, validCount);
 
   return {
     limit,
@@ -1996,7 +1995,7 @@ function handleApRefill(player, players, playerId, saveToDisk = true) {
     maxApFromPosts: 10,
     random: { min: 0, max: 10 },
     smallFactionBonus: { min: 0, max: 10 },
-    limits: { individual: 50, sharedBase: 50 },
+    limits: { individual: 100, sharedBase: 50 },
   };
 
   // 最後のアウトボーン(補充)通過点
@@ -2220,7 +2219,7 @@ function handleApRefill(player, players, playerId, saveToDisk = true) {
   let refilledAmount = null;
 
   // 個人AP上限の計算（スコープ外へ移動）
-  let indLimit = apConfig.limits?.individual ?? 50;
+  let indLimit = apConfig.limits?.individual ?? 100;
   if (settings.gardenMode) {
     // 庭園モードON時、一度も認証(lastAuthenticated)が行われていないユーザーの上限は半分
     // (期限切れでも過去に成功していればペナルティなし)
@@ -2340,6 +2339,7 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
   const now = Date.now();
   const ONE_DAY_MS = 24 * 60 * 60 * 1000;
   let activeMemberCount = 0;
+  const activeMemberIds = [];
 
   const memberInfo = (f.members || [])
     .filter((pid) => pid != null)
@@ -2348,7 +2348,10 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
       const shortId = toShortId(pid);
 
       const isActive = p?.lastApAction && now - p.lastApAction < ONE_DAY_MS;
-      if (isActive) activeMemberCount++;
+      if (isActive) {
+        activeMemberCount++;
+        activeMemberIds.push(pid);
+      }
 
       return {
         id: pid,
@@ -2423,6 +2426,7 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
     players,
     settings,
     gameIds,
+    activeMemberIds,
   );
 
   return {
