@@ -77,14 +77,12 @@ class LockManager {
     const lockDir = `${key}.lock`;
     const start = Date.now();
 
-    // 1. プロセス内での排他制御 (同一プロセス内の複数リクエストの衝突をメモリ上で解決)
-    // これにより、プロセス内での無駄な mkdirSync 試行を回避し、高速化する。
+    // 1. プロセス内での排他制御
     while (inProcessLocks.get(key)) {
       if (Date.now() - start > timeout) return false;
       await inProcessLocks.get(key);
     }
 
-    // 自プロセスがロックを取得したことを示すPromise
     let resolveLock;
     const lockPromise = new Promise((res) => {
       resolveLock = res;
@@ -93,23 +91,30 @@ class LockManager {
     lockPromise.resolve = resolveLock;
 
     try {
+      // 親ディレクトリの存在確認 (data/ など)
+      const parentDir = path.dirname(key);
+      if (!fs.existsSync(parentDir)) {
+        fs.mkdirSync(parentDir, { recursive: true });
+      }
+
       // 2. ファイルシステム（プロセス間）での排他制御
       if (fs.existsSync(lockDir)) {
         try {
           const stats = fs.statSync(lockDir);
           const age = Date.now() - stats.mtimeMs;
-          if (age > 60000) {
+          // Stale lock の判定を短縮 (取得タイムアウトが20秒なので、30秒放置されていれば古いとみなす)
+          if (age > 30000) {
             console.warn(
-              `[LockManager] Stale lock found for ${path.basename(key)}. Removing...`,
+              `[LockManager] Stale lock found for ${path.basename(key)} (age: ${Math.floor(age / 1000)}s). Removing...`,
             );
             try {
-              fs.rmdirSync(lockDir);
+              fs.rmSync(lockDir, { recursive: true, force: true });
             } catch {
-              // ignore rmdir error
+              // ignore
             }
           }
         } catch {
-          // ignore stat error
+          // ignore
         }
       }
 
@@ -119,28 +124,28 @@ class LockManager {
           return true;
         } catch (e) {
           if (e.code === "EEXIST") {
+            // 他のプロセスが取得中。再試行
             await new Promise((r) => setTimeout(r, 25 + Math.random() * 25));
             continue;
           }
-          throw e; // システムエラー
+          throw e;
         }
       }
 
-      // タイムアウト時はメモリ上のロックを解放して失敗を返す
-      const ourLockPromise = inProcessLocks.get(key);
-      if (ourLockPromise === lockPromise) {
-        inProcessLocks.delete(key);
-        lockPromise.resolve();
-      }
+      // タイムアウト
+      this._clearInProcessLock(key, lockPromise);
       return false;
     } catch (e) {
-      // 予期せぬエラー時も同様に解放
-      const ourLockPromise = inProcessLocks.get(key);
-      if (ourLockPromise === lockPromise) {
-        inProcessLocks.delete(key);
-        lockPromise.resolve();
-      }
+      this._clearInProcessLock(key, lockPromise);
       throw e;
+    }
+  }
+
+  static _clearInProcessLock(key, lockPromise) {
+    const current = inProcessLocks.get(key);
+    if (current === lockPromise) {
+      inProcessLocks.delete(key);
+      if (lockPromise.resolve) lockPromise.resolve();
     }
   }
 
@@ -148,7 +153,7 @@ class LockManager {
     const lockDir = `${key}.lock`;
     try {
       if (fs.existsSync(lockDir)) {
-        fs.rmdirSync(lockDir);
+        fs.rmSync(lockDir, { recursive: true, force: true });
       }
     } catch (e) {
       console.error(`[LockManager] Release error for ${key}:`, e);
@@ -157,7 +162,7 @@ class LockManager {
       const lockPromise = inProcessLocks.get(key);
       if (lockPromise) {
         inProcessLocks.delete(key);
-        lockPromise.resolve();
+        if (lockPromise.resolve) lockPromise.resolve();
       }
     }
   }

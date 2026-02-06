@@ -38,7 +38,7 @@ const DUPLICATE_IP_PATH = path.join(DATA_DIR, "duplicate_ip.json");
 
 console.log(`[Init] DATA_DIR resolved to: ${DATA_DIR}`);
 
-// 残留一時ファイルのクリーンアップ
+// 残留一時ファイルおよびロックのクリーンアップ
 function cleanupTempFiles(dir) {
   try {
     if (!fs.existsSync(dir)) return;
@@ -48,7 +48,12 @@ function cleanupTempFiles(dir) {
       const fullPath = path.join(dir, file);
       const stat = fs.statSync(fullPath);
       if (stat.isDirectory()) {
-        cleanupTempFiles(fullPath);
+        if (file.endsWith(".lock")) {
+          fs.rmSync(fullPath, { recursive: true, force: true });
+          count++;
+        } else {
+          cleanupTempFiles(fullPath);
+        }
       } else if (file.includes(".tmp")) {
         fs.unlinkSync(fullPath);
         count++;
@@ -56,7 +61,7 @@ function cleanupTempFiles(dir) {
     }
     if (count > 0) {
       console.log(
-        `[Init] Cleanup removed ${count} residual temp files in ${dir}`,
+        `[Init] Cleanup removed ${count} residual temp files or locks in ${dir}`,
       );
     }
   } catch (e) {
