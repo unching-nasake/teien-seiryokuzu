@@ -1766,7 +1766,7 @@ parentPort.on("message", async (msg) => {
 // mode: "faction_full" (勢力名+ネームドマス), "faction_simple" (なし), "alliance" (同盟名)
 function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
   const TILE_SIZE = 4; // 小さめのタイルサイズで高速化
-  const PADDING = 40; // 勢力名がはみ出さないようにパディングを追加
+  const PADDING = 100; // 勢力名がはみ出さないようにパディングを追加（100pxに拡張）
   const mapWidth = MAP_SIZE * TILE_SIZE;
   const mapHeight = MAP_SIZE * TILE_SIZE;
   const canvasWidth = mapWidth + PADDING * 2;
