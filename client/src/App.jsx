@@ -353,7 +353,7 @@ function App() {
           const avgY = (data.sumY / data.count) * TILE_RES;
 
           const fontSize = Math.min(60, Math.max(12, Math.sqrt(data.count) * 2));
-          ctx.font = `bold ${fontSize}px "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", "MS PGothic", "Noto Sans JP", sans-serif`;
+          ctx.font = `bold ${fontSize}px "Noto Sans JP", sans-serif`;
 
           ctx.strokeText(alliance.name, avgX, avgY);
           ctx.fillText(alliance.name, avgX, avgY);
@@ -368,7 +368,7 @@ function App() {
           const avgY = (data.sumY / data.count) * TILE_RES;
 
           const fontSize = Math.min(60, Math.max(12, Math.sqrt(data.count) * 2));
-          ctx.font = `bold ${fontSize}px "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", "MS PGothic", "Noto Sans JP", sans-serif`;
+          ctx.font = `bold ${fontSize}px "Noto Sans JP", sans-serif`;
 
           ctx.strokeText(faction.name, avgX, avgY);
           ctx.fillText(faction.name, avgX, avgY);
@@ -383,7 +383,7 @@ function App() {
           const avgY = (data.sumY / data.count) * TILE_RES;
 
           const fontSize = Math.min(60, Math.max(12, Math.sqrt(data.count) * 2));
-          ctx.font = `bold ${fontSize}px "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", "MS PGothic", "Noto Sans JP", sans-serif`;
+          ctx.font = `bold ${fontSize}px "Noto Sans JP", sans-serif`;
 
           ctx.strokeText(faction.name, avgX, avgY);
           ctx.fillText(faction.name, avgX, avgY);
