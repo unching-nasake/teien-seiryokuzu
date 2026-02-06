@@ -31,6 +31,33 @@ if (fs.existsSync(emojiFontPath)) {
   console.warn("[Worker] Emoji font not found at:", emojiFontPath);
 }
 
+// 絵文字を除去するヘルパー関数（node-canvasでの確実な表示のため）
+// Unicode絵文字範囲を除去し、テキストのみを返す
+function removeEmoji(str) {
+  if (!str) return str;
+  // 絵文字（Emoji）と修飾子を除去する正規表現
+  return str
+    .replace(/[\u{1F600}-\u{1F64F}]/gu, "") // 顔文字
+    .replace(/[\u{1F300}-\u{1F5FF}]/gu, "") // 記号・絵文字
+    .replace(/[\u{1F680}-\u{1F6FF}]/gu, "") // 乗り物・地図記号
+    .replace(/[\u{1F1E0}-\u{1F1FF}]/gu, "") // 国旗
+    .replace(/[\u{2600}-\u{26FF}]/gu, "") // その他の記号
+    .replace(/[\u{2700}-\u{27BF}]/gu, "") // 装飾記号
+    .replace(/[\u{1F900}-\u{1F9FF}]/gu, "") // 補助絵文字
+    .replace(/[\u{1FA00}-\u{1FA6F}]/gu, "") // 拡張絵文字
+    .replace(/[\u{1FA70}-\u{1FAFF}]/gu, "") // 拡張絵文字
+    .replace(/[\u{231A}-\u{231B}]/gu, "") // 時計
+    .replace(/[\u{23E9}-\u{23F3}]/gu, "") // その他記号
+    .replace(/[\u{23F8}-\u{23FA}]/gu, "") // その他記号
+    .replace(/[\u{25AA}-\u{25AB}]/gu, "") // 四角記号
+    .replace(/[\u{25B6}]/gu, "") // 再生ボタン
+    .replace(/[\u{25C0}]/gu, "") // 逆再生ボタン
+    .replace(/[\u{25FB}-\u{25FE}]/gu, "") // 四角記号
+    .replace(/[\u{FE0F}]/gu, "") // 異体字セレクタ
+    .replace(/[\u{200D}]/gu, "") // ゼロ幅接合子
+    .trim();
+}
+
 // ===== キャッシュシステム (Workerレベル) =====
 const jsonCache = new Map();
 
@@ -1836,10 +1863,11 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
         );
         ctx.font = `bold ${fontSize}px NotoSansJP, NotoEmoji, sans-serif`;
 
+        const displayName = removeEmoji(alliance.name);
         ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
-        ctx.fillText(alliance.name, centerX + 1, centerY + 1);
+        ctx.fillText(displayName, centerX + 1, centerY + 1);
         ctx.fillStyle = "#ffffff";
-        ctx.fillText(alliance.name, centerX, centerY);
+        ctx.fillText(displayName, centerX, centerY);
       });
     } else {
       // 勢力名ラベルを描画（faction_fullモード）
@@ -1862,10 +1890,11 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
         );
         ctx.font = `bold ${fontSize}px NotoSansJP, NotoEmoji, sans-serif`;
 
+        const displayName = removeEmoji(faction.name);
         ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
-        ctx.fillText(faction.name, centerX + 1, centerY + 1);
+        ctx.fillText(displayName, centerX + 1, centerY + 1);
         ctx.fillStyle = "#ffffff";
-        ctx.fillText(faction.name, centerX, centerY);
+        ctx.fillText(displayName, centerX, centerY);
       });
     }
   }
