@@ -2726,48 +2726,41 @@ function syncPlayerWithGameIdsInternal(player, currentAuthKey, gameIds) {
 }
 
 /**
- * プレイヤーデータを game_ids.json と同期する (APIから呼ぶ用)
+ * プレイヤーの認証状態（庭園モード等）を同期する。
+ * (updateJSON ブロック内での使用を想定)
  */
-async function syncPlayerWithGameIds(playerId, currentAuthKey) {
-  if (!playerId) return;
+async function syncPlayerWithGameIds(player, req, gameIds = null) {
+  if (!player) return;
 
-  await updateJSON(
-    PLAYERS_PATH,
-    async (players) => {
-      const player = players.players[playerId];
-      if (!player) return players;
+  const settings = loadJSON(SYSTEM_SETTINGS_PATH, { gardenMode: false });
+  if (!settings.gardenMode) return;
 
-      const gameIds = loadJSON(GAME_IDS_PATH, {});
-      syncPlayerWithGameIdsInternal(player, currentAuthKey, gameIds);
+  if (!gameIds) {
+    gameIds = loadJSON(GAME_IDS_PATH, {});
+  }
 
-      // [FIX] 実際に認証されている場合のみ lastAuthenticated を更新する
-      const today = getTodayString();
-      const isGameKey = (k) => k && /^(game-)?[0-9a-f]{8}$/i.test(k);
+  // 認証キーの生成 (cookieになければ生成)
+  const authKey = generateGardenAuthKey(req, player.username);
+  const today = getTodayString();
+  const isGameKey = (k) => k && /^(game-)?[0-9a-f]{8}$/i.test(k);
 
-      let isAuthorized = false;
-      // [UPDATED] 有効な認証キーが紐付いていれば、当日のアクティビティに関わらず認証済みとみなす
-      if (isGameKey(currentAuthKey) && gameIds[currentAuthKey]) {
-        isAuthorized = true;
-      }
-      if (
-        !isAuthorized &&
-        player.knownPostIds &&
-        player.knownPostIds.length > 0
-      ) {
-        // knownPostIds に有効なIDがあれば認証済み
-        // (IDが gameIds に存在するかまではチェックしなくても良いが、念のため存在確認のみ行う)
-        isAuthorized = true;
-      }
+  let isAuthorized = false;
+  // 直接の認証キーでの照合
+  if (isGameKey(authKey) && gameIds[authKey]) {
+    isAuthorized = true;
+  }
+  // 紐付け済みIDでの照合
+  if (!isAuthorized && player.knownPostIds && player.knownPostIds.length > 0) {
+    isAuthorized = true;
+  }
 
-      if (isAuthorized) {
-        player.lastAuthenticated = today;
-      }
-      player.lastApAction = Date.now();
+  // [NEW] 認証履歴に追加 (まだない場合)
+  if (isAuthorized) {
+    player.lastAuthenticated = today;
+  }
 
-      return players;
-    },
-    { players: {} },
-  ).catch((e) => console.error("Sync error:", e));
+  // 内部的な紐付け処理
+  syncPlayerWithGameIdsInternal(player, authKey, gameIds);
 }
 
 // 初回起動時のチェック: もし起動直後が00分なら AP補充すべきだが、
@@ -3226,6 +3219,9 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
           // IP記録
           recordPlayerIp(players.players, playerId, getClientIp(req));
 
+          // 認証状態の同期 (handleApRefill の前に行う)
+          await syncPlayerWithGameIds(player, req, gameIds);
+
           // 勢力生存チェック
           if (player.factionId && !factions.factions[player.factionId]) {
             player.factionId = null;
@@ -3286,10 +3282,8 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
 app.get("/api/player", authenticate, async (req, res) => {
   try {
     const playerId = req.playerId;
-    const authKey = req.cookies && req.cookies[getCookieName(req, "authKey")];
-
-    // 1. 同期処理をまず完了させる (排他制御あり)
-    await syncPlayerWithGameIds(playerId, authKey);
+    // [REMOVED] updateJSON ブロック内で同期するように変更
+    // await syncPlayerWithGameIds(playerId, authKey);
 
     let responseData = { player: null };
 
@@ -3350,15 +3344,10 @@ app.get("/api/player", authenticate, async (req, res) => {
           // 既存プレイヤー: lastAuthenticated の更新は syncPlayerWithGameIds 内で行うためここでは行わない
         }
 
-        // knownPostIds の補完 (game_ids.json から追加チェック)
-        if (!player.knownPostIds || player.knownPostIds.length === 0) {
-          const gameIds = loadJSON(GAME_IDS_PATH, {});
-          if (authKey && gameIds[authKey] && gameIds[authKey].id) {
-            player.knownPostIds = [gameIds[authKey].id];
-          }
-        }
+        // [FIX] knownPostIds が破壊されるのを防ぎつつ、認証キーの紐付けを行う
+        // handleApRefill の直前に行うことで、最新の認証状態を適用させる
+        await syncPlayerWithGameIds(player, req);
 
-        // AP補充計算 (updateJSON内で実行)
         const { player: updatedPlayer, refilledAmount } = handleApRefill(
           player,
           players,
