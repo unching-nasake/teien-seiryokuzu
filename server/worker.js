@@ -18,6 +18,19 @@ if (fs.existsSync(fontPath)) {
   console.warn("[Worker] Japanese font not found at:", fontPath);
 }
 
+// 絵文字フォントを登録（node-canvas用）
+const emojiFontPath = path.join(__dirname, "fonts", "NotoEmoji-Bold.ttf");
+if (fs.existsSync(emojiFontPath)) {
+  try {
+    registerFont(emojiFontPath, { family: "NotoEmoji", weight: "bold" });
+    console.log("[Worker] Emoji font registered:", emojiFontPath);
+  } catch (e) {
+    console.warn("[Worker] Failed to register emoji font:", e.message);
+  }
+} else {
+  console.warn("[Worker] Emoji font not found at:", emojiFontPath);
+}
+
 // ===== キャッシュシステム (Workerレベル) =====
 const jsonCache = new Map();
 
@@ -1813,7 +1826,7 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
           28,
           Math.max(14, Math.floor(Math.sqrt(center.count) * 1.5)),
         );
-        ctx.font = `bold ${fontSize}px NotoSansJP, sans-serif`;
+        ctx.font = `bold ${fontSize}px NotoSansJP, NotoEmoji, sans-serif`;
 
         ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
         ctx.fillText(alliance.name, centerX + 1, centerY + 1);
@@ -1839,7 +1852,7 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
           24,
           Math.max(8, Math.floor(Math.sqrt(center.count) * 2)),
         );
-        ctx.font = `bold ${fontSize}px NotoSansJP, sans-serif`;
+        ctx.font = `bold ${fontSize}px NotoSansJP, NotoEmoji, sans-serif`;
 
         ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
         ctx.fillText(faction.name, centerX + 1, centerY + 1);
@@ -1851,7 +1864,7 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
 
   // ネームドセルのラベルを描画（faction_fullモードのみ）
   if (mode === "faction_full") {
-    ctx.font = "bold 10px NotoSansJP, sans-serif";
+    ctx.font = "bold 10px NotoSansJP, NotoEmoji, sans-serif";
     Object.values(namedCells).forEach((cell) => {
       const screenX = cell.x * TILE_SIZE + TILE_SIZE / 2;
       const screenY = cell.y * TILE_SIZE + TILE_SIZE / 2;
