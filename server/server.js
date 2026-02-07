@@ -13,7 +13,10 @@ const {
   LockManager,
   MAP_SIZE,
   getTilePoints,
-
+  calculateFactionPoints,
+  getTop3AllianceIds,
+  isWeakFactionUnified,
+  calculateFactionSharedAPLimit,
   isSpecialTile,
   NAMED_CELL_CREATE_COST,
 } = shared;
@@ -22,6 +25,7 @@ const {
 // パス定義 (先頭に移動)
 const DATA_DIR = path.resolve(__dirname, "data");
 const MAP_STATE_PATH = path.join(DATA_DIR, "map_state.json");
+const MAP_STATE_INDEX_PATH = path.join(DATA_DIR, "map_state_index.json");
 const FACTIONS_PATH = path.join(DATA_DIR, "factions.json");
 const PLAYERS_PATH = path.join(DATA_DIR, "players.json");
 const GAME_IDS_PATH = path.join(DATA_DIR, "game_ids.json");
@@ -1142,6 +1146,47 @@ app.post(
   },
 );
 
+// マップの状態履歴を保存 (Workerオフロード版)
+async function saveMapStateHistory() {
+  try {
+    const timestamp = new Date()
+      .toISOString()
+      .replace(/[:.]/g, "-")
+      .slice(0, 19);
+    const historyDir = path.join(DATA_DIR, "history");
+    const historyFile = path.join(historyDir, `mapState_${timestamp}.json`);
+
+    if (!fs.existsSync(historyDir)) {
+      fs.mkdirSync(historyDir, { recursive: true });
+    }
+
+    console.log("[History] Offloading map snapshot save to Worker...");
+    const result = await runWorkerTask("SAVE_MAP_SNAPSHOT", {
+      sourcePath: MAP_STATE_PATH,
+      targetPath: historyFile,
+    });
+
+    if (!result.success) {
+      console.error("[History] Snapshot failed:", result.error);
+      return;
+    }
+
+    console.log(`[History] Map snapshot saved: ${historyFile}`);
+
+    // [OPTIMIZED] 履歴インデックスを非同期で更新
+    await updateJSON(MAP_STATE_INDEX_PATH, (index) => {
+      index.push({
+        timestamp: new Date().toISOString(),
+        filename: path.basename(historyFile),
+      });
+      // 履歴が多すぎる場合は古いものを削除 (保留: 本番運用状況見て判断)
+      return index;
+    });
+  } catch (e) {
+    console.error("[History] Error saving map state history:", e);
+  }
+}
+
 app.get("/api/admin/debug/memory", authenticate, (req, res) => {
   // Direct Disk Mode: メモリキャッシュは使用されていません
   res.json({
@@ -1681,112 +1726,14 @@ const FACTION_COOLDOWN_MS = FACTION_COOLDOWN_HOURS * 60 * 60 * 1000;
 // 勢力ランキングを一括計算するヘルパー
 
 // 弱小勢力判定 (統一ロジック)
-function getTop3AllianceIds(alliancesDict, factionsData, preCalcStats) {
-  const alliancePoints = {};
-  if (!alliancesDict) return [];
-
-  Object.keys(alliancesDict).forEach((aid) => (alliancePoints[aid] = 0));
-
-  // preCalcStatsが利用可能ならそれを使う (高速)
-  if (preCalcStats && preCalcStats.factions) {
-    Object.keys(preCalcStats.factions).forEach((fid) => {
-      const f = factionsData.factions[fid];
-      const points = preCalcStats.factions[fid].totalPoints || 0;
-      if (f && f.allianceId && alliancePoints[f.allianceId] !== undefined) {
-        alliancePoints[f.allianceId] += points;
-      }
-    });
-  } else if (preCalcStats && preCalcStats.factionPoints) {
-    // processSecretTriggers (Worker) からの戻り値利用
-    Object.keys(preCalcStats.factionPoints).forEach((fid) => {
-      const f = factionsData.factions[fid];
-      const points = preCalcStats.factionPoints[fid] || 0;
-      if (f && f.allianceId && alliancePoints[f.allianceId] !== undefined) {
-        alliancePoints[f.allianceId] += points;
-      }
-    });
-  }
-
-  return Object.entries(alliancePoints)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
-    .map((entry) => entry[0]);
-}
-
-function isWeakFactionUnified(
-  rank,
-  memberCount,
-  factionId,
-  allianceId,
-  top3Alliances,
-) {
-  // 1. 基本条件: ランク6位以下 かつ アクティブメンバー3人以下
-  // ランク不明(999)や1〜5位の場合は弱小とはみなさない
-  if (rank < 6 || rank > 500) {
-    return false;
-  }
-
-  const basicWeak = memberCount <= 3;
-  if (!basicWeak) return false;
-
-  // 2. 上位3同盟に所属していないこと
-  if (allianceId && top3Alliances && top3Alliances.includes(allianceId)) {
-    return false;
-  }
-
-  return true;
-}
+// shared.js に移動しました
 
 // 互換性ラッパー：使用箇所を置き換えるまで維持
 const isWeakFaction = isWeakFactionUnified; // 移行用エイリアス
 
 // [NEW] 共有AP上限計算 & クラ
 // 共有AP上限計算のヘルパー関数
-// 戻り値: { limit: number, activeMemberCount: number }
-function calculateFactionSharedAPLimit(
-  faction,
-  playersData,
-  settings,
-  gameIds = null,
-  activeMembers = [],
-) {
-  const baseShared = settings.apSettings?.limits?.sharedBase ?? 50;
-  // アクティブ基準: 1週間以内 (handleApRefillに合わせる)
-
-  // 庭園モード: 認証済みユーザーのみカウント
-  let validCount = activeMembers.length;
-  if (settings.gardenMode) {
-    // gameIds が渡されていない場合はロード(通常は渡されるべき)
-    if (!gameIds) loadJSON(GAME_IDS_PATH, {}, true);
-
-    // [UPDATED] gameIdsを検索せず、playersDataそのもので判定する形に変更
-    // (activeMembers は playerIds の配列)
-    // 条件: かつて一度でも認証に成功していればOK (lastAuthenticatedがある)
-    if (!playersData || !playersData.players) {
-      // データがない場合は安全側に倒して全員無効扱いは避ける(あるいは全員有効？)
-      // ここではplayersDataが必須とする
-      validCount = 0;
-    } else {
-      const validMembers = activeMembers.filter((mid) => {
-        const p = playersData.players[mid];
-        if (!p) return false;
-        // lastAuthenticated があればOK (期限切れでもOK)
-        return !!p.lastAuthenticated;
-      });
-      validCount = validMembers.length;
-    }
-  }
-
-  // 計算式: baseShared * validCount
-  // validCount が 0 の場合は baseShared を最小値として返す (ソロ活動用)
-  let limit = baseShared * Math.max(1, validCount);
-
-  return {
-    limit,
-    activeMemberCount: activeMembers.length,
-    validMemberCount: validCount,
-  };
-}
+// shared.js に移動しました
 
 // 共有APを上限内に収めるヘルパー (変更があった場合に呼び出す)
 async function clampFactionSharedAP(
@@ -13614,66 +13561,83 @@ setInterval(async () => {
 let cachedFactionRanks = [];
 async function updateRankingCache() {
   try {
-    const result = await runWorkerTask("CALCULATE_RANKS", {
-      filePaths: {
-        mapState: MAP_STATE_PATH,
-        factions: FACTIONS_PATH,
-      },
+    const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
+    const allTileKeys = Object.keys(mapState.tiles);
+
+    // チャンク分割 (Y座標ベース)
+    const CHUNK_COUNT = 4;
+    const chunks = Array.from({ length: CHUNK_COUNT }, () => ({}));
+    allTileKeys.forEach((key) => {
+      const y = parseInt(key.split("_")[1]);
+      const chunkIdx = Math.min(
+        CHUNK_COUNT - 1,
+        Math.floor((y / MAP_SIZE) * CHUNK_COUNT),
+      );
+      chunks[chunkIdx][key] = mapState.tiles[key];
     });
-    if (result && result.results && result.results.ranks) {
-      cachedFactionRanks = result.results.ranks;
+
+    console.log("[Rank] Starting parallel ranking calculation (4 workers)...");
+
+    const parallelResults = await runParallelWorkerTasks(
+      "CALCULATE_RANKS",
+      {
+        filePaths: {
+          factions: FACTIONS_PATH,
+        },
+      },
+      chunks,
+      (results) => {
+        const mergedStats = {};
+        results.forEach((res) => {
+          if (res.results && res.results.stats) {
+            Object.entries(res.results.stats).forEach(([fid, s]) => {
+              if (!mergedStats[fid])
+                mergedStats[fid] = { id: fid, points: 0, tiles: 0 };
+              mergedStats[fid].points += s.points;
+              mergedStats[fid].tiles += s.tiles;
+            });
+          }
+        });
+        return { stats: mergedStats };
+      },
+    );
+
+    if (!parallelResults.success) {
+      console.error(
+        "[Rank] Parallel calculation failed:",
+        parallelResults.error,
+      );
+      return;
+    }
+
+    // 最終的なエンリッチメント処理 (shared.js の関数を使用する Worker タスク)
+    const enrichmentResult = await runWorkerTask("CALCULATE_RANKS", {
+      filePaths: {
+        factions: FACTIONS_PATH,
+        players: PLAYERS_PATH,
+        settings: SYSTEM_SETTINGS_PATH,
+        gameIds: GAME_IDS_PATH,
+        alliances: ALLIANCES_PATH,
+      },
+      preCalculatedStats: parallelResults.stats,
+    });
+
+    if (
+      enrichmentResult &&
+      enrichmentResult.results &&
+      enrichmentResult.results.ranks
+    ) {
+      cachedFactionRanks = enrichmentResult.results.ranks;
       console.log(
         `[Rank] Ranking cache updated. Count: ${cachedFactionRanks.length}`,
       );
 
-      // リアルタイム同期のためのブロードキャスト
-      const updates = [];
-      const playersData = loadJSON(PLAYERS_PATH, { players: {} });
-      const factionsData = loadJSON(FACTIONS_PATH, { factions: {} });
-      const alliancesData = loadJSON(ALLIANCES_PATH, { alliances: {} });
-      const settings = loadJSON(SYSTEM_SETTINGS_PATH, { apSettings: {} });
-      const gameIds = settings.gardenMode
-        ? loadJSON(GAME_IDS_PATH, {}, true)
-        : null;
-
-      // 統計情報 (factionPoints) があれば利用
-      const preCalcStats = result.results.factionPoints
-        ? { factionPoints: result.results.factionPoints }
-        : null;
-      const top3Alliances = getTop3AllianceIds(
-        alliancesData.alliances,
-        factionsData,
-        preCalcStats,
-      );
-
-      cachedFactionRanks.forEach(({ id, rank }) => {
-        const faction = factionsData.factions[id];
-        if (!faction) return;
-
-        // アクティブ人数算出
-        const { activeMemberCount } = calculateFactionSharedAPLimit(
-          faction,
-          playersData,
-          settings,
-          gameIds,
-        );
-
-        const isWeak = isWeakFactionUnified(
-          rank,
-          activeMemberCount,
-          id,
-          faction.allianceId,
-          top3Alliances,
-        );
-
-        const rankData = cachedFactionRanks.find((r) => r.id === id);
-        updates.push({
-          id,
-          rank,
-          isWeak,
-          points: rankData ? rankData.points : 0,
-        });
-      });
+      const updates = cachedFactionRanks.map((r) => ({
+        id: r.id,
+        rank: r.rank,
+        isWeak: r.isWeak,
+        points: r.points,
+      }));
 
       if (updates.length > 0) {
         io.emit("ranking:updated", updates);
@@ -13686,91 +13650,34 @@ async function updateRankingCache() {
 setInterval(updateRankingCache, 15 * 1000); // 15秒ごとに更新
 updateRankingCache(); // 初回実行
 
-// 同盟と戦争の整合性チェック (定期実行用)
-function checkAllianceAndWarIntegrity() {
-  const factions = loadJSON(FACTIONS_PATH, { factions: {} });
-  const alliancesData = loadJSON(ALLIANCES_PATH, { alliances: {} });
-  const alliances = alliancesData.alliances || {};
-  const wars = loadJSON(WARS_PATH, { wars: {} });
-  let allianceUpdated = false;
-  let warUpdated = false;
+// 同盟と戦争の整合性チェック (定期実行)
+async function checkAllianceAndWarIntegrity() {
+  console.log("[Diplomacy] Offloading diplomacy validation to Worker...");
+  const result = await runWorkerTask("VALIDATE_DIPLOMACY", {
+    filePaths: {
+      alliances: ALLIANCES_PATH,
+      wars: WARS_PATH,
+      factions: FACTIONS_PATH,
+    },
+  });
 
-  // 1. 同盟のチェック
-  for (const [aid, alliance] of Object.entries(alliances)) {
-    if (!alliance.members) alliance.members = [];
-    const originalCount = alliance.members.length;
-    // 存在しない勢力を除外
-    alliance.members = alliance.members.filter((fid) => factions.factions[fid]);
-
-    if (alliance.members.length === 0) {
-      // 解散
-      alliance.members.forEach((fid) => {
-        if (factions.factions[fid]) factions.factions[fid].allianceId = null;
-      });
-      delete alliances[aid];
-      allianceUpdated = true;
-      continue;
-    }
-
-    if (alliance.members.length !== originalCount) allianceUpdated = true;
-
-    // 盟主チェック
-    if (!factions.factions[alliance.leaderId]) {
-      let bestFid = alliance.members[0];
-      let maxPoints = -1;
-      alliance.members.forEach((mFid) => {
-        const f = factions.factions[mFid];
-        if (f && (f.totalPoints || 0) > maxPoints) {
-          maxPoints = f.totalPoints || 0;
-          bestFid = mFid;
-        }
-      });
-      alliance.leaderId = bestFid;
-      allianceUpdated = true;
-    }
+  if (!result.success) {
+    console.error("[Diplomacy] Worker failed:", result.error);
+    return;
   }
 
-  // 2. 戦争のチェック
-  for (const [wid, war] of Object.entries(wars.wars)) {
-    if (!war.attackerSide || !war.defenderSide) continue;
-
-    const sides = [war.attackerSide, war.defenderSide];
-    let warShouldEnd = false;
-
-    for (const side of sides) {
-      side.factions = side.factions.filter((fid) => factions.factions[fid]);
-      if (side.factions.length === 0) {
-        warShouldEnd = true;
-        break;
-      }
-      // 主戦国チェック
-      if (!factions.factions[side.leaderId]) {
-        let bestFid = side.factions[0];
-        let maxPoints = -1;
-        side.factions.forEach((mFid) => {
-          const f = factions.factions[mFid];
-          if (f && (f.totalPoints || 0) > maxPoints) {
-            maxPoints = f.totalPoints || 0;
-            bestFid = mFid;
-          }
-        });
-        side.leaderId = bestFid;
-        warUpdated = true;
-      }
-    }
-
-    if (warShouldEnd) {
-      delete wars.wars[wid];
-      warUpdated = true;
-    }
-  }
+  const { alliances, wars, factions, allianceUpdated, warUpdated } =
+    result.results;
 
   if (allianceUpdated) {
-    saveJSON(ALLIANCES_PATH, alliancesData);
-    saveJSON(FACTIONS_PATH, factions); // allianceIdの更新反映
+    console.log("[Diplomacy] Alliance updates detected.");
+    await updateJSON(ALLIANCES_PATH, () => alliances);
+    await updateJSON(FACTIONS_PATH, () => factions);
   }
+
   if (warUpdated) {
-    saveJSON(WARS_PATH, wars);
+    console.log("[Diplomacy] War updates detected.");
+    await updateJSON(WARS_PATH, () => wars);
   }
 }
 
@@ -13842,7 +13749,7 @@ function addLog(type, content, factionId = null) {
 }
 
 // 毎日00:00の特別タイルボーナス
-function processDailyBonus() {
+async function processDailyBonus() {
   const settings = loadJSON(SYSTEM_SETTINGS_PATH, { lastDailyBonusDate: "" });
   const today = new Date().toLocaleDateString("ja-JP");
 
@@ -13851,84 +13758,120 @@ function processDailyBonus() {
     return;
   }
 
-  console.log("[DailyBonus] Processing daily bonus for:", today);
-
   const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
-  const factionsData = loadJSON(FACTIONS_PATH, { factions: {} });
-  const counts = {};
+  const allTileKeys = Object.keys(mapState.tiles);
 
-  // [NEW] ネームドマスの累積ボーナスリセット
-  const updatedTiles = {};
-  let resetCount = 0;
-  Object.entries(mapState.tiles).forEach(([key, tile]) => {
-    if (tile.namedData && tile.namedData.siegeBonus > 0) {
-      tile.namedData.siegeBonus = 0;
-      updatedTiles[key] = tile;
-      resetCount++;
-    }
+  // チャンク分割 (Y座標ベース)
+  const CHUNK_COUNT = 4;
+  const chunks = Array.from({ length: CHUNK_COUNT }, () => ({}));
+  allTileKeys.forEach((key) => {
+    const y = parseInt(key.split("_")[1]);
+    const chunkIdx = Math.min(
+      CHUNK_COUNT - 1,
+      Math.floor((y / MAP_SIZE) * CHUNK_COUNT),
+    );
+    chunks[chunkIdx][key] = mapState.tiles[key];
   });
 
+  console.log(
+    "[DailyBonus] Starting parallel daily bonus processing (4 workers)...",
+  );
+
+  const parallelResults = await runParallelWorkerTasks(
+    "PROCESS_DAILY_BONUS",
+    {
+      filePaths: {
+        factions: FACTIONS_PATH,
+      },
+    },
+    chunks,
+    (results) => {
+      const mergedStats = {};
+      const mergedUpdatedTiles = {};
+      let totalResetCount = 0;
+      results.forEach((res) => {
+        if (res.results) {
+          // statsマージ
+          Object.entries(res.results.stats || {}).forEach(([fid, count]) => {
+            mergedStats[fid] = (mergedStats[fid] || 0) + count;
+          });
+          // updatedTilesマージ
+          Object.assign(mergedUpdatedTiles, res.results.updatedTiles || {});
+          // resetCountマージ
+          totalResetCount += res.results.resetCount || 0;
+        }
+      });
+      return {
+        stats: mergedStats,
+        updatedTiles: mergedUpdatedTiles,
+        resetCount: totalResetCount,
+      };
+    },
+  );
+
+  if (!parallelResults.success) {
+    console.error(
+      "[DailyBonus] Parallel processing failed:",
+      parallelResults.error,
+    );
+    return;
+  }
+
+  const { stats, updatedTiles, resetCount } = parallelResults;
+
+  // 1. ネームドマスのリセット反映
   if (resetCount > 0) {
     console.log(
       `[DailyBonus] Reset siege bonus for ${resetCount} named tiles.`,
     );
+    await updateJSON(MAP_STATE_PATH, (map) => {
+      Object.entries(updatedTiles).forEach(([key, tile]) => {
+        if (map.tiles[key]) {
+          map.tiles[key].namedData.siegeBonus = 0;
+        }
+      });
+      return map;
+    });
     io.emit("tile:update", updatedTiles);
-    saveJSON(MAP_STATE_PATH, mapState);
   }
 
-  // 特別タイル (100-149) の集計
-  Object.entries(mapState.tiles).forEach(([key, tile]) => {
-    const [x, y] = key.split("_").map(Number);
-    if (isSpecialTile(x, y)) {
-      const fid = tile.faction || tile.factionId;
-      if (fid && factionsData.factions[fid]) {
-        counts[fid] = (counts[fid] || 0) + 1;
-      }
-    }
-  });
+  // 2. ポイント加算
+  if (Object.keys(stats).length > 0) {
+    await updateJSON(FACTIONS_PATH, (factionsData) => {
+      Object.entries(stats).forEach(([fid, count]) => {
+        if (factionsData.factions[fid]) {
+          const points = count * 1; // 1タイル1ポイント
+          factionsData.factions[fid].bonusPoints =
+            (factionsData.factions[fid].bonusPoints || 0) + points;
+          console.log(
+            `[DailyBonus] Awarded ${points} bonus points to ${factionsData.factions[fid].name} (${fid})`,
+          );
 
-  // ポイント加算
-  let logMessages = [];
-  Object.entries(counts).forEach(([fid, count]) => {
-    if (factionsData.factions[fid]) {
-      const points = count * 1; // 1タイル1ポイント (10ポイントから引き下げ)
+          // ログ記録
+          addLog(
+            "system",
+            `📅 日次ボーナス: ${factionsData.factions[fid].name} に特別タイルボーナス ${points}pt が加算されました (保有数: ${count})`,
+            fid,
+          );
+        }
+      });
+      return factionsData;
+    });
 
-      // ボーナスポイントとして加算
-      factionsData.factions[fid].bonusPoints =
-        (factionsData.factions[fid].bonusPoints || 0) + points;
-
-      // totalPoints は recalculateAllFactionPoints 等で (territory + bonus) として計算されるように調整する
-
-      logMessages.push(
-        `${factionsData.factions[fid].name}: +${points}pts (${count} tiles)`,
-      );
-
-      // ログ記録
-      addLog(
-        "system",
-        `📅 日次ボーナス: ${factionsData.factions[fid].name} に特別タイルボーナス ${points}pt が加算されました (保有数: ${count})`,
-        fid,
-      );
-    }
-  });
-
-  if (logMessages.length > 0) {
-    console.log("[DailyBonus] Results:\n" + logMessages.join("\n"));
-    saveJSON(FACTIONS_PATH, factionsData);
-
-    // 更新通知
-    // ... (必要なら軽量化データ作成) -> ここではポイント更新のみなので、必要に応じて既存の faction:update を呼ぶか、pointsUpdatedを送る
-    // AP更新と同時にポイントもリフレッシュされることを期待
-    io.emit("faction:pointsUpdated", {}); // 引数はテキトー(クライアントが再取得するトリガーならなんでもOKだが実装依存)
-    // または全ファクションデータ送信
-    io.emit("factions:update", factionsData.factions);
+    // ポイントが変わったのでランキング再計算をトリガー
+    recalculateAllFactionPoints();
+    io.emit("faction:pointsUpdated", {});
   } else {
     console.log("[DailyBonus] No special tiles held by any faction.");
   }
 
-  // 日付更新
-  settings.lastDailyBonusDate = today;
-  saveJSON(SYSTEM_SETTINGS_PATH, settings);
+  // 3. 完了設定を保存
+  await updateJSON(SYSTEM_SETTINGS_PATH, (s) => {
+    s.lastDailyBonusDate = today;
+    return s;
+  });
+
+  console.log("[DailyBonus] Processing complete for:", today);
 }
 
 // [NEW] 塗りコスト見積もりAPI (Worker分散化)

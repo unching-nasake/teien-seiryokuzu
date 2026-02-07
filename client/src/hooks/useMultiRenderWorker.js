@@ -27,7 +27,8 @@ export const useMultiRenderWorker = (
   // Determine number of workers
   const concurrency =
     typeof navigator !== "undefined" ? navigator.hardwareConcurrency || 4 : 4;
-  const WORKER_COUNT = Math.max(1, concurrency);
+  // [OPTIMIZED] Leave one core for the main thread (UI and compositing)
+  const WORKER_COUNT = concurrency >= 2 ? concurrency - 1 : 1;
 
   // [NEW] バッファスワップ関数 - visibility切り替え
   const swapBuffers = useCallback((renderId) => {

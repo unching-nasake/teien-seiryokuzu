@@ -210,3 +210,98 @@ function calculateFactionPoints(factionId, mapState, namedCells = null) {
   }
   return territoryPoints;
 }
+
+function getTop3AllianceIds(alliancesDict, factionsData, preCalcStats) {
+  const alliancePoints = {};
+  if (!alliancesDict) return [];
+
+  Object.keys(alliancesDict).forEach((aid) => (alliancePoints[aid] = 0));
+
+  if (preCalcStats && preCalcStats.factions) {
+    Object.keys(preCalcStats.factions).forEach((fid) => {
+      const f = factionsData.factions[fid];
+      const points = preCalcStats.factions[fid].totalPoints || 0;
+      if (f && f.allianceId && alliancePoints[f.allianceId] !== undefined) {
+        alliancePoints[f.allianceId] += points;
+      }
+    });
+  } else if (preCalcStats && preCalcStats.factionPoints) {
+    Object.keys(preCalcStats.factionPoints).forEach((fid) => {
+      const f = factionsData.factions[fid];
+      const points = preCalcStats.factionPoints[fid] || 0;
+      if (f && f.allianceId && alliancePoints[f.allianceId] !== undefined) {
+        alliancePoints[f.allianceId] += points;
+      }
+    });
+  }
+
+  return Object.entries(alliancePoints)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map((entry) => entry[0]);
+}
+
+function isWeakFactionUnified(
+  rank,
+  memberCount,
+  factionId,
+  allianceId,
+  top3Alliances,
+) {
+  if (rank < 6 || rank > 500) {
+    return false;
+  }
+  const basicWeak = memberCount <= 3;
+  if (!basicWeak) return false;
+  if (allianceId && top3Alliances && top3Alliances.includes(allianceId)) {
+    return false;
+  }
+  return true;
+}
+
+function calculateFactionSharedAPLimit(
+  faction,
+  playersData,
+  settings,
+  gameIds = null,
+  activeMembers = [],
+) {
+  const baseShared = settings.apSettings?.limits?.sharedBase ?? 50;
+  let validCount = activeMembers.length;
+  if (settings.gardenMode) {
+    if (!playersData || !playersData.players) {
+      validCount = 0;
+    } else {
+      const validMembers = activeMembers.filter((mid) => {
+        const p = playersData.players[mid];
+        if (!p) return false;
+        return !!p.lastAuthenticated;
+      });
+      validCount = validMembers.length;
+    }
+  }
+  let limit = baseShared * Math.max(1, validCount);
+  return {
+    limit,
+    activeMemberCount: activeMembers.length,
+    validMemberCount: validCount,
+  };
+}
+
+module.exports = {
+  MAP_SIZE,
+  SPECIAL_TILE_MIN,
+  SPECIAL_TILE_MAX,
+  MAX_POINTS,
+  MIN_POINTS,
+  GRADIENT_STEP,
+  NAMED_CELL_BONUS,
+  NAMED_CELL_CREATE_COST,
+  isSpecialTile,
+  getTilePoints,
+  LockManager,
+  calculateFactionPoints,
+  getTop3AllianceIds,
+  isWeakFactionUnified,
+  calculateFactionSharedAPLimit,
+};
