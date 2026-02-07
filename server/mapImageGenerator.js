@@ -9,8 +9,8 @@ const fs = require("fs");
 // 定数
 const MAP_SIZE = 500; // 500x500タイル
 const TILE_SIZE = 2; // 1タイルあたり2px
-const PADDING = 75; // 左右上下の余白 (75px)
-const IMAGE_SIZE = MAP_SIZE * TILE_SIZE + PADDING * 2; // = 1150px
+const PADDING = 150; // 左右上下の余白 (150px)
+const IMAGE_SIZE = MAP_SIZE * TILE_SIZE + PADDING * 2; // = 1300px
 
 // パス設定
 const DATA_DIR = path.join(__dirname, "data");
