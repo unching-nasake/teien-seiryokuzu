@@ -1168,6 +1168,14 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
     mapImageSettings: settings.mapImageSettings || { intervalMinutes: 1 },
     adminId: currentAdminId,
     scheduledAction: settings.scheduledAction || null,
+    namedTileSettings: settings.namedTileSettings || {
+      cost: 100,
+      intervalHours: 0,
+    },
+    accountSettings: settings.accountSettings || {
+      maxAccountsPerIp: 2,
+      excludedIps: "",
+    },
     breakTime: settings.breakTime || {
       enabled: false,
       startTime: "01:00",
