@@ -106,8 +106,58 @@ let factionPointsCache = null;
 // 構造: { version, data: Map<factionId, Set<tileKey>> }
 let factionTileIndex = null;
 
+// [OPTIMIZATION] 座標インデックス (2D配列: [y][x] -> tile)
+// 高速な座標アクセスを提供し、文字列キー生成のコストを削減
+let coordinateIndex = null; // Array<Array<Tile | null>>
+
 // キャッシュバージョン (mapState変更時にインクリメント)
 let cacheVersion = 0;
+
+/**
+ * 座標インデックスを構築 (2D配列)
+ */
+function buildCoordinateIndex(mapState) {
+  // MAP_SIZEはsharedから取得したいが、ここでは定数500を使用 (shared.MAP_SIZE)
+  const size = 500;
+  // メモリ効率のため、TypedArrayではなく通常の配列（オブジェクト参照用）を使用
+  const index = new Array(size);
+  for (let y = 0; y < size; y++) {
+    index[y] = new Array(size).fill(null);
+  }
+
+  if (mapState && mapState.tiles) {
+    for (const key in mapState.tiles) {
+      const tile = mapState.tiles[key];
+      const [x, y] = key.split("_").map(Number);
+      if (x >= 0 && x < size && y >= 0 && y < size) {
+        index[y][x] = tile;
+      }
+    }
+  }
+  return index;
+}
+
+/**
+ * 座標からタイルを高速取得
+ * @param {number} x
+ * @param {number} y
+ * @param {Object} mapState - フォールバック用
+ * @returns {Object|null}
+ */
+function getTileAt(x, y, mapState) {
+  // 範囲チェック
+  if (x < 0 || x >= 500 || y < 0 || y >= 500) {
+    return null;
+  }
+
+  // インデックスがあれば使用
+  if (coordinateIndex) {
+    return coordinateIndex[y][x];
+  }
+
+  // フォールバック: 文字列キー生成コストがかかる
+  return mapState.tiles[`${x}_${y}`] || null;
+}
 
 /**
  * 勢力別タイルインデックスを構築
@@ -289,6 +339,12 @@ function ensureCachesValid(mapState, namedCells, factions, alliances) {
       version: currentVersion,
       data: buildFactionTileIndex(mapState),
     };
+  }
+
+  // 座標インデックスの更新
+  if (!coordinateIndex || cacheVersion !== currentVersion) {
+    coordinateIndex = buildCoordinateIndex(mapState);
+    cacheVersion = currentVersion; // ここでバージョン同期
   }
 }
 
@@ -495,29 +551,44 @@ function calculatePaintCost(
 
   // 2. 他勢力に包囲されているかの判定 (呼び出しごとに1回)
   let isLandlocked = true;
-  for (const k in mapState.tiles) {
+
+  // [OPTIMIZATION] factionTileIndexを使用してループ回数を削減
+  const factionTiles =
+    factionTileIndex &&
+    factionTileIndex.data &&
+    factionTileIndex.data.has(factionId)
+      ? factionTileIndex.data.get(factionId)
+      : Object.keys(mapState.tiles).filter(
+          (k) => mapState.tiles[k].factionId === factionId,
+        ); // フォールバック: 低速だが正確
+
+  for (const k of factionTiles) {
+    // インデックスが古い可能性があるため存在確認
     const tile = mapState.tiles[k];
-    if (tile.factionId === factionId) {
-      const [tx, ty] = k.split("_").map(Number);
-      const ns = [
-        [0, 1],
-        [0, -1],
-        [1, 0],
-        [-1, 0],
-        [1, 1],
-        [1, -1],
-        [-1, 1],
-        [-1, -1],
-      ];
-      for (const [dx, dy] of ns) {
-        const nx = tx + dx;
-        const ny = ty + dy;
-        if (nx < 0 || nx >= MAP_SIZE || ny < 0 || ny >= MAP_SIZE) continue;
-        const nt = mapState.tiles[`${nx}_${ny}`];
-        if (!nt || !nt.factionId) {
-          isLandlocked = false;
-          break;
-        }
+    if (!tile || tile.factionId !== factionId) continue;
+
+    const [tx, ty] = k.split("_").map(Number);
+    const ns = [
+      [0, 1],
+      [0, -1],
+      [1, 0],
+      [-1, 0],
+      [1, 1],
+      [1, -1],
+      [-1, 1],
+      [-1, -1],
+    ];
+    for (const [dx, dy] of ns) {
+      const nx = tx + dx;
+      const ny = ty + dy;
+      if (nx < 0 || nx >= MAP_SIZE || ny < 0 || ny >= MAP_SIZE) continue;
+
+      // [OPTIMIZATION] 座標インデックスを使用して高速取得
+      const nt = getTileAt(nx, ny, mapState);
+
+      if (!nt || !nt.factionId) {
+        isLandlocked = false;
+        break;
       }
     }
     if (!isLandlocked) break;
@@ -2640,7 +2711,13 @@ function getFactionClusterInfoWorker(
       const current = queue.pop();
       cluster.push(current);
 
-      const tile = mapState.tiles[current];
+      let tile = mapState.tiles[current];
+      // [OPTIMIZATION] 座標インデックスを使用して高速取得を試みる
+      if (!tile) {
+        const [cx, cy] = current.split("_").map(Number);
+        tile = getTileAt(cx, cy, mapState);
+      }
+
       // Worker内では mapState がプレーンオブジェクトなのでアクセス注意
       if (tile && tile.core && tile.core.factionId === factionId) {
         hasCore = true;
@@ -2648,6 +2725,12 @@ function getFactionClusterInfoWorker(
 
       const [x, y] = current.split("_").map(Number);
       for (const [dx, dy] of directions) {
+        // [OPTIMIZATION] 文字列キー生成の前に座標範囲チェックとインデックス確認を行いたいが
+        // ここでは set.has(stringKey) で判定しているため文字列生成は必須。
+        // ただし、coordinateIndexがあれば set.has の代わりに index[y][x] チェックができる可能性があるが
+        // factionTiles は Set<String> なのでこのままにする。
+        // 将来的に factionTiles も Set<Int> (y*1000+x) などにするとさらに高速化可能。
+
         const nk = `${x + dx}_${y + dy}`;
         if (factionTiles.has(nk) && !visited.has(nk)) {
           visited.add(nk);
