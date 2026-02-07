@@ -9,8 +9,8 @@ const fs = require("fs");
 // 定数
 const MAP_SIZE = 500; // 500x500タイル
 const TILE_SIZE = 2; // 1タイルあたり2px
-const PADDING = 150; // 左右上下の余白 (150px)
-const IMAGE_SIZE = MAP_SIZE * TILE_SIZE + PADDING * 2; // = 1300px
+const PADDING_X = 150; // 左右の余白 (150px)
+const PADDING_Y = 50; // 上下の余白 (50px)
 
 // パス設定
 const DATA_DIR = path.join(__dirname, "data");
@@ -80,6 +80,13 @@ async function generateMapImage(mode = "faction_full") {
 
   const showNames = mode === "faction_full";
 
+  // シンプルモードならパディングなし (1000x1000px)
+  const isSimple = mode === "faction_simple";
+  const curPaddingX = isSimple ? 0 : PADDING_X;
+  const curPaddingY = isSimple ? 0 : PADDING_Y;
+  const curWidth = MAP_SIZE * TILE_SIZE + curPaddingX * 2;
+  const curHeight = MAP_SIZE * TILE_SIZE + curPaddingY * 2;
+
   // データ読み込み
   const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
   const factionsData = loadJSON(FACTIONS_PATH, { factions: {} });
@@ -87,16 +94,21 @@ async function generateMapImage(mode = "faction_full") {
   const factions = factionsData.factions || {};
 
   // Canvas作成
-  const canvas = createCanvas(IMAGE_SIZE, IMAGE_SIZE);
+  const canvas = createCanvas(curWidth, curHeight);
   const ctx = canvas.getContext("2d");
 
   // 全体を背景色 (黒) で塗りつぶし
   ctx.fillStyle = "#000000";
-  ctx.fillRect(0, 0, IMAGE_SIZE, IMAGE_SIZE);
+  ctx.fillRect(0, 0, curWidth, curHeight);
 
   // マップ実体部分を白で塗りつぶし
   ctx.fillStyle = "#ffffff";
-  ctx.fillRect(PADDING, PADDING, MAP_SIZE * TILE_SIZE, MAP_SIZE * TILE_SIZE);
+  ctx.fillRect(
+    curPaddingX,
+    curPaddingY,
+    MAP_SIZE * TILE_SIZE,
+    MAP_SIZE * TILE_SIZE,
+  );
 
   // 1. タイル描画 (色ごとにバッチング) - 勢力タイルのみ描画
   const batchDraws = new Map();
@@ -125,8 +137,8 @@ async function generateMapImage(mode = "faction_full") {
     ctx.fillStyle = color;
     coords.forEach(({ x, y }) => {
       ctx.fillRect(
-        PADDING + x * TILE_SIZE,
-        PADDING + y * TILE_SIZE,
+        curPaddingX + x * TILE_SIZE,
+        curPaddingY + y * TILE_SIZE,
         TILE_SIZE + 0.5,
         TILE_SIZE + 0.5,
       );
@@ -162,8 +174,8 @@ async function generateMapImage(mode = "faction_full") {
       // TILE_SIZEでスケール（0.11相当のズームをシミュレート）
       const fontSize = Math.max(6, sizeBase * TILE_SIZE * 0.5);
 
-      const screenX = PADDING + center.x * TILE_SIZE;
-      const screenY = PADDING + center.y * TILE_SIZE;
+      const screenX = curPaddingX + center.x * TILE_SIZE;
+      const screenY = curPaddingY + center.y * TILE_SIZE;
 
       // 袋文字 (読みやすくするため)
       ctx.font = `bold ${fontSize}px sans-serif`;

@@ -1766,11 +1766,13 @@ parentPort.on("message", async (msg) => {
 // mode: "faction_full" (勢力名+ネームドマス), "faction_simple" (なし), "alliance" (同盟名)
 function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
   const TILE_SIZE = 2; // 500x500タイルの場合、2pxで1000px
-  const PADDING = 150; // 左右150pxずつで合計1300px
+  const isSimple = mode === "faction_simple";
+  const curPaddingX = isSimple ? 0 : 150; // 左右150px
+  const curPaddingY = isSimple ? 0 : 50; // 上下50px
   const mapWidth = MAP_SIZE * TILE_SIZE;
   const mapHeight = MAP_SIZE * TILE_SIZE;
-  const canvasWidth = mapWidth + PADDING * 2;
-  const canvasHeight = mapHeight + PADDING * 2;
+  const canvasWidth = mapWidth + curPaddingX * 2;
+  const canvasHeight = mapHeight + curPaddingY * 2;
 
   const canvas = createCanvas(canvasWidth, canvasHeight);
   const ctx = canvas.getContext("2d");
@@ -1781,7 +1783,7 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
 
   // マップ領域（白）
   ctx.fillStyle = "#ffffff";
-  ctx.fillRect(PADDING, PADDING, mapWidth, mapHeight);
+  ctx.fillRect(curPaddingX, curPaddingY, mapWidth, mapHeight);
 
   // 同盟モードの場合、勢力→同盟IDマッピングを作成
   const factionToAlliance = {};
@@ -1814,8 +1816,8 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
 
       ctx.fillStyle = color;
       ctx.fillRect(
-        PADDING + x * TILE_SIZE,
-        PADDING + y * TILE_SIZE,
+        curPaddingX + x * TILE_SIZE,
+        curPaddingY + y * TILE_SIZE,
         TILE_SIZE,
         TILE_SIZE,
       );
@@ -1826,8 +1828,8 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
   ctx.strokeStyle = "#FFD700";
   ctx.lineWidth = 2;
   ctx.strokeRect(
-    PADDING + 225 * TILE_SIZE,
-    PADDING + 225 * TILE_SIZE,
+    curPaddingX + 225 * TILE_SIZE,
+    curPaddingY + 225 * TILE_SIZE,
     50 * TILE_SIZE,
     50 * TILE_SIZE,
   );
@@ -1873,8 +1875,8 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
         const alliance = alliances[allianceId];
         if (!alliance) return;
 
-        const centerX = PADDING + (center.sumX / center.count) * TILE_SIZE;
-        const centerY = PADDING + (center.sumY / center.count) * TILE_SIZE;
+        const centerX = curPaddingX + (center.sumX / center.count) * TILE_SIZE;
+        const centerY = curPaddingY + (center.sumY / center.count) * TILE_SIZE;
 
         const fontSize = Math.min(
           28,
@@ -1899,8 +1901,8 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
         const faction = factions[fid];
         if (!faction) return;
 
-        const centerX = PADDING + (center.sumX / center.count) * TILE_SIZE;
-        const centerY = PADDING + (center.sumY / center.count) * TILE_SIZE;
+        const centerX = curPaddingX + (center.sumX / center.count) * TILE_SIZE;
+        const centerY = curPaddingY + (center.sumY / center.count) * TILE_SIZE;
 
         // フォントサイズをタイル数に応じて調整（最小8, 最大24）
         const fontSize = Math.min(
@@ -1922,8 +1924,8 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
   if (mode === "faction_full") {
     ctx.font = "bold 10px NotoSansJP, NotoEmoji, sans-serif";
     Object.values(namedCells).forEach((cell) => {
-      const screenX = PADDING + cell.x * TILE_SIZE + TILE_SIZE / 2;
-      const screenY = PADDING + cell.y * TILE_SIZE + TILE_SIZE / 2;
+      const screenX = curPaddingX + cell.x * TILE_SIZE + TILE_SIZE / 2;
+      const screenY = curPaddingY + cell.y * TILE_SIZE + TILE_SIZE / 2;
 
       // ★マーカー
       ctx.fillStyle = "#FFD700";
