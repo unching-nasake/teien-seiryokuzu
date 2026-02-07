@@ -2795,7 +2795,10 @@ async function syncPlayerWithGameIds(player, req, gameIds = null) {
   }
 
   // 認証キーの生成 (cookieになければ生成)
-  const authKey = generateGardenAuthKey(req, player.username);
+  const authKey = generateGardenAuthKey(
+    req,
+    player.displayName || player.username,
+  );
   const today = getTodayString();
   const isGameKey = (k) => k && /^(game-)?[0-9a-f]{8}$/i.test(k);
 
@@ -2879,12 +2882,18 @@ function recordPlayerIp(players, currentPlayerId, ip) {
   const associatedAccounts = [];
   for (const [pid, p] of Object.entries(players)) {
     if (p.lastIps && p.lastIps.includes(ip)) {
-      associatedAccounts.push({ id: pid, username: p.username });
+      associatedAccounts.push({
+        id: pid,
+        displayName: p.displayName || p.username,
+      });
     }
   }
   // 今回アクセスしている自分もリストに追加（重複判定と記録のため）
   if (!associatedAccounts.some((a) => a.id === currentPlayerId)) {
-    associatedAccounts.push({ id: currentPlayerId, username: player.username });
+    associatedAccounts.push({
+      id: currentPlayerId,
+      displayName: player.displayName || player.username,
+    });
   }
 
   // 1人より多い（＝自分以外にもそのIPを使っている人がいる）場合、一元管理ファイルに記録
@@ -3136,9 +3145,11 @@ app.post("/api/auth/signup", async (req, res) => {
       async (data) => {
         if (!data.players) data.players = {};
 
-        // 重複チェック (大文字小文字を区別しない)
+        // 重複チェック (大文字小文字を区別しない) - username と displayName 両方をチェック
         const exists = Object.values(data.players).some(
-          (p) => p.username?.toLowerCase() === trimmedUsername.toLowerCase(),
+          (p) =>
+            p.username?.toLowerCase() === trimmedUsername.toLowerCase() ||
+            p.displayName?.toLowerCase() === trimmedUsername.toLowerCase(),
         );
         if (exists) {
           throw new Error("このユーザー名は既に使用されています");
@@ -3193,7 +3204,9 @@ app.post("/api/auth/login", async (req, res) => {
 
     const playersWrapper = loadJSON(PLAYERS_PATH, { players: {} });
     const playerEntry = Object.entries(playersWrapper.players).find(
-      ([, p]) => p.username?.toLowerCase() === username.trim().toLowerCase(),
+      ([, p]) =>
+        (p.displayName || p.username)?.toLowerCase() ===
+        username.trim().toLowerCase(),
     );
 
     if (!playerEntry) {
@@ -3303,7 +3316,10 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
 
     // 庭園モードなら認証情報を付与
     if (isGardenMode && responseData.player) {
-      const authKey = generateGardenAuthKey(req, responseData.player.username);
+      const authKey = generateGardenAuthKey(
+        req,
+        responseData.player.displayName || responseData.player.username,
+      );
       responseData.player.gardenAuthKey = authKey;
       responseData.player.gardenIsAuthorized = getAuthStatus(authKey);
     }
@@ -4062,7 +4078,19 @@ app.post(
         if (typeof displayName === "string" && displayName.trim()) {
           const trimmed = displayName.trim();
           if (p.displayName !== trimmed) {
+            // 他のユーザーとの重複チェック
+            const exists = Object.entries(data.players).some(
+              ([pid, other]) =>
+                pid !== req.playerId &&
+                (other.username?.toLowerCase() === trimmed.toLowerCase() ||
+                  other.displayName?.toLowerCase() === trimmed.toLowerCase()),
+            );
+            if (exists) {
+              throw new Error("この名前は既に他のユーザーに使用されています");
+            }
+
             p.displayName = trimmed;
+            p.username = trimmed; // usernameも同期して統合
             nameChanged = true;
             newName = trimmed;
           }
@@ -4083,8 +4111,11 @@ app.post(
             Object.values(data).forEach((entry) => {
               if (entry.accounts && Array.isArray(entry.accounts)) {
                 entry.accounts.forEach((acc) => {
-                  if (acc.id === req.playerId && acc.username !== newName) {
-                    acc.username = newName;
+                  if (acc.id === req.playerId) {
+                    acc.displayName = newName;
+                    // 後方互換性のため古いプロパティを削除するか検討したが、
+                    // ユーザーの要望に合わせ displayName への移行とする
+                    delete acc.username;
                   }
                 });
               }
@@ -14129,3 +14160,57 @@ app.get("/map/image", (req, res) => {
       .send("マップ画像はまだ生成されていません。しばらくお待ちください。");
   }
 });
+
+// 全プレイヤーのユーザー名を表示名に強制同期 (一括マイグレーション)
+async function migratePlayerNames() {
+  try {
+    console.log("[Migration] Syncing usernames with displayNames...");
+    let changed = false;
+    await updateJSON(PLAYERS_PATH, (data) => {
+      if (!data || !data.players) return data;
+      Object.values(data.players).forEach((p) => {
+        if (p.displayName && p.username !== p.displayName) {
+          console.log(
+            `[Migration] Updating username for ${p.id}: ${p.username} -> ${p.displayName}`,
+          );
+          p.username = p.displayName;
+          changed = true;
+        }
+      });
+      return changed ? data : false;
+    });
+
+    // duplicate_ip.json のマイグレーション
+    if (fs.existsSync(DUPLICATE_IP_PATH)) {
+      const playersData = loadJSON(PLAYERS_PATH, { players: {} });
+      await updateJSON(DUPLICATE_IP_PATH, (dipData) => {
+        if (!dipData) return dipData;
+        let dipChanged = false;
+        Object.values(dipData).forEach((entry) => {
+          if (entry.accounts && Array.isArray(entry.accounts)) {
+            entry.accounts.forEach((acc) => {
+              const p = playersData.players[acc.id];
+              if (p && p.displayName) {
+                if (acc.displayName !== p.displayName || acc.username) {
+                  acc.displayName = p.displayName;
+                  delete acc.username;
+                  dipChanged = true;
+                }
+              }
+            });
+          }
+        });
+        return dipChanged ? dipData : false;
+      }).catch((e) =>
+        console.error("[Migration] Error updating duplicate_ip.json:", e),
+      );
+    }
+
+    if (changed) {
+      console.log("[Migration] Completed name synchronization.");
+    }
+  } catch (e) {
+    console.error("[Migration] Error during name sync:", e);
+  }
+}
+migratePlayerNames();
