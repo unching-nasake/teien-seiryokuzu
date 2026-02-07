@@ -380,6 +380,85 @@ if (fs.existsSync(DATA_DIR)) {
   });
 }
 
+// [OPTIMIZATION] Persistence Throttling & Buffering
+let playerSaveTimer = null;
+let factionSaveTimer = null;
+let pendingActivityLogs = [];
+let activityLogSaveTimer = null;
+const PLAYER_SAVE_INTERVAL = 30 * 1000; // 30 seconds
+const FACTION_SAVE_INTERVAL = 30 * 1000; // 30 seconds
+const LOG_SAVE_INTERVAL = 10 * 1000; // 10 seconds
+const LOG_BUFFER_THRESHOLD = 50;
+
+// プレイヤーデータの遅延保存
+function queuePlayerSave() {
+  if (playerSaveTimer) return;
+  playerSaveTimer = setTimeout(() => {
+    persistPlayerState();
+  }, PLAYER_SAVE_INTERVAL);
+}
+
+async function persistPlayerState() {
+  if (playerSaveTimer) {
+    clearTimeout(playerSaveTimer);
+    playerSaveTimer = null;
+  }
+  const playersEntry = FILE_CACHE.get(PLAYERS_PATH);
+  if (playersEntry && playersEntry.data) {
+    await saveJSON(PLAYERS_PATH, playersEntry.data);
+    console.log("[IO] Persisted players.json (Throttled)");
+  }
+}
+
+// 勢力データの遅延保存
+function queueFactionSave() {
+  if (factionSaveTimer) return;
+  factionSaveTimer = setTimeout(() => {
+    persistFactionState();
+  }, FACTION_SAVE_INTERVAL);
+}
+
+async function persistFactionState() {
+  if (factionSaveTimer) {
+    clearTimeout(factionSaveTimer);
+    factionSaveTimer = null;
+  }
+  const factionsEntry = FILE_CACHE.get(FACTIONS_PATH);
+  if (factionsEntry && factionsEntry.data) {
+    await saveJSON(FACTIONS_PATH, factionsEntry.data);
+    console.log("[IO] Persisted factions.json (Throttled)");
+  }
+}
+
+// アクティビティログの遅延保存
+async function persistActivityLogs() {
+  if (activityLogSaveTimer) {
+    clearTimeout(activityLogSaveTimer);
+    activityLogSaveTimer = null;
+  }
+  if (pendingActivityLogs.length === 0) return;
+
+  const logsToPersist = [...pendingActivityLogs];
+  pendingActivityLogs = [];
+
+  let log = loadJSON(ACTIVITY_LOG_PATH, { entries: [] });
+  if (!log || typeof log !== "object") log = { entries: [] };
+  if (!Array.isArray(log.entries)) log.entries = [];
+
+  // 前方に挿入 (新しいものが先)
+  // pendingActivityLogs は push されているので [oldest, ..., newest]
+  // ここでは新しい順に prepend したいので reverse するか、slice して unshift する
+  log.entries.unshift(...logsToPersist.reverse());
+  if (log.entries.length > 10000) {
+    log.entries = log.entries.slice(0, 10000);
+  }
+
+  await saveJSON(ACTIVITY_LOG_PATH, log);
+  console.log(
+    `[IO] Persisted activity_log.json (${logsToPersist.length} entries buffered)`,
+  );
+}
+
 // メモリ更新 & ディスク保存 (非同期Worker版 - 非ブロッキング順序保証)
 async function saveJSON(filePath, data, options = {}) {
   if (!filePath) {
@@ -2237,8 +2316,6 @@ function toShortId(pid) {
 
 // アクティビティログ記録
 function logActivity(type, data = {}) {
-  let log = loadJSON(ACTIVITY_LOG_PATH, { entries: [] });
-
   // dataが文字列の場合はメッセージとして扱う
   if (typeof data === "string") {
     data = { message: data };
@@ -2258,22 +2335,23 @@ function logActivity(type, data = {}) {
     data,
     timestamp: new Date().toISOString(),
   };
-  // [FIX] ログデータが破損している場合のガード処理
-  if (!log || typeof log !== "object") {
-    log = { entries: [] };
-  }
-  if (!Array.isArray(log.entries)) {
-    log.entries = [];
+
+  // バッファに追加
+  pendingActivityLogs.push(entry);
+
+  // タイマー設定 (まだなければ)
+  if (!activityLogSaveTimer) {
+    activityLogSaveTimer = setTimeout(() => {
+      persistActivityLogs();
+    }, LOG_SAVE_INTERVAL);
   }
 
-  log.entries.unshift(entry); // 最新を先頭に
-  // 最大10000件まで保持 (ユーザー要望により拡張)
-  if (log.entries.length > 10000) {
-    log.entries = log.entries.slice(0, 10000);
+  // しきい値を超えたら即時保存（非同期）
+  if (pendingActivityLogs.length >= LOG_BUFFER_THRESHOLD) {
+    persistActivityLogs();
   }
-  saveJSON(ACTIVITY_LOG_PATH, log);
+
   // Socketでリアルタイム配信
-  // io.emit("activity:new", entry);
   batchEmitActivityLog(entry);
 }
 
@@ -2538,7 +2616,7 @@ function handleApRefill(player, players, playerId, saveToDisk = true) {
             }
 
             faction.lastSharedApRefill = checkTimeMs;
-            saveJSON(FACTIONS_PATH, factionsData);
+            queueFactionSave();
           }
         }
       }
@@ -2569,7 +2647,7 @@ function handleApRefill(player, players, playerId, saveToDisk = true) {
     refilledAmount = player.ap - oldAp;
 
     player.lastApAutoUpdate = lastSuccessTime;
-    if (saveToDisk) saveJSON(PLAYERS_PATH, players);
+    if (saveToDisk) queuePlayerSave();
 
     console.log(
       `[AP Refill Final] Player: ${playerId}, TotalAdd: ${totalRefilled}, NewAP: ${player.ap}/${indLimit}`,
@@ -2581,7 +2659,7 @@ function handleApRefill(player, players, playerId, saveToDisk = true) {
         `[AP Cap] Player: ${playerId} AP capped from ${player.ap} to ${indLimit}`,
       );
       player.ap = indLimit;
-      if (saveToDisk) saveJSON(PLAYERS_PATH, players);
+      if (saveToDisk) queuePlayerSave();
     }
 
     if (!player.lastApAutoUpdate) {
@@ -2591,7 +2669,7 @@ function handleApRefill(player, players, playerId, saveToDisk = true) {
       const flooredMin = Math.floor(min / 10) * 10;
       initialMark.setMinutes(flooredMin, 0, 0);
       player.lastApAutoUpdate = initialMark.getTime();
-      if (saveToDisk) saveJSON(PLAYERS_PATH, players);
+      if (saveToDisk) queuePlayerSave();
     }
   }
 
@@ -2607,7 +2685,7 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
   if (!f.kingId || !f.members.includes(f.kingId)) {
     if (f.members && f.members.length > 0) {
       f.kingId = f.members[0];
-      saveJSON(FACTIONS_PATH, factions);
+      queueFactionSave();
     } else {
       f.kingId = null;
     }
@@ -2629,7 +2707,7 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
 
   if (memberListChanged) {
     console.log(`[AutoRepair] Removed invalid members from faction ${fid}`);
-    saveJSON(FACTIONS_PATH, factions);
+    queueFactionSave();
   }
 
   let factionTileCount = 0;
@@ -5175,8 +5253,8 @@ app.post(
         // 3. 旧勢力の削除
         cleanupDestroyedFaction(requesterFactionId);
         delete factions.factions[requesterFactionId];
-        saveJSON(FACTIONS_PATH, factions);
-        saveJSON(PLAYERS_PATH, players);
+        queueFactionSave();
+        queuePlayerSave();
 
         // 4. ログ
         logActivity("faction_merged", {
@@ -5234,7 +5312,7 @@ app.post(
             // ただし existing code 3757 で faction:updated emit しているが saveJSON(FACTIONS_PATH) が見当たらない。
             // line 3539 で loadJSON しているが、更新があるなら saveJSON 必要。
             // reject時はしていないかもしれない。ここで保存する。
-            saveJSON(FACTIONS_PATH, factions);
+            queueFactionSave();
           }
         }
       }
@@ -5346,9 +5424,9 @@ app.post(
           .json({ error: `APが足りません (必要: ${MESSAGE_COST}AP)` });
       }
 
-      saveJSON(PLAYERS_PATH, players);
+      queuePlayerSave();
       if (apConsumeResult.usedSharedAp > 0) {
-        saveJSON(FACTIONS_PATH, factions);
+        queueFactionSave();
         io.emit("faction:updated", {
           factionId: myFaction.id,
           faction: getEnrichedFaction(myFaction.id, factions, players),
@@ -6817,8 +6895,8 @@ app.post(
       }
 
       if (destroyedFactions.length > 0) {
-        saveJSON(FACTIONS_PATH, factions);
-        saveJSON(PLAYERS_PATH, players);
+        queueFactionSave();
+        queuePlayerSave();
         if (allianceUpdated) {
           saveJSON(ALLIANCES_PATH, alliancesData);
         }
@@ -6961,9 +7039,9 @@ app.post(
 
       // (AP消費は処理の冒頭に移動しました)
       // Save changes (Player AP and Faction Shared AP)
-      saveJSON(PLAYERS_PATH, players);
+      queuePlayerSave();
       if (faction && resultApConsumption?.usedSharedAp > 0) {
-        saveJSON(FACTIONS_PATH, factions);
+        queueFactionSave();
         io.emit("faction:updated", {
           factionId: faction.id,
           faction: getEnrichedFaction(faction.id, factions, players),
@@ -14091,12 +14169,37 @@ function saveAllGameData() {
 async function gracefulShutdown(signal) {
   console.log(`\n[Shutdown] ${signal} received. Saving all pending data...`);
 
-  // [OPTIMIZATION] 未保存のマップ変更を強制保存
+  // [OPTIMIZATION] 未保存の全ての変更を強制保存
+  const promises = [];
+
   if (pendingChanges.size > 0) {
     console.log(
       `[Shutdown] Saving ${pendingChanges.size} pending map changes...`,
     );
-    await persistMapState();
+    promises.push(persistMapState());
+  }
+
+  if (playerSaveTimer || FILE_CACHE.has(PLAYERS_PATH)) {
+    console.log("[Shutdown] Saving pending player changes...");
+    promises.push(persistPlayerState());
+  }
+
+  if (factionSaveTimer || FILE_CACHE.has(FACTIONS_PATH)) {
+    console.log("[Shutdown] Saving pending faction changes...");
+    promises.push(persistFactionState());
+  }
+
+  if (pendingActivityLogs.length > 0 || activityLogSaveTimer) {
+    console.log(
+      `[Shutdown] Saving ${pendingActivityLogs.length} pending activity logs...`,
+    );
+    promises.push(persistActivityLogs());
+  }
+
+  try {
+    await Promise.all(promises);
+  } catch (err) {
+    console.error("[Shutdown] Error saving pending data:", err);
   }
 
   saveAllGameData();
