@@ -760,6 +760,8 @@ app.post("/api/admin/login", async (req, res) => {
   const settings = loadJSON(SYSTEM_SETTINGS_PATH, { adminPassword: null });
 
   if (!(await verifyAdminPassword(password, settings))) {
+    // 簡易的なブルートフォース対策として遅延を入れる
+    await new Promise((resolve) => setTimeout(resolve, 1000));
     return res.status(401).json({ error: "パスワードが違います" });
   }
 
@@ -859,9 +861,7 @@ app.post(
       res.json({ success: true, message: "データをリセットしました" });
     } catch (e) {
       console.error("[Reset] Error:", e);
-      res
-        .status(500)
-        .json({ error: "リセット中にエラーが発生しました: " + e.message });
+      res.status(500).json({ error: "リセット中にエラーが発生しました" });
     }
   },
 );
@@ -875,7 +875,7 @@ app.get("/api/admin/debug/memory", authenticate, (req, res) => {
   });
 });
 
-app.get("/api/admin/settings", (req, res) => {
+app.get("/api/admin/settings", requireAdminAuth, (req, res) => {
   const settings = loadJSON(SYSTEM_SETTINGS_PATH, { isGameStopped: false });
   let adminId = "";
   if (fs.existsSync(ADMIN_ID_PATH)) {
@@ -3031,7 +3031,7 @@ app.post("/api/admin/notices/delete", requireAdminAuth, async (req, res) => {
 });
 
 // 管理者パスワード変更API
-app.post("/api/admin/change-password", async (req, res) => {
+app.post("/api/admin/change-password", requireAdminAuth, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
     const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
