@@ -1344,7 +1344,7 @@ function GameMap({
         let step = 0.25;
         if (currentZoom < 0.2) {
             step = 0.01;
-        } else if (currentZoom < 1.0) {
+        } else if (currentZoom < 0.5) {
             step = 0.05;
         }
 
