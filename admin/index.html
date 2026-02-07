@@ -8,7 +8,7 @@
   </head>
   <body>
     <!-- ログインモーダル -->
-    <div id="loginModal" style="display: none">
+    <div id="loginModal">
       <form
         class="modal-content"
         onsubmit="
@@ -27,23 +27,12 @@
       </form>
     </div>
 
-    <div class="container" id="adminPanel" style="display: none">
+    <div class="container" id="adminPanel">
       <h1>勢力図ゲーム管理画面</h1>
 
       <!-- ゲームステータスカード -->
-      <div
-        id="statusCard"
-        class="status-card"
-        style="flex-direction: column; align-items: stretch; gap: 15px"
-      >
-        <div
-          style="
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            width: 100%;
-          "
-        >
+      <div id="statusCard" class="status-card">
+        <div class="status-card-header">
           <div class="status-info">
             <span id="statusIcon">🟢</span>
             <span id="statusText">現在: 稼働中</span>
@@ -54,72 +43,19 @@
         </div>
 
         <!-- [NEW] スケジュール機能 -->
-        <div
-          id="scheduleSection"
-          style="
-            background: rgba(0, 0, 0, 0.05);
-            padding: 12px;
-            border-radius: 6px;
-            border: 1px dashed rgba(0, 0, 0, 0.1);
-          "
-        >
-          <div
-            style="
-              font-size: 0.9rem;
-              margin-bottom: 8px;
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-            "
-          >
+        <div id="scheduleSection">
+          <div class="schedule-info">
             <span>⏰ 予約実行</span>
-            <span id="scheduleStatus" style="font-weight: normal; color: #444"
-              >未設定</span
-            >
+            <span id="scheduleStatus">未設定</span>
           </div>
-          <div
-            id="scheduleControls"
-            style="display: flex; gap: 8px; align-items: center"
-          >
-            <input
-              type="datetime-local"
-              id="scheduleTime"
-              style="
-                flex: 1;
-                padding: 6px;
-                border-radius: 4px;
-                border: 1px solid #ccc;
-              "
-            />
-            <button
-              id="scheduleBtn"
-              class="btn"
-              style="
-                padding: 6px 12px;
-                font-size: 0.85rem;
-                background: #007bff;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-              "
-              onclick="setSchedule()"
-            >
+          <div id="scheduleControls">
+            <input type="datetime-local" id="scheduleTime" />
+            <button id="scheduleBtn" class="btn" onclick="setSchedule()">
               予約する
             </button>
             <button
               id="cancelScheduleBtn"
               class="btn"
-              style="
-                padding: 6px 12px;
-                font-size: 0.85rem;
-                background: #dc3545;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-                display: none;
-              "
               onclick="cancelSchedule()"
             >
               取消
@@ -133,33 +69,25 @@
         <button class="tab-btn active" onclick="switchTab('settings')">
           ゲーム設定
         </button>
-        <button class="tab-btn" onclick="switchTab('notices')">
-          お知らせ管理
-        </button>
+        <button class="tab-btn" onclick="switchTab('notices')">お知らせ</button>
         <button class="tab-btn" onclick="switchTab('security')">
-          セキュリティ設定
+          セキュリティ
         </button>
-        <button class="tab-btn" onclick="switchTab('accounts')">
-          アカウント設定
-        </button>
-        <button class="tab-btn" onclick="switchTab('others')">その他</button>
+        <button class="tab-btn" onclick="switchTab('data')">データ</button>
       </div>
 
       <!-- 全般設定タブ -->
       <div id="settingsTab" class="tab-content active">
         <div class="section">
           <h3>🌷 庭園モード</h3>
-          <div
-            class="setting-item"
-            style="flex-direction: row; align-items: center; gap: 10px"
-          >
+          <div class="setting-item setting-item-row">
             <input
               type="checkbox"
               id="gardenMode"
+              class="checkbox-large"
               onchange="toggleApPostSettings()"
-              style="width: 20px; height: 20px; cursor: pointer"
             />
-            <label for="gardenMode" style="cursor: pointer"
+            <label for="gardenMode" class="cursor-pointer"
               >庭園モードを有効にする (掲示板連携機能)</label
             >
           </div>
@@ -167,18 +95,25 @@
 
         <div class="section">
           <h3>⚡ AP設定 (毎時05分付与)</h3>
-          <div class="setting-group">
-            <div class="setting-item">
-              <label>初期AP (新規登録時)</label>
-              <input type="number" id="initialAp" min="0" />
-            </div>
-            <div class="setting-item">
-              <label>個人AP上限</label>
-              <input type="number" id="indLimit" min="0" />
-            </div>
-          </div>
-
           <div id="gardenApSettings">
+            <div class="setting-group">
+              <div class="setting-item">
+                <label>初期AP (新規登録時)</label>
+                <input type="number" id="initialAp" min="0" />
+              </div>
+            </div>
+
+            <div class="setting-group">
+              <div class="setting-item">
+                <label>個人AP上限</label>
+                <input type="number" id="indLimit" min="0" />
+              </div>
+              <div class="setting-item">
+                <label>共有AP上限係数 (xアクティブ人数)</label>
+                <input type="number" id="sharedBase" min="0" />
+              </div>
+            </div>
+
             <div class="setting-group">
               <div class="setting-item">
                 <label>1投稿あたりのAP</label>
@@ -189,7 +124,27 @@
                 <input type="number" id="maxApFromPosts" min="0" />
               </div>
             </div>
-            <div class="setting-group" style="margin-bottom: 15px">
+
+            <div class="setting-group">
+              <div class="setting-item">
+                <label>ランダム補充 (最小〜最大)</label>
+                <div class="flex-row-center-gap">
+                  <input type="number" id="randomMin" class="w-45" />
+                  <span>〜</span>
+                  <input type="number" id="randomMax" class="w-45" />
+                </div>
+              </div>
+              <div class="setting-item">
+                <label>弱小勢力ボーナス (最小〜最大)</label>
+                <div class="flex-row-center-gap">
+                  <input type="number" id="bonusMin" class="w-45" />
+                  <span>〜</span>
+                  <input type="number" id="bonusMax" class="w-45" />
+                </div>
+              </div>
+            </div>
+
+            <div class="setting-group">
               <div class="setting-item">
                 <label>庭園🌷AP回復コスト(共有AP)</label>
                 <input type="number" id="gardenRefillCost" min="0" />
@@ -198,43 +153,19 @@
                 <label>庭園🌷AP回復量(共有AP)</label>
                 <input type="number" id="gardenRefillAmount" min="0" />
               </div>
-            </div>
-            <div class="setting-item" style="margin-bottom: 15px">
-              <label>チューリップ回復インターバル (時間)</label>
-              <input
-                type="number"
-                id="tulipRefillIntervalHours"
-                min="0"
-                step="0.5"
-              />
-              <small style="color: #666"
-                >※0に設定すると冷却時間なしで連続回復が可能になります。</small
-              >
-            </div>
-          </div>
-
-          <div class="setting-group">
-            <div class="setting-item">
-              <label>ランダム補充 (最小〜最大)</label>
-              <div style="display: flex; align-items: center; gap: 5px">
-                <input type="number" id="randomMin" style="width: 45%" />
-                <span>〜</span>
-                <input type="number" id="randomMax" style="width: 45%" />
+              <div class="setting-item">
+                <label>🌷AP回復間隔 (時間)</label>
+                <input
+                  type="number"
+                  id="tulipRefillIntervalHours"
+                  min="0"
+                  step="0.5"
+                />
+                <small class="help-text"
+                  >※0に設定すると制限時間なしで連続回復が可能になります。</small
+                >
               </div>
             </div>
-            <div class="setting-item">
-              <label>弱小勢力ボーナス (最小〜最大)</label>
-              <div style="display: flex; align-items: center; gap: 5px">
-                <input type="number" id="bonusMin" style="width: 45%" />
-                <span>〜</span>
-                <input type="number" id="bonusMax" style="width: 45%" />
-              </div>
-            </div>
-          </div>
-
-          <div class="setting-item">
-            <label>共有AP上限係数 (xアクティブ人数)</label>
-            <input type="number" id="sharedBase" min="0" />
           </div>
         </div>
 
@@ -255,35 +186,34 @@
               />
             </div>
           </div>
-          <p style="font-size: 0.8rem; color: #999; margin-top: 5px">
+          <p class="setting-note">
             ※インターバルを0にすると連続建設が可能になります。
           </p>
         </div>
 
         <div class="section">
           <h3>✉️ メッセージ送信設定</h3>
-          <div class="setting-item">
-            <label>メッセージ送信コスト (AP)</label>
-            <input type="number" id="messageCost" min="0" />
+          <div class="setting-group">
+            <div class="setting-item">
+              <label>メッセージ送信コスト (AP)</label>
+              <input type="number" id="messageCost" min="0" />
+            </div>
           </div>
         </div>
 
         <div class="section">
           <h3>😴 休憩時間設定</h3>
-          <div
-            class="setting-item"
-            style="flex-direction: row; align-items: center; gap: 10px"
-          >
+          <div class="setting-item setting-item-row">
             <input
               type="checkbox"
               id="breakTimeEnabled"
-              style="width: 20px; height: 20px; cursor: pointer"
+              class="checkbox-large"
             />
-            <label for="breakTimeEnabled" style="cursor: pointer"
+            <label for="breakTimeEnabled" class="cursor-pointer"
               >休憩時間を有効にする（この間は攻撃行為ができません）</label
             >
           </div>
-          <div class="setting-group" style="margin-top: 10px">
+          <div class="setting-group mt-10">
             <div class="setting-item">
               <label>開始時間</label>
               <input type="time" id="breakStartTime" value="01:00" />
@@ -305,17 +235,17 @@
         <div class="section">
           <h3>現在のお知らせ</h3>
           <div id="noticeList" class="notice-list">
-            <p style="text-align: center; color: #999">読み込み中...</p>
+            <p class="list-empty">読み込み中...</p>
           </div>
         </div>
 
         <div class="section">
           <h3>お知らせを追加</h3>
-          <div class="setting-item" style="margin-bottom: 10px">
+          <div class="setting-item mb-10">
             <label>タイトル</label>
             <input type="text" id="noticeTitle" placeholder="重要なお知らせ" />
           </div>
-          <div class="setting-item" style="margin-bottom: 15px">
+          <div class="setting-item mb-15">
             <label>本文</label>
             <textarea
               id="noticeContent"
@@ -323,11 +253,7 @@
               placeholder="内容を入力してください..."
             ></textarea>
           </div>
-          <button
-            class="save-btn"
-            style="background-color: var(--primary-color)"
-            onclick="addNotice()"
-          >
+          <button class="save-btn bg-primary" onclick="addNotice()">
             📢 お知らせを投稿
           </button>
         </div>
@@ -343,7 +269,7 @@
           "
         >
           <h3>🔐 管理者パスワード変更</h3>
-          <div class="setting-item" style="margin-bottom: 15px">
+          <div class="setting-item mb-15">
             <label>現在のパスワード</label>
             <input
               type="password"
@@ -374,45 +300,42 @@
           </div>
           <button type="submit" class="save-btn">パスワードを更新する</button>
         </form>
-      </div>
 
-      <!-- アカウント設定タブ -->
-      <div id="accountsTab" class="tab-content">
         <div class="section">
           <h3>👥 アカウント作成制限 (IPベース)</h3>
           <div class="setting-item">
             <label>同一IPでのアカウント作成上限</label>
             <input type="number" id="maxAccountsPerIp" min="1" value="2" />
-            <small style="color: #666"
+            <small class="help-text"
               >1つのIPアドレスから作成可能なアカウントの最大数です（デフォルト:
               2）。</small
             >
           </div>
-          <div class="setting-item" style="margin-top: 15px">
+          <div class="setting-item mt-15">
             <label>制限から除外するIPリスト (改行区切り)</label>
             <textarea
               id="excludedIps"
               rows="5"
               placeholder="127.0.0.1&#10;192.168.1.1"
             ></textarea>
-            <small style="color: #666"
+            <small class="help-text"
               >管理者や特定の環境など、制限を適用したくないIPアドレスを入力してください。</small
             >
           </div>
         </div>
         <button class="save-btn" onclick="updateSettings()">
-          アカウント設定を保存する
+          設定を保存する
         </button>
       </div>
 
-      <!-- その他タブ -->
-      <div id="othersTab" class="tab-content">
+      <!-- データタブ -->
+      <div id="dataTab" class="tab-content">
         <div class="section">
           <h3>🖼️ マップ画像設定</h3>
           <div class="setting-item">
             <label>保存間隔（分）</label>
             <input type="number" id="mapImageInterval" min="1" max="60" />
-            <small style="color: #666"
+            <small class="help-text"
               >全体マップ画像を生成・上書き保存する間隔です。</small
             >
           </div>
@@ -423,7 +346,7 @@
           <div class="setting-item">
             <label>ホスト ID</label>
             <input type="text" id="adminId" placeholder="ホスト IDを入力" />
-            <small style="color: #666">🌷の送付先</small>
+            <small class="help-text">🌷の送付先</small>
           </div>
         </div>
 
@@ -432,10 +355,10 @@
         </button>
 
         <!-- 危険な操作 -->
-        <details class="danger-zone" style="margin-top: 20px">
+        <details class="danger-zone mt-20">
           <summary>Danger Zone</summary>
           <div class="danger-content">
-            <p style="font-size: 0.85rem; color: #666; margin-bottom: 15px">
+            <p class="danger-desc">
               全てのプレイヤー、勢力、マップデータを完全に削除します。この操作は取り消せません。
             </p>
             <button class="reset-btn" onclick="resetData()">
@@ -448,595 +371,6 @@
       <div id="feedback"></div>
     </div>
 
-    <script>
-      let isGameStopped = false;
-
-      // Admin認証チェック
-      async function checkAdminAuth() {
-        try {
-          const res = await fetch("/api/admin/check-auth", {
-            credentials: "include",
-          });
-          if (res.ok) {
-            // 認証済み - Admin画面を表示
-            document.getElementById("adminPanel").style.display = "block";
-            document.getElementById("loginModal").style.display = "none";
-            await fetchSettings();
-          } else {
-            // 未認証 - ログインモーダルを表示
-            document.getElementById("loginModal").style.display = "flex";
-            document.getElementById("adminPanel").style.display = "none";
-          }
-        } catch (e) {
-          document.getElementById("loginModal").style.display = "flex";
-          document.getElementById("adminPanel").style.display = "none";
-        }
-      }
-
-      // Adminログイン
-      async function adminLogin() {
-        const password = document.getElementById("loginPassword").value;
-        const errorEl = document.getElementById("loginError");
-
-        if (!password) {
-          errorEl.textContent = "パスワードを入力してください";
-          return;
-        }
-
-        try {
-          const res = await fetch("/api/admin/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({ password }),
-          });
-
-          const data = await res.json();
-
-          if (data.success) {
-            document.getElementById("loginPassword").value = "";
-            errorEl.textContent = "";
-            await checkAdminAuth();
-          } else {
-            errorEl.textContent = data.error || "ログインに失敗しました";
-          }
-        } catch (e) {
-          errorEl.textContent = "通信エラーが発生しました";
-        }
-      }
-
-      // ページ読み込み時に認証チェック
-      window.addEventListener("DOMContentLoaded", checkAdminAuth);
-
-      // タブ切り替え
-      function switchTab(tabName) {
-        document
-          .querySelectorAll(".tab-btn")
-          .forEach((btn) => btn.classList.remove("active"));
-        document
-          .querySelectorAll(".tab-content")
-          .forEach((content) => content.classList.remove("active"));
-
-        if (tabName === "settings") {
-          document
-            .querySelector(".tab-btn:nth-child(1)")
-            .classList.add("active");
-          document.getElementById("settingsTab").classList.add("active");
-        } else if (tabName === "notices") {
-          document
-            .querySelector(".tab-btn:nth-child(2)")
-            .classList.add("active");
-          document.getElementById("noticesTab").classList.add("active");
-          fetchNotices(); // タブ切り替え時に最新のお知らせを取得
-        } else if (tabName === "security") {
-          document
-            .querySelector(".tab-btn:nth-child(3)")
-            .classList.add("active");
-          document.getElementById("securityTab").classList.add("active");
-        } else if (tabName === "accounts") {
-          document
-            .querySelector(".tab-btn:nth-child(4)")
-            .classList.add("active");
-          document.getElementById("accountsTab").classList.add("active");
-        } else if (tabName === "others") {
-          document
-            .querySelector(".tab-btn:nth-child(5)")
-            .classList.add("active");
-          document.getElementById("othersTab").classList.add("active");
-        }
-      }
-
-      function updateUI(data) {
-        isGameStopped = data.isGameStopped;
-        const gardenMode = data.gardenMode;
-        const ap = data.apSettings || {};
-        const mapSettings = data.mapImageSettings || {};
-
-        // ステータスカードの更新
-        const statusIcon = document.getElementById("statusIcon");
-        const statusText = document.getElementById("statusText");
-        const toggleBtn = document.getElementById("toggleBtn");
-
-        if (isGameStopped) {
-          statusIcon.textContent = "🔴";
-          statusText.textContent = "現在: 停止中";
-          toggleBtn.textContent = "ゲームを再開する";
-        } else {
-          statusIcon.textContent = "🟢";
-          statusText.textContent = "現在: 稼働中";
-          toggleBtn.textContent = "ゲームを停止する";
-        }
-
-        // 各項目の更新
-        document.getElementById("gardenMode").checked = !!gardenMode;
-        document.getElementById("initialAp").value = ap.initialAp ?? 10;
-        document.getElementById("apPerPost").value = ap.apPerPost ?? 10;
-        document.getElementById("maxApFromPosts").value =
-          ap.maxApFromPosts ?? 10;
-        document.getElementById("randomMin").value = ap.random?.min ?? 0;
-        document.getElementById("randomMax").value = ap.random?.max ?? 10;
-        document.getElementById("bonusMin").value =
-          ap.smallFactionBonus?.min ?? 0;
-        document.getElementById("bonusMax").value =
-          ap.smallFactionBonus?.max ?? 10;
-        document.getElementById("indLimit").value = ap.limits?.individual ?? 50;
-        document.getElementById("sharedBase").value =
-          ap.limits?.sharedBase ?? 50;
-        document.getElementById("gardenRefillCost").value =
-          ap.gardenRefillCost ?? 30;
-        document.getElementById("gardenRefillAmount").value =
-          ap.gardenRefillAmount ?? 50;
-        document.getElementById("tulipRefillIntervalHours").value =
-          ap.tulipRefillIntervalHours ?? 3;
-        document.getElementById("messageCost").value = ap.messageCost ?? 5;
-        document.getElementById("mapImageInterval").value =
-          mapSettings.intervalMinutes ?? 1;
-
-        const ntSettings = data.namedTileSettings || {
-          cost: 100,
-          intervalHours: 0,
-        };
-        document.getElementById("namedTileCost").value = ntSettings.cost;
-        document.getElementById("namedTileIntervalHours").value =
-          ntSettings.intervalHours;
-
-        document.getElementById("adminId").value = data.adminId || "";
-
-        const accounts = data.accountSettings || {};
-        document.getElementById("maxAccountsPerIp").value =
-          accounts.maxAccountsPerIp ?? 2;
-        document.getElementById("excludedIps").value =
-          accounts.excludedIps || "";
-
-        // 休憩時間設定の更新
-        const breakTime = data.breakTime || {
-          enabled: false,
-          startTime: "01:00",
-          endTime: "06:00",
-        };
-        document.getElementById("breakTimeEnabled").checked =
-          !!breakTime.enabled;
-        document.getElementById("breakStartTime").value =
-          breakTime.startTime || "01:00";
-        document.getElementById("breakEndTime").value =
-          breakTime.endTime || "06:00";
-
-        // [NEW] スケジュールUIの更新
-        updateScheduleUI(data.scheduledAction);
-
-        toggleApPostSettings();
-      }
-
-      function updateScheduleUI(action) {
-        const statusEl = document.getElementById("scheduleStatus");
-        const cancelBtn = document.getElementById("cancelScheduleBtn");
-        const scheduleBtn = document.getElementById("scheduleBtn");
-        const scheduleTimeInput = document.getElementById("scheduleTime");
-
-        if (action && action.time) {
-          const date = new Date(action.time);
-          const dateStr = date.toLocaleString("ja-JP", {
-            year: "numeric",
-            month: "2-digit",
-            day: "2-digit",
-            hour: "2-digit",
-            minute: "2-digit",
-          });
-          statusEl.innerHTML = `<b style="color: #2c3e50;">${action.type === "stop" ? "🛑 停止" : "🚀 開始"}</b> (${dateStr})`;
-          cancelBtn.style.display = "block";
-          scheduleBtn.style.display = "none";
-          scheduleTimeInput.disabled = true;
-          scheduleTimeInput.value = action.time.slice(0, 16); // YYYY-MM-DDTHH:mm
-        } else {
-          statusEl.textContent = "未設定";
-          cancelBtn.style.display = "none";
-          scheduleBtn.style.display = "block";
-          scheduleTimeInput.disabled = false;
-          scheduleBtn.textContent = isGameStopped ? "開始予約" : "停止予約";
-        }
-      }
-
-      async function setSchedule() {
-        const timeValue = document.getElementById("scheduleTime").value;
-
-        if (!timeValue) {
-          showNotify("予約時間を選択してください", true);
-          return;
-        }
-
-        const scheduledTime = new Date(timeValue).getTime();
-        if (scheduledTime <= Date.now()) {
-          showNotify("未来の時間を指定してください", true);
-          return;
-        }
-
-        const type = isGameStopped ? "start" : "stop";
-        if (
-          !confirm(
-            `ゲームを ${new Date(timeValue).toLocaleString()} に${type === "stop" ? "自動停止" : "自動開始"}するように予約しますか？`,
-          )
-        )
-          return;
-
-        try {
-          const res = await fetch("/api/admin/settings", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({
-              scheduledAction: {
-                type: type,
-                time: new Date(timeValue).toISOString(),
-              },
-            }),
-          });
-          const data = await res.json();
-          if (data.error) {
-            showNotify(data.error, true);
-          } else {
-            showNotify("スケジュールを予約しました");
-            updateUI(data);
-          }
-        } catch (e) {
-          showNotify("予約に失敗しました", true);
-        }
-      }
-
-      async function cancelSchedule() {
-        if (!confirm("現在の予約スケジュールを取り消しますか？")) return;
-
-        try {
-          const res = await fetch("/api/admin/settings", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({
-              scheduledAction: { type: "cancel" },
-            }),
-          });
-          const data = await res.json();
-          if (data.error) {
-            showNotify(data.error, true);
-          } else {
-            showNotify("予約を取り消しました");
-            updateUI(data);
-          }
-        } catch (e) {
-          showNotify("取り消しに失敗しました", true);
-        }
-      }
-
-      function toggleApPostSettings() {
-        const gardenMode = document.getElementById("gardenMode").checked;
-        document.getElementById("gardenApSettings").style.display = gardenMode
-          ? "block"
-          : "none";
-      }
-
-      async function fetchSettings() {
-        try {
-          const res = await fetch("/api/admin/settings");
-          const data = await res.json();
-          if (data.error) {
-            showNotify(data.error, true);
-            return;
-          }
-          updateUI(data);
-        } catch (e) {
-          showNotify("設定の取得に失敗しました", true);
-        }
-      }
-
-      async function updateSettings() {
-        const settings = {
-          gardenMode: document.getElementById("gardenMode").checked,
-          apSettings: {
-            initialAp: parseInt(document.getElementById("initialAp").value, 10),
-            apPerPost: parseInt(document.getElementById("apPerPost").value, 10),
-            maxApFromPosts: parseInt(
-              document.getElementById("maxApFromPosts").value,
-              10,
-            ),
-            random: {
-              min: parseInt(document.getElementById("randomMin").value, 10),
-              max: parseInt(document.getElementById("randomMax").value, 10),
-            },
-            smallFactionBonus: {
-              min: parseInt(document.getElementById("bonusMin").value, 10),
-              max: parseInt(document.getElementById("bonusMax").value, 10),
-            },
-            limits: {
-              individual: parseInt(
-                document.getElementById("indLimit").value,
-                10,
-              ),
-              sharedBase: parseInt(
-                document.getElementById("sharedBase").value,
-                10,
-              ),
-            },
-            gardenRefillCost: parseInt(
-              document.getElementById("gardenRefillCost").value,
-              10,
-            ),
-            gardenRefillAmount: parseInt(
-              document.getElementById("gardenRefillAmount").value,
-              10,
-            ),
-            tulipRefillIntervalHours: parseFloat(
-              document.getElementById("tulipRefillIntervalHours").value,
-            ),
-            messageCost: parseInt(
-              document.getElementById("messageCost").value,
-              10,
-            ),
-          },
-          namedTileSettings: {
-            cost: parseInt(document.getElementById("namedTileCost").value, 10),
-            intervalHours: parseFloat(
-              document.getElementById("namedTileIntervalHours").value,
-            ),
-          },
-          mapImageSettings: {
-            intervalMinutes:
-              parseInt(document.getElementById("mapImageInterval").value, 10) ||
-              1,
-          },
-          accountSettings: {
-            maxAccountsPerIp: parseInt(
-              document.getElementById("maxAccountsPerIp").value,
-              10,
-            ),
-            excludedIps: document.getElementById("excludedIps").value.trim(),
-          },
-          breakTime: {
-            enabled: document.getElementById("breakTimeEnabled").checked,
-            startTime: document.getElementById("breakStartTime").value,
-            endTime: document.getElementById("breakEndTime").value,
-          },
-          adminId: document.getElementById("adminId").value.trim(),
-        };
-
-        try {
-          const res = await fetch("/api/admin/settings", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify(settings),
-          });
-          const data = await res.json();
-          if (data.error) {
-            showNotify(data.error, true);
-          } else {
-            showNotify("設定を保存しました");
-            updateUI(data);
-          }
-        } catch (e) {
-          showNotify("保存に失敗しました", true);
-        }
-      }
-
-      async function toggleStatus() {
-        const nextState = !isGameStopped;
-        const msg = nextState
-          ? "ゲームを停止しますか？"
-          : "ゲームを再開しますか？";
-        if (!confirm(msg)) return;
-
-        try {
-          const res = await fetch("/api/admin/settings", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({ isGameStopped: nextState }),
-          });
-          const data = await res.json();
-          if (data.error) {
-            showNotify(data.error, true);
-          } else {
-            showNotify("状態を更新しました");
-            updateUI(data);
-          }
-        } catch (e) {
-          showNotify("更新に失敗しました", true);
-        }
-      }
-
-      async function resetData() {
-        if (
-          !confirm(
-            "本当に全データをリセットしますか？\nこの操作は取り消せません。",
-          )
-        )
-          return;
-        if (!confirm("最終確認です。本当によろしいですか？")) return;
-
-        try {
-          const res = await fetch("/api/admin/reset-data", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({}),
-          });
-          const data = await res.json();
-          if (data.error) {
-            showNotify(data.error, true);
-          } else {
-            alert(data.message);
-            location.reload();
-          }
-        } catch (e) {
-          showNotify("リセットに失敗しました", true);
-        }
-      }
-
-      // お知らせ管理
-      async function fetchNotices() {
-        try {
-          const res = await fetch("/api/notices");
-          const data = await res.json();
-          const listEl = document.getElementById("noticeList");
-
-          if (!data.notices || data.notices.length === 0) {
-            listEl.innerHTML =
-              '<p style="text-align: center; color: #999;">お知らせはありません</p>';
-            return;
-          }
-
-          listEl.innerHTML = data.notices
-            .filter((n) => n.id && n.id.startsWith("sys-"))
-            .map(
-              (n) => `
-              <div class="notice-item">
-                <div class="notice-info">
-                  <h4>${escapeHtml(n.title)}</h4>
-                  <div style="font-size: 0.9rem;">${escapeHtml(n.content)}</div>
-                  <div class="notice-date">${new Date(n.date).toLocaleString()}</div>
-                </div>
-                <button class="del-notice-btn" onclick="deleteNotice('${n.id}')">削除</button>
-              </div>
-            `,
-            )
-            .join("");
-        } catch (e) {
-          console.error(e);
-        }
-      }
-
-      async function addNotice() {
-        const title = document.getElementById("noticeTitle").value.trim();
-        const content = document.getElementById("noticeContent").value.trim();
-
-        if (!title || !content) {
-          showNotify("タイトルと内容を入力してください", true);
-          return;
-        }
-
-        try {
-          const res = await fetch("/api/admin/notices", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({ title, content }),
-          });
-          const data = await res.json();
-          if (data.error) {
-            showNotify(data.error, true);
-          } else {
-            showNotify("お知らせを投稿しました");
-            document.getElementById("noticeTitle").value = "";
-            document.getElementById("noticeContent").value = "";
-            fetchNotices();
-          }
-        } catch (e) {
-          showNotify("投稿に失敗しました", true);
-        }
-      }
-
-      async function deleteNotice(id) {
-        if (!confirm("削除しますか？")) return;
-
-        try {
-          const res = await fetch("/api/admin/notices/delete", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({ id }),
-          });
-          const data = await res.json();
-          if (data.error) {
-            showNotify(data.error, true);
-          } else {
-            showNotify("削除しました");
-            fetchNotices();
-          }
-        } catch (e) {
-          showNotify("削除に失敗しました", true);
-        }
-      }
-
-      async function changePassword() {
-        const currentPassword =
-          document.getElementById("currentPassword").value;
-        const newPassword = document.getElementById("newPassword").value;
-        const confirmPassword =
-          document.getElementById("confirmPassword").value;
-
-        if (!currentPassword || !newPassword || !confirmPassword) {
-          showNotify("全ての項目を入力してください", true);
-          return;
-        }
-        if (newPassword !== confirmPassword) {
-          showNotify("新しいパスワードが一致しません", true);
-          return;
-        }
-        if (newPassword.length < 4) {
-          showNotify("パスワードは4文字以上で設定してください", true);
-          return;
-        }
-
-        try {
-          const res = await fetch("/api/admin/change-password", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ currentPassword, newPassword }),
-          });
-          const data = await res.json();
-          if (data.error) {
-            showNotify(data.error, true);
-          } else {
-            showNotify(
-              "パスワードを変更しました。新しいパスワードで操作してください",
-            );
-            document.getElementById("password").value = newPassword;
-            document.getElementById("currentPassword").value = "";
-            document.getElementById("newPassword").value = "";
-            document.getElementById("confirmPassword").value = "";
-            switchTab("settings");
-          }
-        } catch (e) {
-          showNotify("通信に失敗しました", true);
-        }
-      }
-
-      function showNotify(msg, isError = false) {
-        const el = document.getElementById("feedback");
-        el.textContent = msg;
-        el.style.display = "block";
-        el.className = isError ? "feedback-error" : "feedback-success";
-        setTimeout(() => {
-          el.style.display = "none";
-        }, 3000);
-      }
-
-      function escapeHtml(text) {
-        const div = document.createElement("div");
-        div.textContent = text;
-        return div.innerHTML;
-      }
-
-      // 初期読み込み
-      fetchSettings();
-    </script>
+    <script src="admin.js"></script>
   </body>
 </html>
