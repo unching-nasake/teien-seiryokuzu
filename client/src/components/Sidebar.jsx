@@ -1468,6 +1468,12 @@ function Sidebar({
                         🌷でAP追加
                     </button>
                 )}
+                {/* Debug info (Hidden unless URL has debug_weak) */}
+                {window.location.search.includes('debug_weak') && (
+                    <div style={{ fontSize: '0.6rem', color: '#555', marginTop: '10px', borderTop: '1px dotted #333', paddingTop: '4px' }}>
+                        DEBUG: isWeak={String(currentFaction.isWeak)}, adminId="{currentFaction.adminId}", rank={currentFaction.rank}, active={currentFaction.activeMemberCount}
+                    </div>
+                )}
             </div>
 
             {/* 勢力設定パネル (権限ベースで表示) */}

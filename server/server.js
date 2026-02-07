@@ -2452,16 +2452,20 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
   }
 
   // 総人数ではなくアクティブ人数で判定 (preCalcStats の有無に関わらず実行)
-  if (
-    isWeakFactionUnified(
-      rank,
-      activeMemberCount,
-      fid,
-      f.allianceId,
-      top3Alliances,
-    )
-  ) {
+  const isWeakResult = isWeakFactionUnified(
+    rank,
+    activeMemberCount,
+    fid,
+    f.allianceId,
+    top3Alliances,
+  );
+  if (isWeakResult) {
     isWeak = true;
+  }
+
+  // Debug log for weak faction determination (Can be removed after fix)
+  if (fid.includes("faction-")) {
+    // console.log(`[WeakCheck] fid=${fid}, rank=${rank}, active=${activeMemberCount}, allianceId=${f.allianceId}, isWeak=${isWeak}, adminId=${adminId}`);
   }
 
   // [NEW] 共有AP上限の付与

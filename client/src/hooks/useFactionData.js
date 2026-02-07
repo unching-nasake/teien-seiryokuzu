@@ -23,7 +23,7 @@ const useFactionData = (playerData) => {
     try {
       const res = await fetch("/api/factions");
       const data = await res.json();
-      if (data.success) setFactions(data.factions || {});
+      if (data.factions) setFactions(data.factions || {});
     } catch (e) {
       console.error("Failed to fetch factions", e);
     }
