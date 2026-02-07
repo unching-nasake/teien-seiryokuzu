@@ -1899,20 +1899,76 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
         ctx.fillText(displayName, centerX, centerY);
       });
     } else {
-      // 勢力名ラベルを描画（faction_fullモード）
+      // 勢力名ラベルを描画（faction_fullモード）- 重なり回避付き
       console.log(
         `[FullMapImage] Drawing faction labels, ${Object.keys(factionCenters).length} factions found`,
       );
-      Object.entries(factionCenters).forEach(([fid, center]) => {
-        if (center.count < 1) return; // 最小タイル数を1に変更
 
+      // 配置済みラベルの矩形リスト（衝突検出用）
+      const placedLabels = [];
+
+      // ラベル矩形の衝突判定
+      function isOverlapping(rect1, rect2) {
+        return !(
+          rect1.right < rect2.left ||
+          rect1.left > rect2.right ||
+          rect1.bottom < rect2.top ||
+          rect1.top > rect2.bottom
+        );
+      }
+
+      // 衝突を回避するための位置調整
+      function findNonOverlappingPosition(x, y, width, height, placed) {
+        const offsets = [
+          { dx: 0, dy: 0 },
+          { dx: 0, dy: -height * 1.2 },
+          { dx: 0, dy: height * 1.2 },
+          { dx: width * 0.6, dy: 0 },
+          { dx: -width * 0.6, dy: 0 },
+          { dx: width * 0.5, dy: -height * 0.8 },
+          { dx: -width * 0.5, dy: -height * 0.8 },
+          { dx: width * 0.5, dy: height * 0.8 },
+          { dx: -width * 0.5, dy: height * 0.8 },
+        ];
+
+        for (const offset of offsets) {
+          const testX = x + offset.dx;
+          const testY = y + offset.dy;
+          const testRect = {
+            left: testX - width / 2,
+            right: testX + width / 2,
+            top: testY - height / 2,
+            bottom: testY + height / 2,
+          };
+
+          let hasCollision = false;
+          for (const p of placed) {
+            if (isOverlapping(testRect, p)) {
+              hasCollision = true;
+              break;
+            }
+          }
+
+          if (!hasCollision) {
+            return { x: testX, y: testY };
+          }
+        }
+        return { x, y };
+      }
+
+      // タイル数の多い順にソート（大きな勢力を優先配置）
+      const sortedFactions = Object.entries(factionCenters)
+        .filter(([fid, center]) => center.count >= 1 && factions[fid])
+        .sort((a, b) => b[1].count - a[1].count);
+
+      sortedFactions.forEach(([fid, center]) => {
         const faction = factions[fid];
-        if (!faction) return;
 
-        const centerX = curPaddingX + (center.sumX / center.count) * TILE_SIZE;
-        const centerY = curPaddingY + (center.sumY / center.count) * TILE_SIZE;
+        const baseCenterX =
+          curPaddingX + (center.sumX / center.count) * TILE_SIZE;
+        const baseCenterY =
+          curPaddingY + (center.sumY / center.count) * TILE_SIZE;
 
-        // フォントサイズをタイル数に応じて調整（最小8, 最大24）
         const fontSize = Math.min(
           24,
           Math.max(8, Math.floor(Math.sqrt(center.count) * 2)),
@@ -1920,6 +1976,25 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
         ctx.font = `bold ${fontSize}px NotoSansJP, NotoEmoji, sans-serif`;
 
         const displayName = removeEmoji(faction.name);
+        const textMetrics = ctx.measureText(displayName);
+        const textWidth = textMetrics.width;
+        const textHeight = fontSize;
+
+        const { x: centerX, y: centerY } = findNonOverlappingPosition(
+          baseCenterX,
+          baseCenterY,
+          textWidth,
+          textHeight,
+          placedLabels,
+        );
+
+        placedLabels.push({
+          left: centerX - textWidth / 2,
+          right: centerX + textWidth / 2,
+          top: centerY - textHeight / 2,
+          bottom: centerY + textHeight / 2,
+        });
+
         ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
         ctx.fillText(displayName, centerX + 1, centerY + 1);
         ctx.fillStyle = "#ffffff";
