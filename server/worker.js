@@ -600,6 +600,9 @@ parentPort.on("message", async (msg) => {
           ? loadJSON(filePaths.factions, { factions: {} }, true)
           : { factions: {} });
       if (!factions.factions) factions.factions = {};
+      const namedCells =
+        data.namedCells ||
+        (filePaths?.namedCells ? loadJSON(filePaths.namedCells, {}, true) : {});
 
       const nowMs = Date.now();
       const factionStats = {};
@@ -629,7 +632,7 @@ parentPort.on("message", async (msg) => {
       const factionsToCalc = new Set(affectedFactionIds);
       factionsToCalc.forEach((fid) => {
         if (factions.factions[fid]) {
-          pointUpdates[fid] = calculateFactionPoints(fid, mapState);
+          pointUpdates[fid] = calculateFactionPoints(fid, mapState, namedCells);
         }
       });
 

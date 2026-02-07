@@ -199,13 +199,13 @@ module.exports = {
   calculateFactionPoints,
 };
 
-function calculateFactionPoints(factionId, mapState) {
+function calculateFactionPoints(factionId, mapState, namedCells = null) {
   let territoryPoints = 0;
   for (const key in mapState.tiles) {
     const tile = mapState.tiles[key];
     if ((tile.factionId || tile.faction) === factionId) {
       const [x, y] = key.split("_").map(Number);
-      territoryPoints += getTilePoints(x, y);
+      territoryPoints += getTilePoints(x, y, namedCells);
     }
   }
   return territoryPoints;

@@ -1616,7 +1616,7 @@ function GameMap({
             }}
           >
             <div>座標: ({hoverTile.x}, {hoverTile.y})</div>
-            <div>ポイント: {getTilePoints(hoverTile.x, hoverTile.y)}pt</div>
+            <div>ポイント: {getTilePoints(hoverTile.x, hoverTile.y, namedCells)}pt</div>
             {factionName && <div>勢力: {factionName}</div>}
             {painterName && <div>塗った人: {painterName}</div>}
            </div>
@@ -1661,7 +1661,7 @@ function GameMap({
           >
             <div className="popup-inner">
               <div className="popup-coords">座標: ({tilePopup.x}, {tilePopup.y})</div>
-              <div className="popup-detail highlight-points">ポイント: {getTilePoints(tilePopup.x, tilePopup.y)}pt</div>
+              <div className="popup-detail highlight-points">ポイント: {getTilePoints(tilePopup.x, tilePopup.y, namedCells)}pt</div>
               {tilePopup.factionName && (
                 <div
                   className="popup-detail clickable-faction"
