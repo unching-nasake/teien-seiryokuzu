@@ -214,11 +214,32 @@ function GameMap({
   }, [baseCanvasRef.current, isSupported, initCanvas]); // 依存配列にbaseCanvasRef.currentを含める
 
   // [NEW] リサイズ同期 (Worker)
+  // [NEW] リサイズ同期 (Worker)
   useEffect(() => {
       if (useOffscreenCanvas && workerReady) {
           resizeWorker(canvasDimensions.width, canvasDimensions.height);
+
+          // [FIX] リサイズ後に即座に再描画してズレを防ぐ
+          // viewport は頻繁に変わるため依存配列には入れず、Refから最新値を取得して使う
+          const currentViewport = viewportRef.current;
+
+          renderTiles({
+              viewport: currentViewport,
+              width: canvasDimensions.width,
+              height: canvasDimensions.height
+          });
+
+          // [FIX] リサイズ直後のタイミング問題対策として遅延再描画も行う
+          const timer = setTimeout(() => {
+            renderTiles({
+                viewport: viewportRef.current, // ここでも最新のRefを使う
+                width: canvasDimensions.width,
+                height: canvasDimensions.height
+            });
+          }, 100);
+          return () => clearTimeout(timer);
       }
-  }, [canvasDimensions, useOffscreenCanvas, workerReady, resizeWorker]);
+  }, [canvasDimensions, useOffscreenCanvas, workerReady, resizeWorker, renderTiles]); // viewport を削除
 
   // [Stateful Worker] データ同期 (Tiles)
   useEffect(() => {
