@@ -13265,7 +13265,13 @@ async function updateRankingCache() {
           top3Alliances,
         );
 
-        updates.push({ id, rank, isWeak });
+        const rankData = cachedFactionRanks.find((r) => r.id === id);
+        updates.push({
+          id,
+          rank,
+          isWeak,
+          points: rankData ? rankData.points : 0,
+        });
       });
 
       if (updates.length > 0) {

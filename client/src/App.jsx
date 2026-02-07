@@ -1004,10 +1004,10 @@ function App() {
       setFactions(prev => {
         const next = { ...prev };
         let changed = false;
-        updates.forEach(({ id, rank, isWeak }) => {
+        updates.forEach(({ id, rank, isWeak, points }) => {
           if (next[id]) {
-            if (next[id].rank !== rank || next[id].isWeak !== isWeak) {
-              next[id] = { ...next[id], rank, isWeak };
+            if (next[id].rank !== rank || next[id].isWeak !== isWeak || next[id].totalPoints !== points) {
+              next[id] = { ...next[id], rank, isWeak, totalPoints: points };
               changed = true;
             }
           }
@@ -1017,6 +1017,16 @@ function App() {
           return next;
         }
         return prev;
+      });
+    });
+
+    socket.on('faction:pointsUpdated', ({ factionId, points, rank }) => {
+      setFactions(prev => {
+        if (!prev[factionId]) return prev;
+        if (prev[factionId].totalPoints === points && prev[factionId].rank === rank) return prev;
+        const next = { ...prev, [factionId]: { ...prev[factionId], totalPoints: points, rank } };
+        factionsRef.current = next;
+        return next;
       });
     });
 
