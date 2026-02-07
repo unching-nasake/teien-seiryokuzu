@@ -10,7 +10,7 @@ const fs = require("fs");
 const MAP_SIZE = 500; // 500x500タイル
 const TILE_SIZE = 2; // 1タイルあたり2px
 const PADDING_X = 150; // 左右の余白 (150px)
-const PADDING_Y = 50; // 上下の余白 (50px)
+const PADDING_Y = 25; // 上下の余白 (25px)
 
 // パス設定
 const DATA_DIR = path.join(__dirname, "data");

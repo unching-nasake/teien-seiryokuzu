@@ -1768,7 +1768,7 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
   const TILE_SIZE = 2; // 500x500タイルの場合、2pxで1000px
   const isSimple = mode === "faction_simple";
   const curPaddingX = isSimple ? 0 : 150; // 左右150px
-  const curPaddingY = isSimple ? 0 : 50; // 上下50px
+  const curPaddingY = isSimple ? 0 : 25; // 上下25px
   const mapWidth = MAP_SIZE * TILE_SIZE;
   const mapHeight = MAP_SIZE * TILE_SIZE;
   const canvasWidth = mapWidth + curPaddingX * 2;
