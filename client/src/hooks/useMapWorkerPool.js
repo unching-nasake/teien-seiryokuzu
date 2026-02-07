@@ -109,22 +109,22 @@ export function useMapWorkerPool() {
 
   // 既存API互換のメソッド
   const calculateClusters = useCallback(
-    (tiles) => {
-      return sendTask("CALCULATE_CLUSTERS", { tiles });
+    (sharedData, version) => {
+      return sendTask("CALCULATE_CLUSTERS", { sharedData, version });
     },
     [sendTask],
   );
 
   const calculateEdges = useCallback(
-    (tiles, factionId) => {
-      return sendTask("CALCULATE_EDGES", { tiles, factionId });
+    (sharedData, factionId, version) => {
+      return sendTask("CALCULATE_EDGES", { sharedData, factionId, version });
     },
     [sendTask],
   );
 
   const aggregateFactions = useCallback(
-    (tiles) => {
-      return sendTask("AGGREGATE_FACTIONS", { tiles });
+    (sharedData) => {
+      return sendTask("AGGREGATE_FACTIONS", { sharedData });
     },
     [sendTask],
   );

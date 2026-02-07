@@ -143,7 +143,7 @@ export const useMultiRenderWorker = (
 
       // クリア & 背景塗りつぶし (ここで一括で行うことでワーカー間の隙間を防ぐ)
       ctx.imageSmoothingEnabled = false;
-      ctx.fillStyle = "#1a1a2e";
+      ctx.fillStyle = "#000000"; // マップ外は黒にする
       ctx.fillRect(0, 0, width, height);
 
       // 全パーツを合成 (背景色の描画はワーカー側で行われている前提)
@@ -202,10 +202,17 @@ export const useMultiRenderWorker = (
 
       broadcast({
         type: "UPDATE_TILES",
-        data: { tiles, replace },
+        data: {
+          tiles,
+          replace,
+          sab: tileData?.sab,
+          factionsList: tileData?.factionsList,
+          playersList: tileData?.playersList,
+          mapVersion: theme.mapVersion,
+        },
       });
     },
-    [broadcast],
+    [broadcast, tileData, theme.mapVersion],
   );
 
   // Resizer

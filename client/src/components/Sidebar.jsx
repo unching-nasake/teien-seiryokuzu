@@ -9,20 +9,38 @@ import RoleSettingsModal from './RoleSettingsModal';
 import WorldStatesModal from './WorldStatesModal';
 
 // ヘルパー: 8近傍クラスタリングを行い、中核を含むクラスタを特定する
-const getFactionClusterInfo = (factionId, mapTiles, extraTiles = []) => {
-    if (!factionId) return { total: 0, flyingEnclaves: 0, clusters: [] };
+// ヘルパー: 8近傍クラスタリングを行い、中核を含むクラスタを特定する (SAB対応版)
+const getFactionClusterInfo = (factionId, tileData, extraTiles = []) => {
+    if (!factionId || !tileData || !tileData.sab) return { total: 0, flyingEnclaves: 0, clusters: [] };
+
+    const { sab, factionsList } = tileData;
+    const dv = new DataView(sab);
+    const size = 500;
+    const byteSize = 20; // useWorldState.js の TILE_BYTE_SIZE と合わせる
+
+    const factionIdx = factionsList.indexOf(factionId);
+    if (factionIdx === -1 && extraTiles.length === 0) return { total: 0, flyingEnclaves: 0, clusters: [] };
+
     const visited = new Set();
     const clusters = [];
 
-    // 勢力に属する全てのタイルキーセットを作成 (extraTiles含む)
     const initialFactionKeys = new Set();
     const factionKeys = new Set();
-    Object.entries(mapTiles).forEach(([k, t]) => {
-        if ((t.faction || t.factionId) === factionId) {
-            initialFactionKeys.add(k);
-            factionKeys.add(k);
+
+    // SABを走査して、指定された勢力のタイルを抽出
+    if (factionIdx !== -1) {
+        for (let i = 0; i < size * size; i++) {
+            const offset = i * byteSize;
+            const fid = dv.getUint16(offset, true);
+            if (fid === factionIdx) {
+                const x = i % size;
+                const y = Math.floor(i / size);
+                const key = `${x}_${y}`;
+                initialFactionKeys.add(key);
+                factionKeys.add(key);
+            }
         }
-    });
+    }
 
     extraTiles.forEach(t => {
         factionKeys.add(`${t.x}_${t.y}`);
@@ -49,14 +67,21 @@ const getFactionClusterInfo = (factionId, mapTiles, extraTiles = []) => {
            if (initialFactionKeys.has(curr)) hasExisting = true;
 
            // マップタイル上で中核かどうかチェック
-           const tile = mapTiles[curr];
-           if (tile && tile.core && tile.core.factionId === factionId) {
+           const [cx, cy] = curr.split('_').map(Number);
+           const offset = (cy * size + cx) * byteSize;
+           const flags = dv.getUint8(offset + 11);
+           const isCore = (flags & 1) !== 0;
+           const fid = dv.getUint16(offset, true);
+
+           if (isCore && fid === factionIdx) {
                hasCore = true;
            }
 
-           const [cx, cy] = curr.split('_').map(Number);
            for (const [dx, dy] of directions) {
-               const nKey = `${cx + dx}_${cy + dy}`;
+               const nx = cx + dx;
+               const ny = cy + dy;
+               if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
+               const nKey = `${nx}_${ny}`;
                if (factionKeys.has(nKey) && !visited.has(nKey)) {
                    visited.add(nKey);
                    queue.push(nKey);
@@ -114,7 +139,8 @@ function Sidebar({
   onWithdrawAP,
   onJoinPolicyChange,
   isPopupOpen,
-  mapTiles = {}, // Default empty
+  tileData = {}, // SAB Data
+  getTile,
   skipConfirmation = false,
 
   onToggleSkipConfirmation,
@@ -259,8 +285,7 @@ function Sidebar({
         let conflict = null;
         if (truces) {
             for (const t of selectedTiles) {
-                const kt = `${t.x}_${t.y}`;
-                const tile = mapTiles[kt];
+                const tile = getTile(t.x, t.y);
                 const fid = tile ? tile.factionId || tile.faction : null;
                 if (fid && fid !== playerData.factionId) {
                     // 相手勢力ID(fid)と自分(playerData.factionId)の間で停戦があるか
@@ -280,14 +305,12 @@ function Sidebar({
         let hasCustomizable = false;
         const directions = [[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
         for (const t of selectedTiles) {
-             const kt = `${t.x}_${t.y}`;
-             const tile = mapTiles[kt];
+             const tile = getTile(t.x, t.y);
              // 色を変える対象は自勢力のタイルである必要がある
              if (tile?.faction === playerData.factionId) {
                  let surrounded = true;
                  for (const [dx, dy] of directions) {
-                     const nk = `${t.x+dx}_${t.y+dy}`;
-                     const nt = mapTiles[nk];
+                     const nt = getTile(t.x+dx, t.y+dy);
                      if (nt?.faction !== playerData.factionId) {
                          surrounded = false;
                          break;
@@ -302,13 +325,12 @@ function Sidebar({
         setCanCustomColor(hasCustomizable);
 
         // クラスタ情報の計算
-        const info = getFactionClusterInfo(playerData.factionId, mapTiles, selectedTiles);
+        const info = getFactionClusterInfo(playerData.factionId, tileData, selectedTiles);
         setClusterInfo(info);
 
         // 独立可能なタイル数の計算
         const eligibleIndie = selectedTiles.filter(t => {
-            const kt = `${t.x}_${t.y}`;
-            const tile = mapTiles[kt];
+            const tile = getTile(t.x, t.y);
             // 自分が塗ったタイルであり、かつ「中核マスでない」または「自勢力の中核マスである」タイルが1つでもあれば独立可能
             return tile && tile.paintedBy === playerData.id && (!tile.core || tile.core.factionId === playerData.factionId);
         });
@@ -316,8 +338,7 @@ function Sidebar({
 
         // 重ね塗り見積もりの対象フィルタリング (最大重ね塗り済みのタイルを除外)
         const validOverpaintTiles = selectedTiles.filter(t => {
-            const kt = `${t.x}_${t.y}`;
-            const tile = mapTiles[kt];
+            const tile = getTile(t.x, t.y);
             // 自勢力 かつ 重ね塗りが最大(4)未満
             return tile && tile.faction === playerData.factionId && (tile.overpaint || 0) < 4;
         });
@@ -873,8 +894,7 @@ function Sidebar({
 
               {/* 中核化タイマー表示 */}
               {selectedTiles.length === 1 && (() => {
-                  const tileKey = `${selectedTiles[0].x}_${selectedTiles[0].y}`;
-                  const tileData = mapTiles[tileKey];
+                  const tileData = getTile(selectedTiles[0].x, selectedTiles[0].y);
 
                   if (!tileData || !tileData.isCorePending) return null;
 
@@ -904,8 +924,7 @@ function Sidebar({
                   );
               })()}
               {playerData?.permissions?.canErase && selectedTiles.length > 0 && selectedTiles.every(t => {
-                  const key = `${t.x}_${t.y}`;
-                  const tData = mapTiles[key];
+                  const tData = getTile(t.x, t.y);
                   return tData && (tData.faction || tData.factionId) === playerData.factionId;
               }) && (
                 <button
@@ -931,11 +950,11 @@ function Sidebar({
               {/* ネームドマス作成ボタン */}
               {selectedTiles.length === 1 && onCreateNamedTile && (() => {
                   const t = selectedTiles[0];
-                  const key = `${t.x}_${t.y}`;
-                  const tile = mapTiles[key];
+                  const tile = getTile(t.x, t.y);
                   // 条件1: 自勢力タイル
                   if (!tile || (tile.faction || tile.factionId) !== playerData.factionId) return null;
                   // 条件2: 既存でない
+                  const key = `${t.x}_${t.y}`;
                   if (namedCells[key]) return null;
 
                   const ownAP = playerData?.ap || 0;
@@ -1002,7 +1021,7 @@ function Sidebar({
                   const t = selectedTiles[0];
                   const key = `${t.x}_${t.y}`;
                   const namedCell = namedCells[key];
-                  const tile = mapTiles[key];
+                  const tile = getTile(t.x, t.y);
 
                   // ネームドマスのキャッシュ内またはタイルデータに namedData が存在する場合
                   if (!namedCell && !tile?.namedData) return null;
@@ -1072,8 +1091,7 @@ function Sidebar({
               {selectedTiles.length > 0 && (() => {
                   // 選択された全てのタイルが自勢力であり、かつ重ね塗りが最大でないことを確認
                   const validTiles = selectedTiles.filter(t => {
-                      const kt = `${t.x}_${t.y}`;
-                      const tile = mapTiles[kt];
+                      const tile = getTile(t.x, t.y);
                       return tile?.faction === playerData.factionId &&
                              // !tile?.namedData && // [緩和] ネームドマスの重ね塗りを許可
                              (tile?.overpaint || 0) < 4;
@@ -1206,8 +1224,19 @@ function Sidebar({
             if (!canDiplomacy) return null;
 
             // 全マスが自勢力であること、かつ最低1マスは残ること
-            const isAllSelf = selectedTiles.length > 0 && selectedTiles.every(t => mapTiles[`${t.x}_${t.y}`]?.faction === playerData.factionId);
-            const currentTotal = Object.values(mapTiles).filter(t => (t.faction || t.factionId) === playerData.factionId).length;
+            const isAllSelf = selectedTiles.length > 0 && selectedTiles.every(t => getTile(t.x, t.y)?.faction === playerData.factionId);
+
+            // 勢力タイル合計計算 (SABスキャン)
+            let currentTotal = 0;
+            if (tileData?.sab) {
+                const dv = new DataView(tileData.sab);
+                const fIdx = tileData.factionsList.indexOf(playerData.factionId);
+                if (fIdx !== -1) {
+                    for(let i=0; i<250000; i++) {
+                        if (dv.getUint16(i*20, true) === fIdx) currentTotal++;
+                    }
+                }
+            }
             const isNotAll = selectedTiles.length < currentTotal;
 
             if (selectedTiles.length > 0 && isAllSelf && isNotAll) {
@@ -1216,7 +1245,7 @@ function Sidebar({
                 const directions = [[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]];
                 selectedTiles.forEach(t => {
                     directions.forEach(([dx, dy]) => {
-                        const nt = mapTiles[`${t.x+dx}_${t.y+dy}`];
+                        const nt = getTile(t.x+dx, t.y+dy);
                         const nf = nt ? (nt.faction || nt.factionId) : null;
                         if (nf && nf !== playerData.factionId) nearbyFidSet.add(nf);
                     });
@@ -1887,15 +1916,36 @@ function Sidebar({
                 apCost={10}
                 factionName={currentFaction?.name || ''}
                 playerData={playerData}
-                playerTilesCount={Object.values(mapTiles).filter(t =>
-                    t.paintedBy === playerData?.id &&
-                    (t.faction === playerData?.factionId || t.factionId === playerData?.factionId)
-                ).length}
-                independenceEligibleCount={Object.values(mapTiles).filter(t =>
-                    t.paintedBy === playerData?.id &&
-                    (t.faction === playerData?.factionId || t.factionId === playerData?.factionId)
-                    // !t.core condition removed to allow core stealing
-                ).length}
+                playerTilesCount={(() => {
+                    if (!tileData?.sab || !playerData?.id) return 0;
+                    const dv = new DataView(tileData.sab);
+                    const pIdx = tileData.playersList.indexOf(playerData.id);
+                    if (pIdx === -1) return 0;
+                    const fIdx = tileData.factionsList.indexOf(playerData.factionId);
+                    let count = 0;
+                    for (let i = 0; i < 250000; i++) {
+                        const offset = i * 20;
+                        const fid = dv.getUint16(offset, true);
+                        const pid = dv.getUint32(offset + 6, true);
+                        if (pid === pIdx + 1 && fid === fIdx) count++;
+                    }
+                    return count;
+                })()}
+                independenceEligibleCount={(() => {
+                    if (!tileData?.sab || !playerData?.id) return 0;
+                    const dv = new DataView(tileData.sab);
+                    const pIdx = tileData.playersList.indexOf(playerData.id);
+                    if (pIdx === -1) return 0;
+                    const fIdx = tileData.factionsList.indexOf(playerData.factionId);
+                    let count = 0;
+                    for (let i = 0; i < 250000; i++) {
+                        const offset = i * 20;
+                        const fid = dv.getUint16(offset, true);
+                        const pid = dv.getUint32(offset + 6, true);
+                        if (pid === pIdx + 1 && fid === fIdx) count++;
+                    }
+                    return count;
+                })()}
             />,
             document.body
         )}

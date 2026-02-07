@@ -3,6 +3,7 @@ const path = require("path");
 
 // ===== Constants =====
 const MAP_SIZE = 500;
+const TILE_BYTE_SIZE = 24;
 // 特別タイル: 中央50×50 (225～274)
 const SPECIAL_TILE_MIN = 225;
 const SPECIAL_TILE_MAX = 274;
@@ -263,7 +264,6 @@ function calculateFactionSharedAPLimit(
   faction,
   playersData,
   settings,
-  gameIds = null,
   activeMembers = [],
 ) {
   const baseShared = settings.apSettings?.limits?.sharedBase ?? 50;
@@ -304,4 +304,5 @@ module.exports = {
   getTop3AllianceIds,
   isWeakFactionUnified,
   calculateFactionSharedAPLimit,
+  TILE_BYTE_SIZE,
 };

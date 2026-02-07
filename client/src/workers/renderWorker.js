@@ -193,21 +193,25 @@ function renderTiles(data) {
     cachedTheme.highlightCoreOnly = data.highlightCoreOnly;
   if (data.mapColorMode) cachedTheme.mapColorMode = data.mapColorMode;
 
-  // 描画に使用するデータ (Use Flat Array for iteration)
-  // const tiles = cachedTiles; // Unused for iteration now
+  // 描画に使用するデータ (Use Flat Array or SAB for iteration)
   const factions = cachedFactions;
   const alliances = cachedAlliances;
   const playerColors = cachedPlayerColors;
   const { blankTileColor, highlightCoreOnly, mapColorMode } = cachedTheme;
+
+  // [NEW] SharedArrayBuffer Support
+  const sab = cachedTheme.sab;
+  const sabView = sab ? new DataView(sab) : null;
+  const TILE_BYTE_SIZE = 24;
 
   if (!ctx || !canvas) return;
 
   const tileSize = TILE_SIZE * viewport.zoom;
   const centerX = width / 2;
   const centerY = height / 2;
-  const showGrid = viewport.zoom > 2.0; // [REVERTED] User requested grid from 2.0
+  const showGrid = viewport.zoom > 2.0;
 
-  // キャンバス全体をクリア (背景塗りつぶしはメインスレッドに移譲して縞々を防ぐ)
+  // キャンバス全体をクリア
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, width, height);
 
@@ -219,43 +223,58 @@ function renderTiles(data) {
   const endX = Math.ceil(viewport.x + tilesX / 2);
   const endY = Math.ceil(viewport.y + tilesY / 2);
 
-  // 色ごとにバッチング (フラット配列: [x, y, w, h, ...])
-  // Map<color, number[]>
+  // 色ごとにバッチング
   const batchDraws = new Map();
   const factionBorderRects = [];
-
-  // 最適化: ズームが小さい場合は境界線計算をスキップ
   const skipBorders = mapColorMode === "overpaint" && viewport.zoom < 0.5;
 
   for (let x = Math.max(0, startX); x <= Math.min(MAP_SIZE - 1, endX); x++) {
     for (let y = Math.max(0, startY); y <= Math.min(MAP_SIZE - 1, endY); y++) {
-      // [PARALLEL] Interleaved based on Y
       if (y % totalWorkers !== workerIndex) continue;
 
-      // [OPTIMIZED] Use Flat Array Access
-      const tile = tilesFlatArray[y * MAP_SIZE + x];
+      let tile = null;
+      let fidIdx = 65535;
+      let colorInt = 0xffffff;
+      let flags = 0;
+      let exp = 0;
+      let paintedByIdx = 0;
 
-      // 最適化: タイルがない場合は背景色(blankTileColor)と同じならスキップ
-      // デフォルト背景は #1a1a2e
-      if (!tile) {
-        // 背景色と同じなら描画しない（クリア済みだから）
-        if ((blankTileColor || "#ffffff") === "#1a1a2e") continue;
+      if (sabView) {
+        // [NEW] SharedArrayBufferから直接読み取り (ゼロコピー)
+        const offset = (y * MAP_SIZE + x) * TILE_BYTE_SIZE;
+        fidIdx = sabView.getUint16(offset + 0, true);
+        colorInt = sabView.getUint32(offset + 2, true);
+        paintedByIdx = sabView.getUint32(offset + 6, true);
+        // overpaint = sabView.getUint8(offset + 10);
+        flags = sabView.getUint8(offset + 11);
+        exp = sabView.getFloat64(offset + 16, true); // Alignment fix
+
+        // tileオブジェクトの最小限のシミュレーション（互換性のため）
+        if (fidIdx !== 65535) {
+          tile = {
+            factionId: cachedTheme.factionsList
+              ? cachedTheme.factionsList[fidIdx]
+              : null,
+          };
+          if (flags & 1) tile.core = { factionId: tile.factionId };
+        }
+      } else {
+        // フォールバック: 従来Objectベース
+        tile = tilesFlatArray[y * MAP_SIZE + x];
       }
 
-      // [OPTIMIZED] Snap to pixels to avoid anti-aliasing gaps
+      if (!tile && (blankTileColor || "#ffffff") === "#1a1a2e" && !sabView)
+        continue;
+
       const rawX = centerX + (x - viewport.x) * tileSize;
       const rawY = centerY + (y - viewport.y) * tileSize;
-
-      // Use logical coordinates for calculations but snap for rendering
       const screenX = Math.floor(rawX);
       const screenY = Math.floor(rawY);
 
-      // [FIX] 縦横個別にサイズを計算して隙間を完全に埋める
       let drawW, drawH;
       if (showGrid) {
         drawW = drawH = Math.max(1, tileSize - 1);
       } else {
-        // 次のタイルの開始ピクセルを計算し、その差分をサイズとする(+1pxの保険)
         const nextScreenX = Math.floor(
           centerX + (x + 1 - viewport.x) * tileSize,
         );
@@ -265,27 +284,59 @@ function renderTiles(data) {
         drawW = nextScreenX - screenX + 1;
         drawH = nextScreenY - screenY + 1;
       }
+
       let color = blankTileColor || "#ffffff";
 
-      if (tile) {
+      if (sabView) {
+        // SABモードの色計算
+        const fid = tile ? tile.factionId : null;
+        if (mapColorMode === "player" && cachedTheme.playersList) {
+          const playerId = cachedTheme.playersList[paintedByIdx - 1];
+          color =
+            playerId && playerColors
+              ? playerColors[playerId] || "#cccccc"
+              : "#cccccc";
+        } else if (mapColorMode === "overpaint") {
+          // overpaintはSABから取得
+          const overpaint = sabView.getUint8(
+            (y * MAP_SIZE + x) * TILE_BYTE_SIZE + 10,
+          );
+          const count = Math.min(4, overpaint);
+          const ratio = count / 4;
+          color = `hsl(${240 + ratio * 60}, ${60 + ratio * 40}%, ${45 + ratio * 30}%)`;
+        } else if (mapColorMode === "alliance") {
+          const f = fid ? factions[fid] : null;
+          if (f && f.allianceId && alliances && alliances[f.allianceId]) {
+            color = alliances[f.allianceId].color;
+          } else {
+            color = blankTileColor || "#ffffff";
+          }
+        } else {
+          // Faction/Custom Color (Use packed color from SAB)
+          color = fid
+            ? `#${colorInt.toString(16).padStart(6, "0")}`
+            : blankTileColor || "#ffffff";
+        }
+
+        if (highlightCoreOnly && tile) {
+          if (!(flags & 1)) color = "#222233";
+        }
+      } else if (tile) {
+        // 従来モードの色計算
         const fid = tile.factionId || tile.faction;
         const f = factions ? factions[fid] : null;
         const factionColor = f?.color || "#aaaaaa";
         color = tile.customColor || factionColor;
 
         if (mapColorMode === "player") {
-          if (tile.paintedBy && playerColors) {
-            color = playerColors[tile.paintedBy] || "#cccccc";
-          } else {
-            color = "#cccccc";
-          }
+          color =
+            tile.paintedBy && playerColors
+              ? playerColors[tile.paintedBy] || "#cccccc"
+              : "#cccccc";
         } else if (mapColorMode === "overpaint") {
           const count = Math.min(4, Math.max(0, tile.overpaint || 0));
           const ratio = count / 4;
-          const hue = 240 + ratio * 60;
-          const saturation = 60 + ratio * 40;
-          const lightness = 45 + ratio * 30;
-          color = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+          color = `hsl(${240 + ratio * 60}, ${60 + ratio * 40}%, ${45 + ratio * 30}%)`;
         } else if (mapColorMode === "alliance") {
           if (f && f.allianceId && alliances && alliances[f.allianceId]) {
             color = alliances[f.allianceId].color;
@@ -296,59 +347,15 @@ function renderTiles(data) {
           color = tile.customColor || tile.color || "#ffffff";
         }
 
-        // 塗装数モード時の外縁境界線 (低ズーム時はスキップ)
-        // [OPTIMIZED] Flat array neighbor check needed?
-        // Since we are iterating x,y, we can easily check neighbors in flat array
-        // NOTE: For borders to work seamlessly across worker boundaries,
-        // each worker needs access to neighbor data (which they do via full `tilesFlatArray`).
-        // Accessing nY which might be handled by another worker is fine for READ.
-        // We only DRAW the border if it belongs to THIS tile (which we own).
-        if (!skipBorders && f && mapColorMode === "overpaint") {
-          const checkBorder = (dx, dy, type) => {
-            const nx = x + dx;
-            const ny = y + dy;
-            if (nx < 0 || nx >= MAP_SIZE || ny < 0 || ny >= MAP_SIZE) return;
-
-            const nt = tilesFlatArray[ny * MAP_SIZE + nx];
-            const nfid = nt ? nt.factionId || nt.faction : null;
-            if (nfid !== fid) {
-              factionBorderRects.push(
-                screenX,
-                screenY,
-                drawSize,
-                drawSize,
-                type === "top"
-                  ? 0
-                  : type === "bottom"
-                    ? 1
-                    : type === "left"
-                      ? 2
-                      : 3,
-              );
-            }
-          };
-          checkBorder(0, -1, "top");
-          checkBorder(0, 1, "bottom");
-          checkBorder(-1, 0, "left");
-          checkBorder(1, 0, "right");
-        }
-
-        // 中核マス強調モード
         if (highlightCoreOnly) {
           const currentFid = tile.factionId || tile.faction;
           const isCore = tile.core && tile.core.factionId === currentFid;
-          if (!isCore) {
-            color = "#222233";
-          }
+          if (!isCore) color = "#222233";
         }
       }
 
-      if (!batchDraws.has(color)) {
-        batchDraws.set(color, []);
-      }
-      // フラット配列に追加
-      const arr = batchDraws.get(color);
-      arr.push(screenX, screenY, drawW, drawH);
+      if (!batchDraws.has(color)) batchDraws.set(color, []);
+      batchDraws.get(color).push(screenX, screenY, drawW, drawH);
     }
   }
 
@@ -481,6 +488,13 @@ self.onmessage = function (e) {
           }
         });
       }
+
+      // [NEW] SharedArrayBuffer や リストの更新を確実に反映
+      if (data.sab) cachedTheme.sab = data.sab;
+      if (data.factionsList) cachedTheme.factionsList = data.factionsList;
+      if (data.playersList) cachedTheme.playersList = data.playersList;
+      if (data.mapVersion !== undefined)
+        cachedTheme.mapVersion = data.mapVersion;
     } else if (type === "UPDATE_DATA") {
       // [Stateful] その他データ更新
       const d = data;

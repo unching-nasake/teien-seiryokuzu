@@ -13,11 +13,9 @@ const {
   LockManager,
   MAP_SIZE,
   getTilePoints,
-  calculateFactionPoints,
   getTop3AllianceIds,
   isWeakFactionUnified,
   calculateFactionSharedAPLimit,
-  isSpecialTile,
   NAMED_CELL_CREATE_COST,
 } = shared;
 
@@ -25,7 +23,7 @@ const {
 // パス定義 (先頭に移動)
 const DATA_DIR = path.resolve(__dirname, "data");
 const MAP_STATE_PATH = path.join(DATA_DIR, "map_state.json");
-const MAP_STATE_INDEX_PATH = path.join(DATA_DIR, "map_state_index.json");
+const MAP_STATE_BIN_PATH = path.join(DATA_DIR, "map_state.bin");
 const FACTIONS_PATH = path.join(DATA_DIR, "factions.json");
 const PLAYERS_PATH = path.join(DATA_DIR, "players.json");
 const GAME_IDS_PATH = path.join(DATA_DIR, "game_ids.json");
@@ -34,6 +32,371 @@ const ACTIVITY_LOG_PATH = path.join(DATA_DIR, "activity_log.json");
 const SYSTEM_NOTICES_PATH = path.join(DATA_DIR, "system_notices.json");
 const FACTION_NOTICES_PATH = path.join(DATA_DIR, "faction_notices.json");
 const SYSTEM_SETTINGS_PATH = path.join(DATA_DIR, "system_settings.json");
+const ALLIANCES_PATH = path.join(DATA_DIR, "alliances.json");
+const TRUCES_PATH = path.join(DATA_DIR, "truces.json");
+const WARS_PATH = path.join(DATA_DIR, "wars.json");
+const NAMED_CELLS_PATH = path.join(DATA_DIR, "named_cells.json");
+const DUPLICATE_IP_PATH = path.join(DATA_DIR, "duplicate_ip.json");
+
+const TILE_BYTE_SIZE = 24; // shared.TILE_BYTE_SIZE (Always 24)
+
+// [NEW] SharedArrayBuffer による一括メモリ管理 (25万タイル x 20バイト = 5MB)
+// 各 Worker と共有することで、プロセス全体のメモリ消費を劇的に削減
+const sharedMapSAB = new SharedArrayBuffer(
+  MAP_SIZE * MAP_SIZE * TILE_BYTE_SIZE,
+);
+const sharedMapView = new DataView(sharedMapSAB);
+
+// [INIT] 全タイルの勢力IDを 65535 (無し) で初期化
+for (let i = 0; i < MAP_SIZE * MAP_SIZE; i++) {
+  const offset = i * TILE_BYTE_SIZE;
+  sharedMapView.setUint16(offset, 65535, true); // faction
+  sharedMapView.setUint32(offset + 2, 0xffffff, true); // color
+  sharedMapView.setUint32(offset + 6, 0, true); // paintedBy
+  sharedMapView.setUint8(offset + 10, 0); // overpaint
+  sharedMapView.setUint8(offset + 11, 0); // flags
+  sharedMapView.setFloat64(offset + 12, 0, true); // expiry (unaligned but safe)
+  sharedMapView.setUint32(offset + 20, 0, true); // paintedAt
+}
+
+// IDマッピングテーブル (Memory-only, for converting strings to indexes in SAB)
+const factionIdToIndex = new Map(); // factionId (string) -> index (number)
+const indexToFactionId = [];
+
+// [NEW] Player ID Mapping
+const playerIds = []; // index -> id (1-based, 0 is null)
+const playerIdsMap = new Map(); // id -> index
+
+// [NEW] 勢力・プレイヤーのインデックスマッピングを安定化（再起動しても順序が変わらないようにする）
+function rebuildStableMappings(factionsData, playersData) {
+  // 勢力
+  const sortedFids = Object.keys(factionsData?.factions || {}).sort();
+  factionIdToIndex.clear();
+  indexToFactionId.length = 0;
+  sortedFids.forEach((fid, idx) => {
+    factionIdToIndex.set(fid, idx);
+    indexToFactionId.push(fid);
+  });
+
+  // プレイヤー
+  const sortedPids = Object.keys(playersData?.players || {}).sort();
+  playerIdsMap.clear();
+  playerIds.length = 0;
+  sortedPids.forEach((pid, idx) => {
+    const internalIdx = idx + 1; // 1-based
+    playerIdsMap.set(pid, internalIdx);
+    playerIds.push(pid);
+  });
+
+  console.log(
+    `[Init] Mappings rebuilt: ${indexToFactionId.length} factions, ${playerIds.length} players`,
+  );
+}
+
+function getFactionIdx(fid) {
+  if (!fid) return 65535;
+  if (factionIdToIndex.has(fid)) return factionIdToIndex.get(fid);
+  // 起動時にマップされているはずだが、新規勢力の場合は動的に追加（基本は安定化関数で作成）
+  const idx = indexToFactionId.length;
+  factionIdToIndex.set(fid, idx);
+  indexToFactionId.push(fid);
+  return idx;
+}
+
+function getPlayerIdx(pid) {
+  if (!pid) return 0;
+  if (playerIdsMap.has(pid)) return playerIdsMap.get(pid);
+  const idx = playerIds.length + 1;
+  playerIds.push(pid);
+  playerIdsMap.set(pid, idx);
+  return idx;
+}
+
+// [NEW] SharedArrayBuffer と JSONマップの同期
+function syncSABWithJSON(mapState) {
+  if (!mapState || !mapState.tiles) return;
+
+  const size = 500;
+
+  // [IMPORTANT] 一旦SABを全クリアする (65535 = 無し, 0xffffff = 白)
+  // 不正な0データによる占領を防ぐ
+  for (let i = 0; i < size * size; i++) {
+    const offset = i * TILE_BYTE_SIZE;
+    sharedMapView.setUint16(offset, 65535, true); // factionIndex
+    sharedMapView.setUint32(offset + 2, 0xffffff, true); // colorInt
+    sharedMapView.setUint32(offset + 6, 0, true); // paintedByIndex (0 = none)
+    sharedMapView.setUint8(offset + 10, 0); // overpaint
+    sharedMapView.setUint8(offset + 11, 0); // flags
+    // offset 12-15 padding
+    sharedMapView.setFloat64(offset + 16, 0, true); // expiry (8-byte aligned)
+  }
+
+  for (const key in mapState.tiles) {
+    const tile = mapState.tiles[key];
+    const [x, y] = key.split("_").map(Number);
+    if (x >= 0 && x < size && y >= 0 && y < size) {
+      const offset = (y * size + x) * TILE_BYTE_SIZE;
+
+      // [Structure Update: 24 bytes / 8-byte alignment]
+      let fid = tile.factionId || tile.faction;
+      // [CLEANUP] 存在しない勢力IDの場合はクリアする
+      if (fid && !factionIdToIndex.has(fid)) {
+        // console.warn(`[Sync] Found invalid factionId: ${fid} at ${key}. Clearing tile.`);
+        fid = null;
+      }
+
+      const fidIdx = getFactionIdx(fid);
+      sharedMapView.setUint16(offset + 0, fidIdx, true);
+
+      const colorStr = tile.customColor || tile.color || "#ffffff";
+      let colorInt = parseInt(colorStr.replace("#", ""), 16);
+      if (Number.isNaN(colorInt)) colorInt = 0xffffff;
+      sharedMapView.setUint32(offset + 2, colorInt, true);
+
+      const pIdx = getPlayerIdx(tile.paintedBy);
+      sharedMapView.setUint32(offset + 6, pIdx, true);
+
+      sharedMapView.setUint8(offset + 10, tile.overpaint || 0);
+
+      let flags = 0;
+      let exp = 0;
+      if (tile.core) {
+        flags |= 1;
+        exp = new Date(tile.core.expiresAt || 0).getTime();
+      }
+      if (tile.coreificationUntil) {
+        flags |= 2;
+        exp = new Date(tile.coreificationUntil).getTime();
+      }
+      if (Number.isNaN(exp)) exp = 0; // Prevent NaN in SAB
+
+      sharedMapView.setUint8(offset + 11, flags);
+      // offset 12-15 padding
+      sharedMapView.setFloat64(offset + 16, exp, true); // Alignment fix
+
+      // [NEW] paintedAt (seconds) - offset 20 (4 bytes)
+      const pAt = tile.paintedAt
+        ? Math.floor(new Date(tile.paintedAt).getTime() / 1000)
+        : 0;
+      sharedMapView.setUint32(offset + 20, pAt, true);
+    }
+  }
+}
+const FILE_CACHE = new Map(); // filePath -> { data, mtimeMs, lastStatTime }
+const writeQueue = new Map(); // filePath -> { pendingData: any, isWriting: boolean }
+
+// [FIX] Windows環境でのアトミックな書き換え (rename) 競合を防ぐための再試行ロジック
+async function safeRename(oldPath, newPath, retries = 5, delay = 100) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await fs.promises.rename(oldPath, newPath);
+      return;
+    } catch (err) {
+      if (err.code === "EPERM" || err.code === "EBUSY") {
+        const isLast = i === retries - 1;
+        if (!isLast) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, delay * Math.pow(2, i)),
+          );
+          continue;
+        }
+      }
+      throw err;
+    }
+  }
+}
+
+// メモリ更新 & ディスク保存 (非同期Worker版 - 非ブロッキング順序保証)
+async function saveJSON(filePath, data, options = {}) {
+  if (!filePath) {
+    console.error("saveJSON called without filePath");
+    return;
+  }
+
+  // 1. メインスレッドのキャッシュを即座に更新して、後続の読み込みが最新を参照できるようにする
+  // これにより、ディスク書き込みを待たずにロックを解放可能になる
+  const stats = { mtimeMs: Date.now() };
+  FILE_CACHE.set(filePath, {
+    data,
+    mtimeMs: stats.mtimeMs,
+    lastStatTime: stats.mtimeMs,
+  });
+
+  // [NEW] マップデータの更新を SAB にも即時反映 (差分のみ)
+  if (filePath === MAP_STATE_PATH && data && data.tiles) {
+    syncSABWithJSON(data);
+    saveMapBinary(); // 引数は不要（内部でグローバル SAB を使用）
+  }
+
+  // 2. 書き込みキューの管理
+  if (!writeQueue.has(filePath)) {
+    writeQueue.set(filePath, {
+      pendingData: null,
+      isWriting: false,
+      waiters: [],
+      skipLock: false,
+    });
+  }
+
+  const queue = writeQueue.get(filePath);
+  queue.pendingData = data; // 常に最新の状態を「次回の書き込み」としてセット
+  if (options.skipLock) queue.skipLock = true; // バッチ内に一つでも skipLock があれば適用
+
+  // 完了待機用のPromiseを作成
+  const writePromise = new Promise((resolve) => {
+    queue.waiters.push(resolve);
+  });
+
+  if (!queue.isWriting) {
+    processWriteQueue(filePath);
+  }
+
+  return writePromise;
+}
+
+async function processWriteQueue(filePath) {
+  const queue = writeQueue.get(filePath);
+  if (!queue || (queue.pendingData === null && queue.waiters.length === 0)) {
+    if (queue) queue.isWriting = false;
+    return;
+  }
+
+  queue.isWriting = true;
+  const dataToSave = queue.pendingData;
+  const currentWaiters = [...queue.waiters];
+  const skipLock = queue.skipLock;
+
+  queue.pendingData = null; // キューから取り出す
+  queue.waiters = [];
+  queue.skipLock = false;
+
+  try {
+    if (dataToSave !== null) {
+      const dataString = JSON.stringify(dataToSave, null, 2);
+      if (dataString.length < 1024 * 1024) {
+        const saveOp = async () => {
+          const tempPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+          await fs.promises.writeFile(tempPath, dataString, "utf-8");
+          await safeRename(tempPath, filePath);
+        };
+
+        if (skipLock) {
+          await saveOp();
+        } else {
+          await LockManager.withLock(filePath, saveOp);
+        }
+      } else {
+        await runWorkerTask("SAVE_JSON", {
+          filePath,
+          data: dataToSave,
+          skipLock,
+        });
+      }
+    }
+    currentWaiters.forEach((resolve) => resolve());
+  } catch (err) {
+    console.error(`[processWriteQueue] Error saving ${filePath}:`, err);
+    currentWaiters.forEach((resolve) => resolve());
+  }
+
+  setImmediate(() => processWriteQueue(filePath));
+}
+
+function loadJSON(filePath, defaultValue = {}, ignoreCache = false) {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return defaultValue;
+    }
+
+    const cached = FILE_CACHE.get(filePath);
+    const now = Date.now();
+
+    const stats = fs.statSync(filePath);
+    if (!ignoreCache && cached && cached.mtimeMs >= stats.mtimeMs) {
+      cached.lastStatTime = now;
+      return cached.data;
+    }
+
+    const raw = fs.readFileSync(filePath, "utf-8");
+    if (!raw.trim()) {
+      return cached ? cached.data : defaultValue;
+    }
+
+    const data = JSON.parse(raw);
+    FILE_CACHE.set(filePath, {
+      data,
+      mtimeMs: stats.mtimeMs,
+      lastStatTime: now,
+    });
+
+    if (filePath === MAP_STATE_PATH) {
+      console.log("[Init] Syncing SAB with JSON map data...");
+      syncSABWithJSON(data);
+    }
+
+    return data;
+  } catch (e) {
+    if (!ignoreCache && FILE_CACHE.has(filePath)) {
+      return FILE_CACHE.get(filePath).data;
+    }
+    console.error(
+      `[Persistence] Error reading ${path.basename(filePath)}:`,
+      e.message,
+    );
+    return defaultValue;
+  }
+}
+
+// [NEW] バイナリマップの保存
+async function saveMapBinary() {
+  const buffer = Buffer.from(sharedMapSAB);
+  const tempPath = `${MAP_STATE_BIN_PATH}.tmp.${process.pid}.${Date.now()}`;
+  await fs.promises.writeFile(tempPath, buffer);
+  await safeRename(tempPath, MAP_STATE_BIN_PATH);
+  console.log(`[BinaryMap] Persisted binary map to ${MAP_STATE_BIN_PATH}`);
+}
+
+// [NEW] バイナリマップのロード
+function loadMapBinary() {
+  if (!fs.existsSync(MAP_STATE_BIN_PATH)) return false;
+  try {
+    const buffer = fs.readFileSync(MAP_STATE_BIN_PATH);
+    if (buffer.length !== sharedMapSAB.byteLength) {
+      console.warn("[BinaryMap] Buffer size mismatch. Fallback to JSON.");
+      return false;
+    }
+    const target = new Uint8Array(sharedMapSAB);
+    target.set(new Uint8Array(buffer));
+
+    // [REPAIR] ロードしたデータが古い構造（空白が0）の場合の修復
+    for (let i = 0; i < MAP_SIZE * MAP_SIZE; i++) {
+      const offset = i * TILE_BYTE_SIZE;
+      const fidIdx = sharedMapView.getUint16(offset, true);
+      const colorInt = sharedMapView.getUint32(offset + 2, true);
+
+      // 勢力IDが0かつカラーが0（黒）の場合、それは不正な空白マスの可能性が高い
+      // 勢力0が存在する場合でも、通常はカラーが設定されているはず
+      if (fidIdx === 0 && colorInt === 0) {
+        sharedMapView.setUint16(offset, 65535, true);
+        sharedMapView.setUint32(offset + 2, 0xffffff, true); // 白で埋める
+      }
+
+      // [REPAIR] Expiry NaN Fix
+      const exp = sharedMapView.getFloat64(offset + 16, true);
+      if (Number.isNaN(exp)) {
+        sharedMapView.setFloat64(offset + 16, 0, true);
+      }
+    }
+
+    console.log(
+      `[BinaryMap] Loaded and repaired binary map from ${MAP_STATE_BIN_PATH}`,
+    );
+    return true;
+  } catch (e) {
+    console.error("[BinaryMap] Load error:", e.message);
+    return false;
+  }
+}
 
 // [NEW] Merger Settings Defaults
 const DEFAULT_MERGER_SETTINGS = {
@@ -41,24 +404,99 @@ const DEFAULT_MERGER_SETTINGS = {
 };
 
 // 設定ロード (with defaults)
-const loadSystemSettings = () => {
+const initialSettings = loadJSON(SYSTEM_SETTINGS_PATH, DEFAULT_MERGER_SETTINGS);
+if (!initialSettings.prohibitedRank) {
+  initialSettings.prohibitedRank = 5;
+  saveJSON(SYSTEM_SETTINGS_PATH, initialSettings);
+}
+
+// [NEW] ランキングキャッシュ (Global)
+let cachedFactionRanks = [];
+
+function loadSystemSettings() {
   const settings = loadJSON(SYSTEM_SETTINGS_PATH, {});
-  // Merge defaults
   if (!settings.mergerSettings)
     settings.mergerSettings = { ...DEFAULT_MERGER_SETTINGS };
-  // Ensure individual properties exist if settings object exists but is partial
   settings.mergerSettings = {
     ...DEFAULT_MERGER_SETTINGS,
     ...settings.mergerSettings,
   };
-
   return settings;
-};
-const ALLIANCES_PATH = path.resolve(DATA_DIR, "alliances.json");
-const TRUCES_PATH = path.resolve(DATA_DIR, "truces.json");
-const WARS_PATH = path.resolve(DATA_DIR, "wars.json");
-const NAMED_CELLS_PATH = path.join(DATA_DIR, "named_cells.json");
-const DUPLICATE_IP_PATH = path.join(DATA_DIR, "duplicate_ip.json");
+}
+
+// [NEW] ランキング定期更新ループ (Worker版)
+async function updateRankingCache() {
+  try {
+    console.log("[Rank] Offloading full ranking calculation to Worker...");
+    const result = await runWorkerTask("CALCULATE_RANKS", {
+      filePaths: {
+        mapState: MAP_STATE_PATH,
+        factions: FACTIONS_PATH,
+        players: PLAYERS_PATH,
+        settings: SYSTEM_SETTINGS_PATH,
+        gameIds: GAME_IDS_PATH,
+        alliances: ALLIANCES_PATH,
+        namedCells: NAMED_CELLS_PATH,
+      },
+    });
+
+    if (result.success && result.results && result.results.ranks) {
+      cachedFactionRanks = result.results.ranks;
+      console.log(
+        `[Rank] Ranking cache updated. Count: ${cachedFactionRanks.length}`,
+      );
+
+      const updates = cachedFactionRanks.map((r) => ({
+        id: r.id,
+        rank: r.rank,
+        isWeak: r.isWeak,
+        points: r.points,
+      }));
+
+      if (updates.length > 0) {
+        if (typeof io !== "undefined" && io)
+          io.emit("ranking:updated", updates);
+      }
+    } else if (!result.success) {
+      console.error("[Rank] Worker calculation failed:", result.error);
+    }
+  } catch (err) {
+    console.error("Failed to update ranking cache:", err);
+  }
+}
+setInterval(updateRankingCache, 15 * 1000); // 15秒ごとに更新
+
+// [OPTIMIZATION] 中核化維持・確定・自動拡大処理 (Worker完全オフロード版)
+async function runCoreMaintenanceFull() {
+  try {
+    // console.log("[Maintenance] Running consolidated core maintenance via Worker...");
+    const result = await runWorkerTask("CORE_MAINTENANCE_FULL", {
+      filePaths: {
+        mapState: MAP_STATE_PATH,
+        factions: FACTIONS_PATH,
+        players: PLAYERS_PATH,
+        settings: SYSTEM_SETTINGS_PATH,
+        gameIds: GAME_IDS_PATH,
+        alliances: ALLIANCES_PATH,
+        namedCells: NAMED_CELLS_PATH,
+      },
+    });
+
+    if (result.success) {
+      // ログなど必要なら
+      if (result.results && result.results.coreStatus) {
+        // console.log("[Maintenance] Core updated:", result.results.coreStatus);
+      }
+    } else {
+      console.error(
+        "[Maintenance] Worker reported failure:",
+        result.error || "Unknown error",
+      );
+    }
+  } catch (e) {
+    console.error("[Maintenance] Error in core maintenance process:", e);
+  }
+}
 
 console.log(`[Init] DATA_DIR resolved to: ${DATA_DIR}`);
 
@@ -223,10 +661,17 @@ function runWorkerTask(type, data) {
       namedCells: NAMED_CELLS_PATH,
     };
 
+    // [NEW] SharedArrayBuffer を Worker に共有 (メモリ節約の要)
+    injectedData.mapSAB = sharedMapSAB;
+    injectedData.indexToFactionId = indexToFactionId;
+    injectedData.playerIds = playerIds; // [NEW] Player ID Mapping for Worker
+
     // [NEW] システム設定を注入 (CoreTile設定などWorkerが必要とするため)
     // 毎回ロードするのは少しコストだが、設定変更を即時反映させるため
     try {
-      const settings = loadJSON(SYSTEM_SETTINGS_PATH, { isGameStopped: false });
+      const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
+        isGameStopped: false,
+      });
       if (settings.coreTileSettings) {
         injectedData.coreTileSettings = settings.coreTileSettings;
       }
@@ -297,7 +742,6 @@ const io = new Server(server, {
 const playerSocketMap = new Map(); // playerId -> Set<Socket> (1人複数タブ対応)
 
 // --- [NEW] 非ブロッキング順次書き込みキュー ---
-const writeQueue = new Map(); // filePath -> { pendingData: any, isWriting: boolean }
 
 // --- [NEW] Dynamic Cookie Helper ---
 const getCookieName = (req, baseName) => {
@@ -336,27 +780,6 @@ const getCookieName = (req, baseName) => {
   }
   return baseName;
 };
-
-// [FIX] Windows環境でのアトミックな書き換え (rename) 競合を防ぐための再試行ロジック
-async function safeRename(oldPath, newPath, retries = 5, delay = 100) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      await fs.promises.rename(oldPath, newPath);
-      return;
-    } catch (err) {
-      if (err.code === "EPERM" || err.code === "EBUSY") {
-        const isLast = i === retries - 1;
-        if (!isLast) {
-          await new Promise((resolve) =>
-            setTimeout(resolve, delay * Math.pow(2, i)),
-          );
-          continue;
-        }
-      }
-      throw err;
-    }
-  }
-}
 
 // [NEW] 管理者IDの読み込み
 let currentAdminIdGlobal = null;
@@ -463,102 +886,6 @@ async function persistActivityLogs() {
   );
 }
 
-// メモリ更新 & ディスク保存 (非同期Worker版 - 非ブロッキング順序保証)
-async function saveJSON(filePath, data, options = {}) {
-  if (!filePath) {
-    console.error("saveJSON called without filePath");
-    return;
-  }
-
-  // 1. メインスレッドのキャッシュを即座に更新して、後続の読み込みが最新を参照できるようにする
-  // これにより、ディスク書き込みを待たずにロックを解放可能になる
-  const stats = { mtimeMs: Date.now() };
-  FILE_CACHE.set(filePath, {
-    data,
-    mtimeMs: stats.mtimeMs,
-    lastStatTime: stats.mtimeMs,
-  });
-
-  // 2. 書き込みキューの管理
-  if (!writeQueue.has(filePath)) {
-    writeQueue.set(filePath, {
-      pendingData: null,
-      isWriting: false,
-      waiters: [],
-      skipLock: false,
-    });
-  }
-
-  const queue = writeQueue.get(filePath);
-  queue.pendingData = data; // 常に最新の状態を「次回の書き込み」としてセット
-  if (options.skipLock) queue.skipLock = true; // バッチ内に一つでも skipLock があれば適用
-
-  // 完了待機用のPromiseを作成
-  const writePromise = new Promise((resolve) => {
-    queue.waiters.push(resolve);
-  });
-
-  if (!queue.isWriting) {
-    processWriteQueue(filePath);
-  }
-
-  return writePromise;
-}
-
-async function processWriteQueue(filePath) {
-  const queue = writeQueue.get(filePath);
-  if (!queue || (queue.pendingData === null && queue.waiters.length === 0)) {
-    if (queue) queue.isWriting = false;
-    return;
-  }
-
-  queue.isWriting = true;
-  const dataToSave = queue.pendingData;
-  const currentWaiters = [...queue.waiters];
-  const skipLock = queue.skipLock;
-
-  queue.pendingData = null; // キューから取り出す
-  queue.waiters = [];
-  queue.skipLock = false;
-
-  try {
-    if (dataToSave !== null) {
-      // [OPTIMIZATION] 小規模なファイル（1MB未満）はメインスレッドで直接書き込む
-      // Worker経由の通信オーバーヘッドと、Workerが重いタスク（整合性チェック等）で
-      // 埋まっていることによる遅延を回避する。
-      const dataString = JSON.stringify(dataToSave, null, 2);
-      if (dataString.length < 1024 * 1024) {
-        const saveOp = async () => {
-          const tempPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
-          // [FIX] Use async write to prevent event loop blocking
-          await fs.promises.writeFile(tempPath, dataString, "utf-8");
-          await safeRename(tempPath, filePath);
-        };
-
-        if (skipLock) {
-          await saveOp();
-        } else {
-          await LockManager.withLock(filePath, saveOp);
-        }
-      } else {
-        // 大規模なファイルはWorkerに任せる
-        await runWorkerTask("SAVE_JSON", {
-          filePath,
-          data: dataToSave,
-          skipLock,
-        });
-      }
-    }
-    // 待機者に完了を通知
-    currentWaiters.forEach((resolve) => resolve());
-  } catch (err) {
-    console.error(`[processWriteQueue] Error saving ${filePath}:`, err);
-    currentWaiters.forEach((resolve) => resolve()); // エラーでもロック解放のために進める
-  }
-
-  // 次の待機やデータがあれば続行
-  setImmediate(() => processWriteQueue(filePath));
-}
 let tileUpdateBuffer = {};
 let batchTimer = null;
 let activityLogBuffer = [];
@@ -567,10 +894,75 @@ let activityLogTimer = null;
 function batchEmitTileUpdate(updates) {
   Object.assign(tileUpdateBuffer, updates);
   if (!batchTimer) {
-    batchTimer = setTimeout(() => {
-      if (Object.keys(tileUpdateBuffer).length > 0) {
-        io.emit("tile:update", tileUpdateBuffer);
-        tileUpdateBuffer = {};
+    batchTimer = setTimeout(async () => {
+      const keys = Object.keys(tileUpdateBuffer);
+      if (keys.length > 0) {
+        // [OPTIMIZATION] 大規模な更新（500枚以上）の場合は Worker へシリアライズをオフロード
+        if (keys.length >= 500 && numWorkers > 0) {
+          try {
+            const currentUpdates = { ...tileUpdateBuffer };
+            tileUpdateBuffer = {}; // 送信用コピーを取ったのでクリア
+
+            const result = await runWorkerTask("SERIALIZE_TILE_UPDATES", {
+              tileUpdateBuffer: currentUpdates,
+            });
+
+            if (result.success && result.results && result.results.binary) {
+              io.emit("tile:update:bin", result.results.binary);
+            } else {
+              throw new Error("Worker serialization failed");
+            }
+          } catch (e) {
+            console.error("[SocketOffload] Failed:", e);
+            // フォールバックはバッファがクリアされているため、再試行はしない（次のバッチで送られるか、整合性チェックで直る）
+          }
+        } else {
+          // 少量の場合はメインスレッドで高速処理
+          // 少量の場合はメインスレッドで高速処理 (SAB直接読み取り版 - Phase 7)
+          const PACKET_SIZE = 28;
+          const totalSize = 2 + keys.length * PACKET_SIZE;
+          const buffer = Buffer.allocUnsafe(totalSize);
+
+          let offset = 0;
+          buffer.writeUInt16LE(keys.length, offset);
+          offset += 2;
+
+          keys.forEach((key) => {
+            const [x, y] = key.split("_").map(Number);
+
+            // Write Coords
+            buffer.writeUInt16LE(x, offset);
+            buffer.writeUInt16LE(y, offset + 2);
+
+            // direct read from SAB (24 bytes)
+            if (sharedMapView) {
+              const tileOffset = (y * MAP_SIZE + x) * TILE_BYTE_SIZE;
+
+              const fidIdx = sharedMapView.getUint16(tileOffset + 0, true);
+              const color = sharedMapView.getUint32(tileOffset + 2, true);
+              const pidIdx = sharedMapView.getUint32(tileOffset + 6, true);
+              const over = sharedMapView.getUint8(tileOffset + 10);
+              const flags = sharedMapView.getUint8(tileOffset + 11);
+              const exp = sharedMapView.getFloat64(tileOffset + 12, true);
+              const pAt = sharedMapView.getUint32(tileOffset + 20, true);
+
+              buffer.writeUInt16LE(fidIdx, offset + 4);
+              buffer.writeUInt32LE(color, offset + 6);
+              buffer.writeUInt32LE(pidIdx, offset + 10);
+              buffer.writeUInt8(over, offset + 14);
+              buffer.writeUInt8(flags, offset + 15);
+              buffer.writeDoubleLE(exp, offset + 16);
+              buffer.writeUInt32LE(pAt, offset + 24);
+            } else {
+              buffer.fill(0, offset + 4, offset + 28);
+            }
+
+            offset += PACKET_SIZE;
+          });
+
+          io.emit("tile:update:bin", buffer);
+          tileUpdateBuffer = {};
+        }
       }
       batchTimer = null;
     }, 100);
@@ -736,51 +1128,22 @@ try {
 // 今後の方針: ディスクチェックによる手動編集を常にサポートする
 // 最適化: パース済みのオブジェクトをキャッシュし、冗長な JSON.parse() を回避
 
-const FILE_CACHE = new Map(); // filePath -> { data, mtimeMs, lastStatTime }
+// 1. 各種データのロード
+const factions = loadJSON(FACTIONS_PATH, { factions: {} });
+const players = loadJSON(PLAYERS_PATH, {});
+const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
 
-function loadJSON(filePath, defaultValue = {}, ignoreCache = false) {
-  try {
-    if (!fs.existsSync(filePath)) {
-      return defaultValue;
-    }
+// 2. マッピングの再構築（IDソートにより順序を固定）
+rebuildStableMappings(factions, players);
 
-    const cached = FILE_CACHE.get(filePath);
-    const now = Date.now();
+// 3. SAB の同期 (バイナリからのロードよりも JSON (Truth) を優先して一度クリーンアップ)
+syncSABWithJSON(mapState);
+saveMapBinary(); // JSON の内容でバイナリファイルを即座に更新
 
-    // ID/ファイルの性質によるIO最適化
-    // 1. キャッシュが新しければ即座に返す (頻繁な stat 呼び出しを抑制)
-    // [FIX] 1000ms 固定のキャッシュスキップはデータ不整合の原因になるため廃止
-
-    const stats = fs.statSync(filePath);
-    if (!ignoreCache && cached && cached.mtimeMs >= stats.mtimeMs) {
-      cached.lastStatTime = now;
-      return cached.data;
-    }
-
-    const raw = fs.readFileSync(filePath, "utf-8");
-    if (!raw.trim()) {
-      // Busy waitを廃止。空の場合は一旦キャッシュを返して終了
-      return cached ? cached.data : defaultValue;
-    }
-
-    const data = JSON.parse(raw);
-    FILE_CACHE.set(filePath, {
-      data,
-      mtimeMs: stats.mtimeMs,
-      lastStatTime: now,
-    });
-    return data;
-  } catch (e) {
-    if (!ignoreCache && FILE_CACHE.has(filePath)) {
-      return FILE_CACHE.get(filePath).data; // エラー時はキャッシュにフォールバック
-    }
-    console.error(
-      `[Persistence] Error reading ${path.basename(filePath)}:`,
-      e.message,
-    );
-    return defaultValue;
-  }
-}
+const syncCount = Object.keys(mapState.tiles || {}).length;
+console.log(
+  `[Init] Map data initialized and synced from JSON. Total tiles: ${syncCount}, TILE_BYTE_SIZE: ${TILE_BYTE_SIZE}`,
+);
 
 // game_ids.json の変更を監視してホットリロードする
 if (fs.existsSync(GAME_IDS_PATH)) {
@@ -897,28 +1260,6 @@ function checkGameStatus(req, res, next) {
 }
 
 /**
- * マップ更新をキューに入れる
- * @param {Object} updates - { key: tile } のマップ
- */
-function queueMapUpdate(updates) {
-  // メモリ上のキャッシュ (FILE_CACHE) を即座に更新して、
-  // 次回の loadJSON 呼び出しが最新の状態を返すようにする。
-  const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} }, false);
-
-  Object.entries(updates).forEach(([key, tile]) => {
-    if (tile === null) {
-      if (mapState.tiles && mapState.tiles[key]) delete mapState.tiles[key];
-    } else {
-      if (!mapState.tiles) mapState.tiles = {};
-      mapState.tiles[key] = tile;
-    }
-    pendingChanges.set(key, tile);
-  });
-
-  checkSaveCondition();
-}
-
-/**
  * 内部的な保存トリガー (updateJSON経由など)
  */
 function queueMapUpdateInternal() {
@@ -972,14 +1313,16 @@ async function persistMapState() {
     // ただし await saveJSON 中に他の処理が入る可能性はある。
     // 理想的には pendingChanges をローカルにコピーしてクリアだが、
     // 今回は saveJSON 呼び出し時にデータを渡すので、その時点のスナップショットが保存される。
-    const changesToClear = new Set(pendingChanges.keys());
     pendingChanges.clear(); // ここでクリアしてしまうと、saveJSON失敗時にデータロストするリスクがあるが、簡易実装とする
 
     // saveJSON は LockManager を使うので安全
     await saveJSON(MAP_STATE_PATH, mapState, { skipLock: false });
 
+    // [NEW] バイナリ形式でも保存
+    await saveMapBinary();
+
     lastMapSaveTime = Date.now();
-    console.log(`[MapSave] Map state saved successfully.`);
+    console.log(`[MapSave] Map state saved successfully (JSON & Binary).`);
   } catch (e) {
     console.error(`[MapSave] Failed to save map state:`, e);
     // 失敗した場合はログに出すのみ (リトライロジックは今回省略)
@@ -1145,47 +1488,6 @@ app.post(
     }
   },
 );
-
-// マップの状態履歴を保存 (Workerオフロード版)
-async function saveMapStateHistory() {
-  try {
-    const timestamp = new Date()
-      .toISOString()
-      .replace(/[:.]/g, "-")
-      .slice(0, 19);
-    const historyDir = path.join(DATA_DIR, "history");
-    const historyFile = path.join(historyDir, `mapState_${timestamp}.json`);
-
-    if (!fs.existsSync(historyDir)) {
-      fs.mkdirSync(historyDir, { recursive: true });
-    }
-
-    console.log("[History] Offloading map snapshot save to Worker...");
-    const result = await runWorkerTask("SAVE_MAP_SNAPSHOT", {
-      sourcePath: MAP_STATE_PATH,
-      targetPath: historyFile,
-    });
-
-    if (!result.success) {
-      console.error("[History] Snapshot failed:", result.error);
-      return;
-    }
-
-    console.log(`[History] Map snapshot saved: ${historyFile}`);
-
-    // [OPTIMIZED] 履歴インデックスを非同期で更新
-    await updateJSON(MAP_STATE_INDEX_PATH, (index) => {
-      index.push({
-        timestamp: new Date().toISOString(),
-        filename: path.basename(historyFile),
-      });
-      // 履歴が多すぎる場合は古いものを削除 (保留: 本番運用状況見て判断)
-      return index;
-    });
-  } catch (e) {
-    console.error("[History] Error saving map state history:", e);
-  }
-}
 
 app.get("/api/admin/debug/memory", authenticate, (req, res) => {
   // Direct Disk Mode: メモリキャッシュは使用されていません
@@ -1749,9 +2051,6 @@ async function clampFactionSharedAP(
     mergerSettings: { prohibitedRank: 5 },
   });
   const players = playersJson || loadJSON(PLAYERS_PATH, { players: {} });
-  const gameIds = settings.gardenMode
-    ? loadJSON(GAME_IDS_PATH, {}, true)
-    : null;
 
   // [FIX] activeMembers を計算して渡す
   const now = Date.now();
@@ -1767,8 +2066,7 @@ async function clampFactionSharedAP(
     faction,
     players,
     settings,
-    gameIds,
-    activeMembers, // [FIX] activeMembers を渡す
+    activeMembers,
   );
 
   if ((faction.sharedAP || 0) > limit) {
@@ -1828,7 +2126,10 @@ async function processSecretTriggers(isScheduled = false) {
             }
           }
         });
-        return { appliedTriggers: mergedTriggers, ranksMap: mergedRanksMap };
+        return {
+          appliedTriggers: mergedTriggers,
+          ranksMap: mergedRanksMap,
+        };
       },
     );
 
@@ -1840,11 +2141,11 @@ async function processSecretTriggers(isScheduled = false) {
       return;
     }
 
-    // 表示用にランク配列を再構築 (必要最小限のコンテキスト)
-    const ranks = Object.entries(ranksMap).map(([id, rank]) => ({ id, rank }));
-
-    // 弱小判定のために最新の勢力ポイントを取得
-    const { updates: factionPoints } = await recalculateAllFactionPoints();
+    // 表示用にランク情報をキャッシュから取得
+    const ranks = cachedFactionRanks.length > 0 ? cachedFactionRanks : [];
+    // 弱小判定のために最新の勢力ポイントをキャッシュから逆引き用マップに変換
+    const factionPoints = {};
+    cachedFactionRanks.forEach((r) => (factionPoints[r.id] = r.points));
 
     // メインスレッドの状態に適用 & 永続化
     let triggersCount = 0;
@@ -1883,18 +2184,8 @@ async function processSecretTriggers(isScheduled = false) {
             apSettings: {},
             mergerSettings: { prohibitedRank: 5 },
           });
-          const gameIds = settings.gardenMode
-            ? loadJSON(GAME_IDS_PATH, {}, true)
-            : null;
-
-          // Helper利用
           const { limit: sharedLimit, activeMemberCount } =
-            calculateFactionSharedAPLimit(
-              faction,
-              playersData,
-              settings,
-              gameIds,
-            );
+            calculateFactionSharedAPLimit(faction, playersData, settings);
 
           const isWeak = isWeakFactionUnified(
             factionRank,
@@ -2049,87 +2340,6 @@ function getClusters(factionId, mapState) {
 
 // [NEW] Helper: コアを含むかどうかを識別しつつクラスタを取得する (検証用)
 // 連結領域の計算 (DFS最適化版)
-function getFactionClusterInfo(
-  factionId,
-  mapState,
-  extraTiles = [],
-  knownFactionKeys = null,
-) {
-  const factionTiles = new Set();
-
-  if (knownFactionKeys) {
-    // 高速化パス: 呼び出し元から提供されたキーセットを使用
-    knownFactionKeys.forEach((k) => factionTiles.add(k));
-  } else {
-    // 従来パス: マップ全走査 (重い)
-    Object.entries(mapState.tiles).forEach(([key, t]) => {
-      if (
-        (t.factionId || t.faction) === factionId ||
-        (t.core && t.core.factionId === factionId)
-      ) {
-        factionTiles.add(key);
-      }
-    });
-  }
-
-  extraTiles.forEach((t) => {
-    factionTiles.add(`${t.x}_${t.y}`);
-  });
-
-  const clusters = [];
-  const visited = new Set();
-
-  // 隣接8方向
-  const directions = [
-    [0, 1],
-    [0, -1],
-    [1, 0],
-    [-1, 0],
-    [1, 1],
-    [1, -1],
-    [-1, 1],
-    [-1, -1],
-  ];
-
-  for (const key of factionTiles) {
-    if (visited.has(key)) continue;
-
-    const cluster = [];
-    const queue = [key]; // DFS Stack
-    visited.add(key);
-    let hasCore = false;
-
-    while (queue.length > 0) {
-      const current = queue.pop(); // DFS (O(1) operation)
-      cluster.push(current);
-
-      // コアのチェック
-      const tile = mapState.tiles[current];
-      if (tile && tile.core && tile.core.factionId === factionId) {
-        hasCore = true;
-      }
-
-      const [x, y] = current.split("_").map(Number);
-      for (const [dx, dy] of directions) {
-        const nk = `${x + dx}_${y + dy}`;
-        // Mapにある かつ 自勢力 かつ 未訪問
-        if (factionTiles.has(nk) && !visited.has(nk)) {
-          visited.add(nk);
-          queue.push(nk);
-        }
-      }
-    }
-    clusters.push({ tiles: cluster, hasCore });
-  }
-
-  const flyingEnclaves = clusters.filter((c) => !c.hasCore).length;
-
-  return {
-    total: clusters.length,
-    flyingEnclaves,
-    clusters,
-  };
-}
 
 // ヘルパー: その勢力のコア定義を含むクラスタを取得する
 function getCoreClusters(factionId, mapState) {
@@ -2562,14 +2772,8 @@ function handleApRefill(player, players, playerId, saveToDisk = true) {
             const memberCount = faction.members ? faction.members.length : 0;
 
             // 共有AP上限: Base * Active
-            // [UPDATED] Helper利用
             const { limit: sharedCap, activeMemberCount: activeMembers } =
-              calculateFactionSharedAPLimit(
-                faction,
-                players,
-                settings,
-                updatedGameIds,
-              );
+              calculateFactionSharedAPLimit(faction, players, settings);
 
             // 弱小勢力なら補充 (+50固定)
             if (isWeakFaction(rank, memberCount)) {
@@ -2829,14 +3033,10 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
     apSettings: {},
     mergerSettings: { prohibitedRank: 5 },
   });
-  const gameIds = settings.gardenMode
-    ? loadJSON(GAME_IDS_PATH, {}, true)
-    : null;
   const { limit: sharedLimit } = calculateFactionSharedAPLimit(
     f,
     players,
     settings,
-    gameIds,
     activeMemberIds,
   );
 
@@ -2988,10 +3188,9 @@ async function runScheduledTasks() {
   const min = now.getMinutes();
   console.log(`Running scheduled tasks... min: ${min}`);
 
-  // ===== [NEW] 1分間隔の並列整合性・中核チェック =====
-  // 並列処理により、全タイルの整合性チェックと中核拡張/期限切れ判定を高速に行う
-  await runBatchIntegrityCheck();
-  await runParallelCoreRecalculate();
+  // ===== 1分間隔の並列整合性・中核チェック =====
+  // 統合された Worker タスクにより整合性チェックと中核管理を行う
+  await runCoreMaintenanceFull();
 
   // 2. 滅亡判定 & ポイント再計算
   // 整合性チェック後に中核を失った勢力を判定し、滅亡させる
@@ -3676,7 +3875,11 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
     const playerId = req.playerId;
     const factions = loadJSON(FACTIONS_PATH, { factions: {} });
 
-    let responseData = { authenticated: true, isGuest: false, player: null };
+    let responseData = {
+      authenticated: true,
+      isGuest: false,
+      player: null,
+    };
 
     await updateJSON(
       PLAYERS_PATH,
@@ -4261,46 +4464,73 @@ app.post(
 );
 
 // 勢力一覧取得 (メンバー情報を含む)
-app.get("/api/factions", authenticate, (req, res) => {
-  const factions = loadJSON(FACTIONS_PATH, { factions: {} });
-  const players = loadJSON(PLAYERS_PATH, { players: {} });
-  const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
+app.get("/api/factions", authenticate, async (req, res) => {
+  try {
+    const factions = loadJSON(FACTIONS_PATH, { factions: {} });
+    const players = loadJSON(PLAYERS_PATH, { players: {} });
+    const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
 
-  // 全タイルの統計を一括計算 (O(N_tiles))
-  const stats = { factions: {} };
-  Object.entries(mapState.tiles).forEach(([key, t]) => {
-    const fid = t.faction || t.factionId;
-    if (!fid) return;
-    if (!stats.factions[fid]) {
-      stats.factions[fid] = {
-        tileCount: 0,
-        totalPoints: 0,
-        playerTileCounts: {},
-        playerTilePoints: {},
-      };
+    // [OPTIMIZATION] 全タイルの統計計算をWorkerへオフロード・並列化 (O(N_tiles))
+    const tileKeys = Object.keys(mapState.tiles);
+    const chunkSize = Math.ceil(tileKeys.length / numWorkers);
+    const tasks = [];
+    for (let i = 0; i < numWorkers; i++) {
+      const chunkKeys = tileKeys.slice(i * chunkSize, (i + 1) * chunkSize);
+      if (chunkKeys.length > 0) {
+        tasks.push(
+          runWorkerTask("GET_MAP_STATS_PARTIAL", {
+            tileKeys: chunkKeys,
+          }),
+        );
+      }
     }
-    const [x, y] = key.split("_").map(Number);
-    const points = getTilePoints(x, y);
-    stats.factions[fid].tileCount++;
-    stats.factions[fid].totalPoints += points;
 
-    const pid = t.paintedBy;
-    if (pid) {
-      stats.factions[fid].playerTileCounts[pid] =
-        (stats.factions[fid].playerTileCounts[pid] || 0) + 1;
-      stats.factions[fid].playerTilePoints[pid] =
-        (stats.factions[fid].playerTilePoints[pid] || 0) + points;
+    const results = await Promise.all(tasks);
+
+    // 結果をマージ
+    const stats = { factions: {} };
+    results.forEach((res) => {
+      if (!res.success || !res.results || !res.results.stats) return;
+      const s = res.results.stats;
+      Object.keys(s.factions).forEach((fid) => {
+        if (!stats.factions[fid]) {
+          stats.factions[fid] = {
+            tileCount: 0,
+            totalPoints: 0,
+            playerTileCounts: {},
+            playerTilePoints: {},
+          };
+        }
+        const m = stats.factions[fid];
+        const r = s.factions[fid];
+        m.tileCount += r.tileCount;
+        m.totalPoints += r.totalPoints;
+
+        Object.keys(r.playerTileCounts).forEach((pid) => {
+          m.playerTileCounts[pid] =
+            (m.playerTileCounts[pid] || 0) + r.playerTileCounts[pid];
+        });
+        Object.keys(r.playerTilePoints).forEach((pid) => {
+          m.playerTilePoints[pid] =
+            (m.playerTilePoints[pid] || 0) + r.playerTilePoints[pid];
+        });
+      });
+    });
+
+    // [OPTIMIZATION] ランキング計算はWorkerで定期実行されたキャッシュを使用
+    stats.ranks = cachedFactionRanks || [];
+
+    const enrichedFactions = {};
+    for (const fid of Object.keys(factions.factions)) {
+      enrichedFactions[fid] = getEnrichedFaction(fid, factions, players, stats);
     }
-  });
-
-  // [OPTIMIZATION] ランキング計算はWorkerで定期実行されたキャッシュを使用
-  stats.ranks = cachedFactionRanks || [];
-
-  const enrichedFactions = {};
-  for (const fid of Object.keys(factions.factions)) {
-    enrichedFactions[fid] = getEnrichedFaction(fid, factions, players, stats);
+    res.json({ factions: enrichedFactions });
+  } catch (e) {
+    console.error("Error in /api/factions:", e);
+    res
+      .status(500)
+      .json({ error: e.message || "サーバーエラーが発生しました" });
   }
-  res.json({ factions: enrichedFactions });
 });
 
 // マップ状態取得 (認証なしでも基本情報は閲覧可能にする)
@@ -4309,93 +4539,78 @@ app.get("/api/map", (req, res) => {
   res.json({ tiles: mapState.tiles });
 });
 
-// 軽量版マップAPI（描画に必要な最小限のデータのみ）
-app.get("/api/map/lite", async (req, res) => {
-  try {
-    // [OPTIMIZATION] playerNames を先に収集して Worker に送り、Worker 側で結合させる
-    const playersData = loadJSON(PLAYERS_PATH, { players: {} });
-    const playerNames = {};
-    Object.entries(playersData.players).forEach(([playerId, p]) => {
-      playerNames[playerId] = p.displayName || toShortId(playerId);
-    });
-
-    const result = await runWorkerTask("GENERATE_LITE_MAP", {
-      playerNames,
-      filePaths: { mapState: MAP_STATE_PATH },
-    });
-
-    // Workerはメインスレッドでのシリアライズコストを回避するため、すでに文字列化されたJSONを返す
-    if (
-      result &&
-      result.success &&
-      result.results &&
-      result.results.jsonString
-    ) {
-      // Workerが文字列化済みJSONを返したため、そのまま送信する
-      res.header("Content-Type", "application/json");
-      res.send(result.results.jsonString);
-    } else {
-      throw new Error("Worker returned invalid data");
-    }
-  } catch (e) {
-    console.error("Lite map generation failed:", e);
-
-    // フォールバック: 同期生成 (Workerが失敗した場合)
-    try {
-      const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
-      const liteTiles = {};
-      Object.entries(mapState.tiles).forEach(([key, tile]) => {
-        const [x, y] = key.split("_").map(Number);
-        liteTiles[key] = {
-          f: tile.faction || tile.factionId,
-          c: tile.customColor || tile.color,
-          cc: !!tile.customColor,
-          p: tile.paintedBy,
-          o: tile.overpaint || 0,
-          x,
-          y,
-        };
-        if (tile.core) {
-          liteTiles[key].core = {
-            fid: tile.core.factionId,
-            exp: tile.core.expiresAt || null,
-          };
-        }
-        if (tile.coreificationUntil) {
-          liteTiles[key].coreUntil = tile.coreificationUntil;
-          liteTiles[key].coreFid = tile.coreificationFactionId;
-        }
-      });
-      res.json({ tiles: liteTiles, version: Date.now(), playerNames: {} });
-    } catch (e2) {
-      res.status(500).send(e2.message);
-    }
-  }
-});
-
 // [NEW] バイナリ版マップAPI (究極の高速化)
 app.get("/api/map/binary", async (req, res) => {
   try {
-    const playersData = loadJSON(PLAYERS_PATH, { players: {} });
-    const playerNames = {};
-    Object.entries(playersData.players).forEach(([playerId, p]) => {
-      playerNames[playerId] = p.displayName || toShortId(playerId);
+    // [NEW] SharedArrayBuffer をベースにした高速・正確なバイナリ配信
+    // 安定化されたマッピング（ID順ソート済）を使用することで再起動時の不整合を防止
+
+    const tileCount = MAP_SIZE * MAP_SIZE;
+    const factionList = indexToFactionId;
+    const playerList = playerIds;
+
+    // ヘッダー計算
+    let factionNamesSize = 0;
+    factionList.forEach((f) => {
+      factionNamesSize += 2 + Buffer.from(f).length;
     });
 
-    const result = await runWorkerTask("GENERATE_BINARY_MAP", {
-      playerNames,
-      filePaths: { mapState: MAP_STATE_PATH },
+    let playerIdsSize = 0;
+    playerList.forEach((pid) => {
+      playerIdsSize += 2 + Buffer.from(pid).length;
     });
 
-    if (result && result.success && result.results && result.results.binary) {
-      res.header("Content-Type", "application/octet-stream");
-      res.send(result.results.binary);
-    } else {
-      throw new Error("Worker returned invalid binary data");
-    }
+    const headerSize = 4 + 1 + 8 + 4 + 2 + factionNamesSize + 4 + playerIdsSize;
+    const tilesStartOffset = headerSize + 4;
+    const totalSize = tilesStartOffset + tileCount * TILE_BYTE_SIZE; // Uses fixed 24B
+
+    const buffer = Buffer.allocUnsafe(totalSize);
+    let offset = 0;
+
+    // Header (TMAP)
+    buffer.write("TMAP", offset);
+    offset += 4;
+    buffer.writeUInt8(1, offset);
+    offset += 1;
+    buffer.writeDoubleLE(Date.now(), offset);
+    offset += 8;
+
+    // Factions
+    buffer.writeUInt16LE(factionList.length, offset);
+    offset += 2;
+    factionList.forEach((f) => {
+      const b = Buffer.from(f);
+      buffer.writeUInt16LE(b.length, offset);
+      offset += 2;
+      b.copy(buffer, offset);
+      offset += b.length;
+    });
+
+    // Players
+    buffer.writeUInt32LE(playerList.length, offset);
+    offset += 4;
+    playerList.forEach((pid) => {
+      const b = Buffer.from(pid);
+      buffer.writeUInt16LE(b.length, offset);
+      offset += 2;
+      b.copy(buffer, offset);
+      offset += b.length;
+    });
+
+    // Tile count
+    buffer.writeUInt32LE(tileCount, offset);
+    offset += 4;
+
+    // Copy entire SAB data
+    const sabBuffer = Buffer.from(sharedMapSAB);
+    sabBuffer.copy(buffer, offset);
+
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Length", buffer.length);
+    res.send(buffer);
   } catch (e) {
-    console.error("Binary map generation failed:", e);
-    res.status(500).send(e.message);
+    console.error(`Binary map export error: ${e.message}`);
+    res.status(500).send("Error exporting binary map");
   }
 });
 
@@ -4564,7 +4779,9 @@ app.get("/api/notices", authenticate, (req, res) => {
     const player = players.players[req.playerId];
 
     // システム通知 (JSON)
-    const systemNoticesData = loadJSON(SYSTEM_NOTICES_PATH, { notices: [] });
+    const systemNoticesData = loadJSON(SYSTEM_NOTICES_PATH, {
+      notices: [],
+    });
     let publicNotices = systemNoticesData.notices || [];
 
     // 日付順ソート (降順)
@@ -4771,9 +4988,9 @@ app.post(
 
     // 確定コストチェック
     if (player.ap < FACTION_ACTION_COST) {
-      return res
-        .status(400)
-        .json({ error: `APが不足しています（必要: ${FACTION_ACTION_COST}）` });
+      return res.status(400).json({
+        error: `APが不足しています（必要: ${FACTION_ACTION_COST}）`,
+      });
     }
 
     // 距離制限削除のため、以下のループチェックは削除
@@ -4953,7 +5170,11 @@ app.post(
                   { candidateId: req.playerId },
                   {
                     actions: [
-                      { label: "承認", action: "approve", style: "success" },
+                      {
+                        label: "承認",
+                        action: "approve",
+                        style: "success",
+                      },
                       { label: "拒否", action: "reject", style: "danger" },
                     ],
                   },
@@ -5214,7 +5435,10 @@ app.post(
           type: "warning",
         });
 
-        return res.json({ success: true, message: "加入申請を拒否しました。" });
+        return res.json({
+          success: true,
+          message: "加入申請を拒否しました。",
+        });
       }
     } else if (notice.type === "merge_request") {
       // 合併申請処理
@@ -5240,39 +5464,38 @@ app.post(
           }
         });
 
-        // 2. タイル移譲 (変更点: 飛び地ロジック)
-        const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
-        const updatedTiles = {};
+        // 2. タイル移譲 (Worker Offloading)
+        // [NEW] 勢力合併の重い処理をWorkerにオフロード (PROCESS_MERGE)
+        try {
+          const result = await runWorkerTask("PROCESS_MERGE", {
+            filePaths: { mapState: MAP_STATE_PATH },
+            requesterFactionId,
+            targetFactionId: factionId,
+            targetColor: faction.color,
+          });
 
-        // 2a. 申請元のすべてのタイルを特定
-        const requesterTiles = [];
-        Object.values(mapState.tiles).forEach((t) => {
-          if ((t.faction || t.factionId) === requesterFactionId) {
-            requesterTiles.push(t);
-          }
-        });
+          if (result.success) {
+            const { updatedTiles, count } = result.results;
+            console.log(
+              `[Merge] Worker processed ${count} tiles for merge validation.`,
+            );
 
-        // 2b. 全タイルを移譲 (無条件吸収)
-        const nowStr = new Date().toISOString();
-        requesterTiles.forEach((t) => {
-          t.factionId = factionId;
-          delete t.faction;
-          // [MODIFIED] カスタムカラーが設定解除されている場合のみ、勢力の色を適用する
-          if (!t.customColor) {
-            t.color = faction.color;
-          }
-          if (t.core) {
-            // 元々中核だったマスだけ中核を継承
-            t.core.factionId = factionId;
+            // メインスレッドのキャッシュを更新
+            // loadJSONは参照を返すので、そこに統合する
+            const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
+            Object.assign(mapState.tiles, updatedTiles);
+
+            // 保存と配信
+            saveJSON(MAP_STATE_PATH, mapState);
+            io.emit("tile:update", updatedTiles);
           } else {
-            // 中核でなかったマスは、即座に自動中核化されるのを防ぐため、塗装時間を現在時刻に更新
-            t.paintedAt = nowStr;
+            console.error("[Merge] Worker failed:", result.error);
+            // エラー時でもメンバー移動は完了しているため、リトライ不可能ならログだけ残す
+            // (本来はトランザクションが必要)
           }
-          updatedTiles[`${t.x}_${t.y}`] = t;
-        });
-
-        saveJSON(MAP_STATE_PATH, mapState);
-        io.emit("tile:update", updatedTiles);
+        } catch (e) {
+          console.error("[Merge] Error calling worker:", e);
+        }
 
         // 3. 旧勢力の削除
         cleanupDestroyedFaction(requesterFactionId);
@@ -6783,7 +7006,10 @@ app.post(
       let allianceUpdated = false;
 
       for (const targetFactionId of stolenCounts.keys()) {
-        const stats = factionStats[targetFactionId] || { tiles: 0, cores: 0 };
+        const stats = factionStats[targetFactionId] || {
+          tiles: 0,
+          cores: 0,
+        };
         let isDestroyed = false;
         if (stats.cores === 0) {
           isDestroyed = true;
@@ -7095,7 +7321,9 @@ app.post(
   checkGameStatus,
   (req, res) => {
     const { targetFactionId } = req.body;
-    const settings = loadJSON(SYSTEM_SETTINGS_PATH, { isMergeEnabled: true });
+    const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
+      isMergeEnabled: true,
+    });
 
     if (settings.isMergeEnabled === false) {
       return res
@@ -7450,9 +7678,9 @@ app.post(
 
     const trimmedName = name.trim();
     if (trimmedName.length === 0 || trimmedName.length > 15) {
-      return res
-        .status(400)
-        .json({ error: "名前は1〜15文字で指定してください（空白のみ不可）" });
+      return res.status(400).json({
+        error: "名前は1〜15文字で指定してください（空白のみ不可）",
+      });
     }
     if (trimmedName.replace(/[\u200B-\u200D\uFEFF]/g, "").length === 0) {
       return res.status(400).json({ error: "無効な文字が含まれています" });
@@ -8117,7 +8345,9 @@ app.post(
 
           // 2. 同盟処理 (Alliance Cleanup)
           if (f.allianceId) {
-            const alliancesData = loadJSON(ALLIANCES_PATH, { alliances: {} });
+            const alliancesData = loadJSON(ALLIANCES_PATH, {
+              alliances: {},
+            });
             const alliance = (alliancesData.alliances || {})[f.allianceId];
 
             if (alliance) {
@@ -8306,9 +8536,9 @@ app.post(
     );
 
     if (!apCheck.success) {
-      return res
-        .status(400)
-        .json({ error: `APが足りません（必要: ${NAMED_CELL_CREATE_COST}）` });
+      return res.status(400).json({
+        error: `APが足りません（必要: ${NAMED_CELL_CREATE_COST}）`,
+      });
     }
 
     // 2. Consume AP (Actual)
@@ -8538,9 +8768,9 @@ app.post(
       const remainingMin = Math.ceil(
         (cooldownMs - (now - namedCell.lastAttackedAt)) / 60000,
       );
-      return res
-        .status(400)
-        .json({ error: `攻撃できません。再攻撃まであと${remainingMin}分です` });
+      return res.status(400).json({
+        error: `攻撃できません。再攻撃まであと${remainingMin}分です`,
+      });
     }
 
     // コスト計算: 基本塗りコスト + 5 AP
@@ -10076,153 +10306,35 @@ app.get("/api/wars", (req, res) => {
   res.json({ success: true, wars: wars.wars || {} });
 });
 
-// 15分ごとの中核マス整合性チェック（強化版）
-function checkFactionCoreIntegrity() {
-  const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
-  const factions = loadJSON(FACTIONS_PATH, { factions: {} });
-  let updated = false;
-  const updatedTiles = {};
-
-  const now = Date.now();
-  const ONE_HOUR = 60 * 60 * 1000;
-
-  // 1. 失効済みの中核を物理削除
-  Object.keys(mapState.tiles).forEach((key) => {
-    const tile = mapState.tiles[key];
-    if (
-      tile.core &&
-      tile.core.expiresAt &&
-      new Date(tile.core.expiresAt).getTime() <= now
-    ) {
-      delete tile.core;
-      updatedTiles[key] = tile;
-      updated = true;
-    }
-  });
-
-  // 2. 勢力ごとのタイルリストとクラスタ情報を収集
-  const factionTiles = {};
-  Object.keys(mapState.tiles).forEach((key) => {
-    const tile = mapState.tiles[key];
-    const fid = tile.faction || tile.factionId;
-    if (fid) {
-      if (!factionTiles[fid]) factionTiles[fid] = [];
-      factionTiles[fid].push({ key, ...tile });
-    }
-  });
-
-  Object.keys(factions.factions).forEach((fid) => {
-    const tilesInMap = factionTiles[fid] || [];
-    const count = tilesInMap.length;
-
-    // 連結性に基づく中核化候補の特定
-    // [OPTIMIZATION] 全タイル走査回避のため、抽出済みのタイルキーリストを渡す
-    const knownKeys = tilesInMap.map((t) => t.key);
-    const clusterInfo = getFactionClusterInfo(fid, mapState, [], knownKeys);
-
-    clusterInfo.clusters.forEach((cluster) => {
-      // 中核（恒久または有効なカウントダウン）を含むクラスタのみ拡大可能
-      if (!cluster.hasCore) return;
-
-      cluster.tiles.forEach((key) => {
-        const tile = mapState.tiles[key];
-        if (!tile) return;
-
-        // 既に自分の中核ならパス
-        if (tile.core && tile.core.factionId === fid) return;
-        // 他勢力の有効な中核がある場合はスキップ
-        if (tile.core && tile.core.factionId !== fid) return;
-
-        let shouldBeCoreDirectly = false;
-
-        // 小規模勢力（400タイル以下）は中核に隣接していれば即時中核化
-        if (count <= 400) {
-          shouldBeCoreDirectly = true;
-        } else {
-          // 大規模勢力は1時間保持で中核化
-          const paintedAt = new Date(tile.paintedAt).getTime();
-          const pTime = isNaN(paintedAt) ? now : paintedAt;
-          if (now - pTime >= ONE_HOUR) {
-            shouldBeCoreDirectly = true;
-          }
-        }
-
-        if (shouldBeCoreDirectly) {
-          tile.core = { factionId: fid, expiresAt: null };
-          tile.coreificationUntil = null;
-          tile.coreificationFactionId = null;
-          updatedTiles[key] = tile;
-          updated = true;
-        } else if (
-          !tile.coreificationUntil ||
-          tile.coreificationFactionId !== fid
-        ) {
-          // 条件を満たさないが中核に隣接している場合、カウントダウンを開始（大規模勢力用）
-          const coreificationTime = now + ONE_HOUR;
-          tile.coreificationUntil = new Date(coreificationTime).toISOString();
-          tile.coreificationFactionId = fid;
-          updatedTiles[key] = tile;
-          updated = true;
-        }
-      });
-    });
-  });
-
-  // 3. カウントダウン完了のチェック
-  Object.keys(mapState.tiles).forEach((key) => {
-    const tile = mapState.tiles[key];
-    if (
-      tile.coreificationUntil &&
-      new Date(tile.coreificationUntil).getTime() <= now &&
-      tile.coreificationFactionId
-    ) {
-      const fid = tile.coreificationFactionId;
-      // 所有権がまだその勢力にあるか確認
-      if ((tile.faction || tile.factionId) === fid && factions.factions[fid]) {
-        tile.core = { factionId: fid, expiresAt: null };
-        tile.coreificationUntil = null;
-        tile.coreificationFactionId = null;
-        updatedTiles[key] = tile;
-        updated = true;
-      }
-    }
-  });
-
-  if (updated) {
-    saveJSON(MAP_STATE_PATH, mapState);
-    io.emit("tile:update", updatedTiles);
-  }
-}
-
-// 15分ごとに実行 (00, 15, 30, 45)
-setInterval(() => {
-  const min = new Date().getMinutes();
-  if (min % 15 === 0) {
-    checkFactionCoreIntegrity();
-  }
-  // [NEW] 毎分チェック
+// 毎分メンテナンス
+setInterval(async () => {
+  // 停戦期限切れチェック (Worker オフロード)
   checkTruceExpiration();
 }, 60 * 1000);
 
-// [NEW] 停戦期限切れチェック
-function checkTruceExpiration() {
-  const trucesData = loadJSON(TRUCES_PATH, { truces: {} });
-  const now = Date.now();
-  let updated = false;
-  const expiredKeys = [];
+// [NEW] 停戦期限切れチェック (Worker オフロード)
+async function checkTruceExpiration() {
+  try {
+    const trucesData = loadJSON(TRUCES_PATH, { truces: {} });
+    const result = await runWorkerTask("CHECK_TRUCE_PARTIAL", {
+      truces: trucesData.truces,
+      now: Date.now(),
+    });
 
-  Object.entries(trucesData.truces).forEach(([key, t]) => {
-    if (t.expiresAt && new Date(t.expiresAt).getTime() <= now) {
-      expiredKeys.push(key);
-      updated = true;
+    if (result.success && result.results.expiredKeys.length > 0) {
+      await updateJSON(TRUCES_PATH, (data) => {
+        result.results.expiredKeys.forEach((key) => {
+          delete data.truces[key];
+        });
+        return data;
+      });
+      io.emit("truce:update", trucesData.truces);
+      console.log(
+        `[TruceExpired] Removed ${result.results.expiredKeys.length} truces.`,
+      );
     }
-  });
-
-  if (updated) {
-    expiredKeys.forEach((k) => delete trucesData.truces[k]);
-    saveJSON(TRUCES_PATH, trucesData);
-    io.emit("truce:update", trucesData.truces);
-    console.log(`[TruceExpired] Removed ${expiredKeys.length} truces.`);
+  } catch (e) {
+    console.error("[TruceCheck] Failed:", e);
   }
 }
 
@@ -10941,8 +11053,16 @@ function handleFactionDestructionInWar(factionId) {
     if (!war.attackerSide || !war.defenderSide) continue;
 
     const sides = [
-      { side: war.attackerSide, type: "攻撃側", otherSide: war.defenderSide },
-      { side: war.defenderSide, type: "防衛側", otherSide: war.attackerSide },
+      {
+        side: war.attackerSide,
+        type: "攻撃側",
+        otherSide: war.defenderSide,
+      },
+      {
+        side: war.defenderSide,
+        type: "防衛側",
+        otherSide: war.attackerSide,
+      },
     ];
 
     let warEnded = false;
@@ -11083,7 +11203,10 @@ app.post(
       // Clean up legacy wars? Optional.
 
       io.emit("war:updated", war); // General update
-      res.json({ success: true, message: `${addedCount}勢力が参戦しました` });
+      res.json({
+        success: true,
+        message: `${addedCount}勢力が参戦しました`,
+      });
     } else {
       res.json({ success: true, message: "既に全員参戦済みです" });
     }
@@ -11156,7 +11279,11 @@ app.post(
         roles: result.roles,
       });
 
-      res.json({ success: true, role: result.newRole, roles: result.roles });
+      res.json({
+        success: true,
+        role: result.newRole,
+        roles: result.roles,
+      });
     } catch (e) {
       console.error("Error creating role:", e);
       res.status(500).json({ error: e.message || "作成に失敗しました" });
@@ -12485,7 +12612,11 @@ app.post(
       { requesterFactionId: myFactionId },
       {
         actions: [
-          { label: "承認する", action: "alliance:accept", style: "primary" },
+          {
+            label: "承認する",
+            action: "alliance:accept",
+            style: "primary",
+          },
           { label: "拒否する", action: "alliance:reject", style: "danger" },
         ],
       },
@@ -13428,6 +13559,85 @@ async function recalculateAllFactionPoints() {
   return { updates, destroyedFids, destroyedTileKeys };
 }
 
+// [NEW] マップ整合性チェックのバッチ実行
+async function runBatchIntegrityCheck() {
+  // StartY:StartY+Step ...
+  const chunks = [];
+  const chunkSize = Math.ceil(500 / numWorkers); // 500x500 map
+  for (let i = 0; i < numWorkers; i++) {
+    chunks.push({
+      startY: i * chunkSize,
+      endY: Math.min((i + 1) * chunkSize, 500),
+      // 必要な場合はここで追加データを渡すが、WorkerはloadJSONまたはSABを使用する前提
+      // mapStateは大きいので渡さない
+    });
+  }
+
+  const { coreTileSettings } = loadJSON(SYSTEM_SETTINGS_PATH, {});
+
+  console.log(
+    `[Integrity] Starting parallel integrity check (Workers: ${numWorkers})...`,
+  );
+
+  try {
+    const results = await runParallelWorkerTasks(
+      "CHECK_INTEGRITY_PARTIAL",
+      {
+        filePaths: {
+          mapState: MAP_STATE_PATH,
+          factions: FACTIONS_PATH,
+        },
+        coreTileSettings,
+      },
+      chunks,
+      (res) => {
+        // res is array of { success, results: { updatedTiles, stats }, ... }
+        let updates = {};
+        // statsは必要ならマージするが、IntegrityCheckの結果としてはupdatedTilesが重要
+        res.forEach((r) => {
+          if (r.results && r.results.updatedTiles) {
+            Object.assign(updates, r.results.updatedTiles);
+          }
+        });
+        return { updatedTiles: updates };
+      },
+    );
+
+    if (results && results.updatedTiles) {
+      const updates = results.updatedTiles;
+      const updateCount = Object.keys(updates).length;
+      if (updateCount > 0) {
+        console.log(`[Integrity] Found ${updateCount} tiles to update.`);
+        // Apply updates to in-memory mapState and queue save
+        // mapState (local var here) is stale? No, we just loaded it.
+        // But queueMapUpdate expects us to update the global state or what?
+        // Server.js doesn't seem to hold a global 'mapState' variable visible here?
+        // Wait, loadJSON returns a new object.
+        // If we update this local 'mapState', it doesn't affect the system unless we save it.
+        // 'queueMapUpdate' (line 1202) takes 'updates' argument?
+        // Let's check line 1202 usage.
+
+        // If queueMapUpdate takes 'updates' (map of changes), then we just call it.
+        await updateJSON(MAP_STATE_PATH, (data) => {
+          Object.entries(updates).forEach(([key, tile]) => {
+            if (tile === null) {
+              delete data.tiles[key];
+            } else {
+              data.tiles[key] = tile;
+            }
+          });
+          return true;
+        });
+        batchEmitTileUpdate(updates);
+      } else {
+        console.log("[Integrity] No integrity issues found.");
+      }
+    }
+  } catch (err) {
+    console.error("[Integrity] Batch check failed:", err);
+  }
+}
+
 async function checkMapIntegrity() {
   await runBatchIntegrityCheck();
 }
@@ -13438,381 +13648,8 @@ async function checkMapIntegrity() {
  * - カスタム色の包囲判定による解除
  * - 中核タイルの期限切れ/永続化判定
  */
-async function runBatchIntegrityCheck() {
-  try {
-    const rowsPerWorker = Math.ceil(MAP_SIZE / numWorkers);
-    const promises = [];
 
-    for (let i = 0; i < numWorkers; i++) {
-      const startY = i * rowsPerWorker;
-      const endY = Math.min((i + 1) * rowsPerWorker - 1, MAP_SIZE - 1);
-      if (startY >= MAP_SIZE) break;
-
-      promises.push(
-        runWorkerTask("CHECK_INTEGRITY_PARTIAL", {
-          startY,
-          endY,
-          filePaths: {
-            mapState: MAP_STATE_PATH,
-            factions: FACTIONS_PATH,
-          },
-        }),
-      );
-    }
-
-    const results = await Promise.all(promises);
-    let anyChanged = false;
-    const allUpdatedTiles = {};
-
-    results.forEach((res) => {
-      if (res.success && res.results.changed) {
-        anyChanged = true;
-        Object.assign(allUpdatedTiles, res.results.updatedTiles);
-      }
-    });
-
-    if (anyChanged) {
-      await updateJSON(MAP_STATE_PATH, (mapData) => {
-        Object.keys(allUpdatedTiles).forEach((key) => {
-          const val = allUpdatedTiles[key];
-          if (val === null) {
-            delete mapData.tiles[key];
-          } else {
-            mapData.tiles[key] = val;
-          }
-        });
-        return mapData;
-      });
-      // クライアントへ通知
-      batchEmitTileUpdate(allUpdatedTiles);
-    }
-
-    // 最後に単一ワーカで全ファイル間の非整合（NamedCell等）をチェック (Check integrity between all files with a single worker at the end)
-    const response = await runWorkerTask("CHECK_INTEGRITY", {
-      filePaths: {
-        mapState: MAP_STATE_PATH,
-        namedCells: NAMED_CELLS_PATH,
-        factions: FACTIONS_PATH,
-      },
-    });
-
-    // Workerからの差分適用 (巻き戻り防止)
-    if (
-      response.success &&
-      response.results &&
-      response.results.diffs &&
-      (Object.keys(response.results.diffs.mapState.updates).length > 0 ||
-        response.results.diffs.mapState.deletes.length > 0 ||
-        Object.keys(response.results.diffs.namedCells.updates).length > 0 ||
-        response.results.diffs.namedCells.deletes.length > 0)
-    ) {
-      const diffs = response.results.diffs;
-      console.log(
-        `[IntegrityCheck] Applying fixes from worker: Map updates=${
-          Object.keys(diffs.mapState.updates).length
-        }, deletes=${diffs.mapState.deletes.length}`,
-      );
-
-      // マップの更新
-      if (
-        Object.keys(diffs.mapState.updates).length > 0 ||
-        diffs.mapState.deletes.length > 0
-      ) {
-        await updateJSON(MAP_STATE_PATH, (mData) => {
-          diffs.mapState.deletes.forEach((key) => {
-            delete mData.tiles[key];
-          });
-          Object.entries(diffs.mapState.updates).forEach(([key, tile]) => {
-            mData.tiles[key] = tile;
-          });
-        });
-      }
-
-      // NamedCellsの更新
-      if (
-        Object.keys(diffs.namedCells.updates).length > 0 ||
-        diffs.namedCells.deletes.length > 0
-      ) {
-        await updateJSON(NAMED_CELLS_PATH, (nData) => {
-          diffs.namedCells.deletes.forEach((key) => {
-            delete nData[key];
-          });
-          Object.entries(diffs.namedCells.updates).forEach(([key, cell]) => {
-            nData[key] = cell;
-          });
-        });
-      }
-    }
-  } catch (e) {
-    console.error("[runBatchIntegrityCheck] Failed:", e);
-  }
-}
-
-/**
- * [PARALLEL] 中核マスの再計算 (拡張ロジック等)
- */
-async function runParallelCoreRecalculate() {
-  try {
-    const currentFactions = loadJSON(FACTIONS_PATH, { factions: {} });
-    const factionIds = Object.keys(currentFactions.factions);
-    const corePromises = [];
-    const coreRowsPerWorker = Math.ceil(MAP_SIZE / numWorkers);
-    const factionsPerWorker = Math.ceil(factionIds.length / numWorkers);
-
-    for (let i = 0; i < numWorkers; i++) {
-      const startY = i * coreRowsPerWorker;
-      const endY = Math.min((i + 1) * coreRowsPerWorker - 1, MAP_SIZE - 1);
-      const startF = i * factionsPerWorker;
-      const endF = Math.min((i + 1) * factionsPerWorker, factionIds.length);
-      const workerFactionIds = factionIds.slice(startF, endF);
-
-      if (startY < MAP_SIZE) {
-        corePromises.push(
-          runWorkerTask("RECALCULATE_CORES_PARTIAL", {
-            startY,
-            endY,
-            factionIds: workerFactionIds,
-            filePaths: {
-              mapState: MAP_STATE_PATH,
-              factions: FACTIONS_PATH,
-            },
-          }),
-        );
-      }
-    }
-
-    const coreResults = await Promise.all(corePromises);
-    let coreChanged = false;
-    const coreUpdatedTiles = {};
-
-    coreResults.forEach((res) => {
-      if (res.success && res.results.changed) {
-        coreChanged = true;
-        Object.assign(
-          coreUpdatedTiles,
-          res.results.results?.updatedTiles || res.results.updatedTiles || {},
-        );
-      }
-    });
-
-    if (coreChanged) {
-      await updateJSON(MAP_STATE_PATH, (mapData) => {
-        Object.keys(coreUpdatedTiles).forEach((key) => {
-          const val = coreUpdatedTiles[key];
-          if (val === null) {
-            delete mapData.tiles[key];
-          } else {
-            mapData.tiles[key] = val;
-          }
-        });
-        return mapData;
-      });
-      batchEmitTileUpdate(coreUpdatedTiles);
-    }
-  } catch (e) {
-    console.error("[runParallelCoreRecalculate] Failed:", e);
-  }
-}
-
-// [OPTIMIZATION] 中核化カウントダウン / 期限切れ / 自動拡大 処理 (Worker版) (Workerized Coreification/Expansion Process)
-// 定期メンテナンス: 1分ごとに実行
-setInterval(async () => {
-  try {
-    const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
-    const allTileKeys = Object.keys(mapState.tiles);
-    const CHUNK_COUNT = numWorkers;
-
-    // 1. タイルチャンク分割 (期限切れチェック用)
-    const tileChunks = Array.from({ length: CHUNK_COUNT }, () => ({}));
-    allTileKeys.forEach((key) => {
-      const y = parseInt(key.split("_")[1]);
-      const chunkIdx = Math.min(
-        CHUNK_COUNT - 1,
-        Math.floor((y / MAP_SIZE) * CHUNK_COUNT),
-      );
-      tileChunks[chunkIdx][key] = mapState.tiles[key];
-    });
-
-    // 2. 勢力グループ分割 (拡大チェック用)
-    const factionsData = loadJSON(FACTIONS_PATH, { factions: {} });
-    const fids = Object.keys(factionsData.factions);
-    const factionGroups = Array.from({ length: CHUNK_COUNT }, () => []);
-    fids.forEach((fid, i) => factionGroups[i % CHUNK_COUNT].push(fid));
-
-    console.log(
-      `[Maintenance] Starting parallel coreification (Maintenance: ${numWorkers} workers, Expansion: ${numWorkers} workers)...`,
-    );
-
-    const coreTileSettings =
-      loadJSON(SYSTEM_SETTINGS_PATH, {}).coreTileSettings || {};
-
-    const baseTaskData = {
-      filePaths: {
-        mapState: MAP_STATE_PATH,
-        factions: FACTIONS_PATH,
-      },
-      coreTileSettings,
-    };
-
-    // メンテナンスと拡大を並列実行
-    const tasks = [
-      ...tileChunks.map((chunk) =>
-        runWorkerTask("PROCESS_COREIFICATION", {
-          ...baseTaskData,
-          tiles: chunk,
-        }),
-      ),
-      ...factionGroups.map((group) =>
-        runWorkerTask("PROCESS_COREIFICATION", {
-          ...baseTaskData,
-          factionIds: group,
-        }),
-      ),
-    ];
-
-    const results = await Promise.all(tasks);
-    const mergedUpdatedTiles = {};
-
-    results.forEach((res) => {
-      if (res.success && res.results && res.results.updatedTiles) {
-        Object.assign(mergedUpdatedTiles, res.results.updatedTiles);
-      } else if (!res.success) {
-        console.error("[Maintenance] Worker task failed:", res.error);
-      }
-    });
-
-    if (Object.keys(mergedUpdatedTiles).length > 0) {
-      // updateJSON を使って安全に反映
-      await updateJSON(MAP_STATE_PATH, (data) => {
-        let changed = false;
-        Object.entries(mergedUpdatedTiles).forEach(([key, tileVal]) => {
-          if (data.tiles[key]) {
-            const current = data.tiles[key];
-            const currentFid = current.factionId || current.faction;
-            const workerTileFid = tileVal.factionId || tileVal.faction;
-
-            if (currentFid === workerTileFid) {
-              if (tileVal.core) {
-                current.core = tileVal.core;
-                delete current.coreificationUntil;
-                delete current.coreificationFactionId;
-              } else {
-                delete current.core;
-              }
-              changed = true;
-            }
-          }
-        });
-
-        if (changed) {
-          console.log(
-            `[Maintenance] Applied core updates to ${Object.keys(mergedUpdatedTiles).length} tiles.`,
-          );
-          batchEmitTileUpdate(Object.keys(mergedUpdatedTiles));
-        }
-        return changed; // 保存トリガー
-      });
-    }
-  } catch (e) {
-    console.error(
-      "[Maintenance] Error in coreification/maintenance process:",
-      e,
-    );
-  }
-}, 60 * 1000);
-
-// [NEW] ランキング定期更新ループ (Worker版)
-let cachedFactionRanks = [];
-async function updateRankingCache() {
-  try {
-    const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
-    const allTileKeys = Object.keys(mapState.tiles);
-
-    // チャンク分割 (Y座標ベース)
-    const CHUNK_COUNT = 4;
-    const chunks = Array.from({ length: CHUNK_COUNT }, () => ({}));
-    allTileKeys.forEach((key) => {
-      const y = parseInt(key.split("_")[1]);
-      const chunkIdx = Math.min(
-        CHUNK_COUNT - 1,
-        Math.floor((y / MAP_SIZE) * CHUNK_COUNT),
-      );
-      chunks[chunkIdx][key] = mapState.tiles[key];
-    });
-
-    console.log("[Rank] Starting parallel ranking calculation (4 workers)...");
-
-    const parallelResults = await runParallelWorkerTasks(
-      "CALCULATE_RANKS",
-      {
-        filePaths: {
-          factions: FACTIONS_PATH,
-        },
-      },
-      chunks,
-      (results) => {
-        const mergedStats = {};
-        results.forEach((res) => {
-          if (res.results && res.results.stats) {
-            Object.entries(res.results.stats).forEach(([fid, s]) => {
-              if (!mergedStats[fid])
-                mergedStats[fid] = { id: fid, points: 0, tiles: 0 };
-              mergedStats[fid].points += s.points;
-              mergedStats[fid].tiles += s.tiles;
-            });
-          }
-        });
-        return { stats: mergedStats };
-      },
-    );
-
-    if (!parallelResults.success) {
-      console.error(
-        "[Rank] Parallel calculation failed:",
-        parallelResults.error,
-      );
-      return;
-    }
-
-    // 最終的なエンリッチメント処理 (shared.js の関数を使用する Worker タスク)
-    const enrichmentResult = await runWorkerTask("CALCULATE_RANKS", {
-      filePaths: {
-        factions: FACTIONS_PATH,
-        players: PLAYERS_PATH,
-        settings: SYSTEM_SETTINGS_PATH,
-        gameIds: GAME_IDS_PATH,
-        alliances: ALLIANCES_PATH,
-      },
-      preCalculatedStats: parallelResults.stats,
-    });
-
-    if (
-      enrichmentResult &&
-      enrichmentResult.results &&
-      enrichmentResult.results.ranks
-    ) {
-      cachedFactionRanks = enrichmentResult.results.ranks;
-      console.log(
-        `[Rank] Ranking cache updated. Count: ${cachedFactionRanks.length}`,
-      );
-
-      const updates = cachedFactionRanks.map((r) => ({
-        id: r.id,
-        rank: r.rank,
-        isWeak: r.isWeak,
-        points: r.points,
-      }));
-
-      if (updates.length > 0) {
-        io.emit("ranking:updated", updates);
-      }
-    }
-  } catch (err) {
-    console.error("Failed to update ranking cache:", err);
-  }
-}
-setInterval(updateRankingCache, 15 * 1000); // 15秒ごとに更新
-updateRankingCache(); // 初回実行
+// [OPTIMIZATION] 中核化維持・確定・自動拡大処理 (Worker完全オフロード版)
 
 // 同盟と戦争の整合性チェック (定期実行)
 async function checkAllianceAndWarIntegrity() {
@@ -13989,7 +13826,7 @@ async function processDailyBonus() {
       `[DailyBonus] Reset siege bonus for ${resetCount} named tiles.`,
     );
     await updateJSON(MAP_STATE_PATH, (map) => {
-      Object.entries(updatedTiles).forEach(([key, tile]) => {
+      Object.entries(updatedTiles).forEach(([key]) => {
         if (map.tiles[key]) {
           map.tiles[key].namedData.siegeBonus = 0;
         }
@@ -14039,6 +13876,7 @@ async function processDailyBonus() {
 }
 
 // [NEW] 塗りコスト見積もりAPI (Worker分散化)
+// [NEW] 塗りコスト見積もりAPI (Worker分散化・並列化)
 app.post(
   "/api/tiles/estimate",
   authenticate,
@@ -14056,7 +13894,74 @@ app.post(
     }
 
     try {
-      // Workerに計算タスクを投げる
+      // [OPTIMIZATION] 大規模な塗装見積もり（300マス以上）の場合は並列化
+      const threshold = 300;
+      if (tiles.length >= threshold && numWorkers > 1) {
+        const chunkSize = Math.ceil(tiles.length / numWorkers);
+        const tasks = [];
+        for (let i = 0; i < numWorkers; i++) {
+          const chunk = tiles.slice(i * chunkSize, (i + 1) * chunkSize);
+          if (chunk.length > 0) {
+            tasks.push(
+              runWorkerTask("PREPARE_PAINT_PARTIAL", {
+                tiles: chunk,
+                fullTiles: tiles, // クラスタ判定の一貫性のために全体を渡す
+                player,
+                action,
+                overpaintCount: overpaintCount || 1,
+              }),
+            );
+          }
+        }
+
+        const results = await Promise.all(tasks);
+
+        // エラーチェック
+        for (const r of results) {
+          if (!r.success) {
+            return res.status(200).json({
+              success: false,
+              error: r.error,
+              code: r.code,
+            });
+          }
+        }
+
+        // 結果のマージ
+        let totalCost = 0;
+        let destructionInvolved = false;
+        let needsWarDeclaration = false;
+        let extraCost = 0;
+        const successRates = [];
+        let targetFactionName = null;
+        let targetFactionId = null;
+
+        results.forEach((r) => {
+          totalCost += r.results.cost;
+          if (r.results.destructionInvolved) destructionInvolved = true;
+          if (r.results.needsWarDeclaration) needsWarDeclaration = true;
+          extraCost += r.results.extraCost || 0;
+          if (r.results.successRates)
+            successRates.push(...r.results.successRates);
+          if (r.results.targetFactionName)
+            targetFactionName = r.results.targetFactionName;
+          if (r.results.targetFactionId)
+            targetFactionId = r.results.targetFactionId;
+        });
+
+        return res.json({
+          success: true,
+          cost: totalCost,
+          destructionInvolved,
+          successRates,
+          targetFactionName,
+          targetFactionId,
+          needsWarDeclaration,
+          extraCost,
+        });
+      }
+
+      // 通常サイズまたは並列化不可時は既存の Worker タスクを使用
       const response = await runWorkerTask("PREPARE_PAINT", {
         tiles,
         player,
@@ -14380,6 +14285,34 @@ if (!playersForSystem.players["system-capture"]) {
 // サーバー起動
 server.listen(PORT, "0.0.0.0", async () => {
   console.log(`サーバー起動: http://localhost:${PORT} (PID: ${process.pid})`);
+
+  // [NEW] 起動時整合性チェック (Worker)
+  console.log("[Init] Running startup consistency check via Worker...");
+  try {
+    const result = await runWorkerTask("CHECK_CONSISTENCY", {
+      filePaths: {
+        mapState: MAP_STATE_PATH,
+        factions: FACTIONS_PATH,
+      },
+    });
+    if (result.success) {
+      if (result.results.changed) {
+        console.log(
+          `[Init] Consistency check completed. Removed ${result.results.removedCount} invalid tiles.`,
+        );
+        if (result.results.mapState) {
+          // Workerから受け取った修正済みデータを保存
+          await saveJSON(MAP_STATE_PATH, result.results.mapState);
+        }
+      } else {
+        console.log("[Init] Consistency check passed (No issues found).");
+      }
+    } else {
+      console.error("[Init] Consistency check failed:", result.error);
+    }
+  } catch (e) {
+    console.error("[Init] Error during consistency check:", e);
+  }
 
   // [NEW] 起動時に全勢力の共有APをチェックして上限を超えている場合は修正
   try {
@@ -14801,85 +14734,3 @@ async function migratePlayerNames() {
   }
 }
 migratePlayerNames();
-
-// [OPTIMIZATION] マップ整合性チェック 定期実行 (Worker並列版)
-// 10分ごとに実行し、ゴースト勢力タイルや色の不一致などを修正
-setInterval(
-  async () => {
-    try {
-      const CHUNK_COUNT = numWorkers;
-      const coreTileSettings =
-        loadJSON(SYSTEM_SETTINGS_PATH, {}).coreTileSettings || {};
-
-      console.log(
-        `[Integrity] Starting parallel integrity check (${numWorkers} workers)...`,
-      );
-
-      const tasks = Array.from({ length: CHUNK_COUNT }, (_, i) => {
-        const startY = Math.floor((MAP_SIZE / CHUNK_COUNT) * i);
-        const endY =
-          i === CHUNK_COUNT - 1
-            ? MAP_SIZE - 1
-            : Math.floor((MAP_SIZE / CHUNK_COUNT) * (i + 1)) - 1;
-        return runWorkerTask("CHECK_INTEGRITY_PARTIAL", {
-          filePaths: {
-            mapState: MAP_STATE_PATH,
-            factions: FACTIONS_PATH,
-          },
-          startY,
-          endY,
-          coreTileSettings,
-        });
-      });
-
-      const results = await Promise.all(tasks);
-      const mergedUpdatedTiles = {};
-      let anyChanges = false;
-
-      results.forEach((res) => {
-        if (res.success && res.results) {
-          if (res.results.changed) anyChanges = true;
-          Object.assign(mergedUpdatedTiles, res.results.updatedTiles);
-        }
-      });
-
-      if (anyChanges) {
-        await updateJSON(MAP_STATE_PATH, (data) => {
-          let actualChanged = false;
-          Object.entries(mergedUpdatedTiles).forEach(([key, val]) => {
-            if (val === null) {
-              if (data.tiles[key]) {
-                delete data.tiles[key];
-                actualChanged = true;
-              }
-            } else {
-              // 所有者が変わっていない場合のみ同期を許可 (整合性チェック中の競合回避)
-              const current = data.tiles[key];
-              if (current) {
-                const currentFid = current.factionId || current.faction;
-                const workerFid = val.factionId || val.faction;
-                if (currentFid === workerFid) {
-                  data.tiles[key] = val;
-                  actualChanged = true;
-                }
-              } else {
-                // 削除されていた場合などは何もしない
-              }
-            }
-          });
-
-          if (actualChanged) {
-            batchEmitTileUpdate(Object.keys(mergedUpdatedTiles));
-          }
-          return actualChanged;
-        });
-        console.log(
-          `[Integrity] Map integrity fixed. Updated ${Object.keys(mergedUpdatedTiles).length} tiles.`,
-        );
-      }
-    } catch (e) {
-      console.error("[Integrity] Error in parallel integrity check:", e);
-    }
-  },
-  10 * 60 * 1000,
-);

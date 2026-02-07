@@ -42,14 +42,14 @@ const getTilePoints = (x, y, namedCells = null) => {
 };
 
 // クライアント側支配チェック
-const checkClientDomination = (cx, cy, level, factionId, tiles) => {
+const checkClientDomination = (cx, cy, level, factionId, getTileFunc) => {
     const radius = level;
     for (let dy = -radius; dy <= radius; dy++) {
         for (let dx = -radius; dx <= radius; dx++) {
              const tx = cx + dx;
              const ty = cy + dy;
              if (tx < 0 || tx >= MAP_SIZE || ty < 0 || ty >= MAP_SIZE) return false;
-             const t = tiles[`${tx}_${ty}`];
+             const t = getTileFunc(tx, ty);
              if (!t || (t.factionId || t.faction) !== factionId) return false;
         }
     }
@@ -57,7 +57,7 @@ const checkClientDomination = (cx, cy, level, factionId, tiles) => {
 };
 
 function GameMap({
-  tiles,
+  tileData, // [NEW] SharedArrayBuffer based data
   factions,
   selectedTiles,
   onTileClick,
@@ -88,8 +88,8 @@ function GameMap({
   playerNames = {}, // [NEW]
   onZoomChange = null, // [NEW] ズームレベル変更コールバック
   workerPool = null, // [NEW] 共有WorkerPoolを受け取る
+  version,
 }) {
-
 
 
   const baseCanvasRef = useRef(null); // Used for compatibility, points to first layer
@@ -116,18 +116,60 @@ function GameMap({
 
   // [NEW] Map Version for Worker Cache Optimization
   // Hash calculation in worker is O(N), so we use a version number O(1)
-  const [mapVersion, setMapVersion] = useState(0);
+  const mapVersion = version;
+
+  // [NEW] SharedArrayBufferからタイル情報を読み取るヘルパー
+  const getTile = useCallback((x, y) => {
+    if (!tileData || !tileData.sab) return null;
+    if (x < 0 || x >= 500 || y < 0 || y >= 500) return null;
+
+    const sabView = new DataView(tileData.sab);
+    const offset = (y * 500 + x) * 24; // TILE_BYTE_SIZE = 24
+
+    const fidIdx = sabView.getUint16(offset + 0, true);
+    const colorInt = sabView.getUint32(offset + 2, true);
+    const paintedByIdx = sabView.getUint32(offset + 6, true);
+    const overpaint = sabView.getUint8(offset + 10);
+    const flags = sabView.getUint8(offset + 11);
+    // offset 12-15 padding
+    const exp = sabView.getFloat64(offset + 16, true); // Alignment fixed
+    const pAtSec = sabView.getUint32(offset + 20, true);
+
+    const factionId = fidIdx === 65535 ? null : (tileData.factionsList ? tileData.factionsList[fidIdx] : null);
+    const color = factionId ? `#${colorInt.toString(16).padStart(6, "0")}` : (blankTileColor || "#ffffff");
+    const paintedBy = paintedByIdx === 0 ? null : (tileData.playersList ? tileData.playersList[paintedByIdx - 1] : null);
+
+    const tile = {
+      x, y, factionId, faction: factionId, color, paintedBy, overpaint
+    };
+
+    const safeISOString = (ms) => {
+      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return null;
+      try {
+        return new Date(ms).toISOString();
+      } catch (e) {
+        return null;
+      }
+    };
+
+    if (flags & 1) {
+      tile.core = { factionId, expiresAt: safeISOString(exp) };
+    }
+    if (flags & 2) {
+      tile.coreificationUntil = safeISOString(exp);
+      tile.coreificationFactionId = factionId;
+    }
+
+    return tile;
+  }, [tileData]);
 
   // [NEW] Multi-Threaded Render Worker Hook
   // Debounce tile updates to avoid excessive transfers
-  const [debouncedTileData, setDebouncedTileData] = useState(tiles);
+  const [debouncedTileData, setDebouncedTileData] = useState(tileData);
   useEffect(() => {
-     // Simple debounce or just pass through?
-     // For 250k tiles, deep compare or copy is expensive.
-     // Just pass reference update.
-     setDebouncedTileData(tiles);
-     setMapVersion(v => v + 1); // Increment version on update
-  }, [tiles]);
+     setDebouncedTileData(tileData);
+     // setMapVersion(v => v + 1); // useWorldStateのversionを使用
+  }, [tileData]);
 
   const {
       initWorkers,
@@ -140,7 +182,7 @@ function GameMap({
       debouncedTileData,
       factions,
       alliances,
-      playerNames, // pass playerNames as playerColors was used for that mode? No, playerColors usually derived or passed.
+      playerNames,
       {
           blankTileColor,
           highlightCoreOnly,
@@ -212,27 +254,25 @@ function GameMap({
 
   // ... (zoom logic)
 
-  // プレイヤーIDごとのランダム色生成 (Memoized)
+  // プレイヤーカラー生成 (名前のハッシュ)
   const playerColors = useMemo(() => {
     const colors = {};
-    if (mapColorMode === 'player') {
-        Object.values(tiles).forEach(t => {
-            if (t.paintedBy && !colors[t.paintedBy]) {
-                // 生成ロジック: IDをシードにしてHsl色を生成
-                let hash = 0;
-                const seed = t.paintedBy + "player-salt-v2";
-                for (let i = 0; i < seed.length; i++) {
-                    hash = seed.charCodeAt(i) + ((hash << 5) - hash);
-                }
-                const h = Math.abs(hash % 360);
-                const s = 65 + (Math.abs(hash) % 25); // 65-90%
-                const l = 45 + (Math.abs(hash >> 2) % 15); // 45-60%
-                colors[t.paintedBy] = `hsl(${h}, ${s}%, ${l}%)`;
+    if (mapColorMode !== 'player') return colors;
+
+    // [NEW] Use playerNames prop instead of scanning tiles
+    if (playerNames) {
+        Object.keys(playerNames).forEach(pid => {
+            let hash = 0;
+            const pname = playerNames[pid] || "Unknown";
+            for (let i = 0; i < pname.length; i++) {
+                hash = pname.charCodeAt(i) + ((hash << 5) - hash);
             }
+            const c = (hash & 0x00ffffff).toString(16).toUpperCase();
+            colors[pid] = "#" + "00000".substring(0, 6 - c.length) + c;
         });
     }
     return colors;
-  }, [tiles, mapColorMode]);
+  }, [playerNames, mapColorMode]);
 
   // 事前に検索用Setを作成 (O(1) lookup) - Top level
   const selectedKeys = useMemo(() => {
@@ -298,25 +338,19 @@ function GameMap({
 
   useEffect(() => {
     // タイルデータが空なら計算しない
-    if (!tiles || Object.keys(tiles).length === 0) return;
+    if (!tileData || !tileData.sab) return;
 
     let isMounted = true;
 
-    // Workerでクラスタリング計算
-    // calculateClustersRef.currentを使用することで、Worker関数の参照変更による再実行を防ぐ
-    // 依存配列は [tiles] のみ
     if (typeof calculateClustersRef.current !== 'function') return;
 
     // [OPTIMIZED] Pass mapVersion to avoid hashing in worker
-    calculateClustersRef.current(tiles, mapVersion)
+    calculateClustersRef.current(tileData, mapVersion)
       .then(clusterMap => {
         if (!isMounted) return;
 
         const centers = {};
         Object.entries(clusterMap).forEach(([fid, clusters]) => {
-          // 1. 中核を持つクラスタを優先
-          // 2. その中で最大のものを選択
-          // 3. 中核がない場合は全クラスタの中で最大を選択
           const coreClusters = clusters.filter(c => c.hasCore);
           let targetCluster = null;
 
@@ -342,7 +376,7 @@ function GameMap({
       });
 
     return () => { isMounted = false; };
-  }, [tiles]);
+  }, [tileData, mapVersion]);
 
   // LOD描画用: チャンク単位の代表色を差分更新で計算
   // 変更があったチャンクのみ再計算し、リアルタイム更新時の負荷を軽減
@@ -358,11 +392,11 @@ function GameMap({
   const activeFactionId = useMemo(() => {
     if (hoverFactionId) return hoverFactionId;
     if (tilePopup) {
-      const t = tiles[`${tilePopup.x}_${tilePopup.y}`];
+      const t = getTile(tilePopup.x, tilePopup.y);
       if (t) return t.factionId || t.faction;
     }
     return null;
-  }, [hoverFactionId, tilePopup, tiles]);
+  }, [hoverFactionId, tilePopup, getTile]);
 
   // ハイライト対象勢力の境界線（エッジ）をWorkerで非同期計算
   const [activeFactionEdges, setActiveFactionEdges] = useState([]);
@@ -375,8 +409,9 @@ function GameMap({
 
     let isMounted = true;
 
-    // [OPTIMIZED] Pass mapVersion
-    calculateEdges(tiles, activeFactionId, mapVersion)
+    // [OPTIMIZED] Pass SharedArrayBuffer to Edge Calculation if needed,
+    // or use getTile based loop in worker (which we already updated in mapWorker)
+    calculateEdges(tileData, activeFactionId, mapVersion)
       .then(edges => {
         if (isMounted) {
           setActiveFactionEdges(edges);
@@ -388,7 +423,7 @@ function GameMap({
       });
 
     return () => { isMounted = false; };
-  }, [activeFactionId, tiles, mapColorMode, calculateEdges]);
+  }, [activeFactionId, tileData, mapColorMode, calculateEdges, mapVersion]);
 
   useEffect(() => {
       let rafId;
@@ -573,7 +608,7 @@ function GameMap({
         if (cell.x < startX || cell.x > endX || cell.y < startY || cell.y > endY) return;
 
         // [FIX] factionId is removed from namedCells, so look up from map tiles
-        const cellTile = tiles[`${cell.x}_${cell.y}`];
+        const cellTile = getTile(cell.x, cell.y);
         const cellFactionId = cellTile ? (cellTile.factionId || cellTile.faction) : null;
         const cellFaction = factions[cellFactionId];
         const borderColor = cellFaction ? cellFaction.color : '#aaaaaa';
@@ -673,12 +708,11 @@ function GameMap({
 
         if (viewport.zoom > 0.3) {
             ctx.fillStyle = `rgba(255, 255, 255, ${alpha * 0.2})`;
-            // 画面内ループ (軽量化)
+            // 画面内ループ (SABから一致チェック)
             for (let x = Math.max(0, startX); x <= Math.min(MAP_SIZE - 1, endX); x++) {
                 for (let y = Math.max(0, startY); y <= Math.min(MAP_SIZE - 1, endY); y++) {
-                    const tile = tiles[`${x}_${y}`];
-                    // 勢力IDの一致チェック
-                    if (tile && (tile.faction || tile.factionId) === activeFactionId) {
+                    const t = getTile(x, y);
+                    if (t && (t.faction || t.factionId) === activeFactionId) {
                         const screenX = centerX + (x - viewport.x) * tileSize;
                         const screenY = centerY + (y - viewport.y) * tileSize;
                         ctx.fillRect(screenX, screenY, tileSize, tileSize);
@@ -867,7 +901,7 @@ function GameMap({
       labelRegionsRef.current = [];
     }
 
-  }, [viewport, tiles, factions, selectedTiles, hoverTile, activeFactionId, activeFactionEdges, tilePopup, mapColorMode, blinkAlpha, namedCells, factionCenters, alliances, playerFactionId, showAllianceNames, showFactionNames, showSpecialBorder, canvasDimensions]);
+  }, [viewport, version, factions, selectedTiles, hoverTile, activeFactionId, activeFactionEdges, tilePopup, mapColorMode, blinkAlpha, namedCells, factionCenters, alliances, playerFactionId, showAllianceNames, showFactionNames, showSpecialBorder, canvasDimensions]);
 
 
 
@@ -966,8 +1000,7 @@ function GameMap({
 
         // 1. マウス下のタイルが勢力のものか確認
         if (tile.x >= 0 && tile.x < MAP_SIZE && tile.y >= 0 && tile.y < MAP_SIZE) {
-             const key = `${tile.x}_${tile.y}`;
-             const t = tiles[key];
+             const t = getTile(tile.x, tile.y);
              if (t && (t.faction || t.factionId)) {
                  foundId = t.faction || t.factionId;
              }
@@ -1031,7 +1064,6 @@ function GameMap({
         } else {
             // 通常モード
             if (hoverTile) {
-                const key = `${hoverTile.x}_${hoverTile.y}`;
                 if (skipConfirmation) {
                     // 確認なしモード：即座にトグル
                     onTileClick(hoverTile.x, hoverTile.y);
@@ -1039,9 +1071,9 @@ function GameMap({
                     setTapHighlight(null); // タップハイライト解除
                 } else {
                     // ポップアップ表示
-                    const tData = tiles[key];
+                    const tData = getTile(hoverTile.x, hoverTile.y);
                     const fName = tData?.factionId ? (factions[tData.factionId]?.name || '不明') : null;
-                    const pName = tData?.paintedByName || playerNames[tData?.paintedBy] || tData?.paintedBy || null;
+                    const pName = tData?.paintedByName || (tData?.paintedBy ? playerNames[tData.paintedBy] || tData.paintedBy : null);
                     const coreData = tData?.core || null;
 
                     setTilePopup(prev => {
@@ -1338,7 +1370,7 @@ function GameMap({
                      if (tile.x >= 0 && tile.x < MAP_SIZE && tile.y >= 0 && tile.y < MAP_SIZE) {
                         const key = `${tile.x}_${tile.y}`;
                         {
-                             const tData = tiles[key];
+                             const tData = getTile(tile.x, tile.y);
                              const fName = tData?.faction ? (factions[tData.faction]?.name || '不明') : null;
                              const pName = playerNames[tData?.paintedBy] || tData?.paintedBy || null;
                              const coreData = tData?.core || null;
@@ -1374,7 +1406,7 @@ function GameMap({
        setIsDragging(false);
        touchState.current.mode = 'none';
     }
-  }, [isDragging, brushToggleMode, tiles, factions, namedCells, onNamedCellClick, playerNames]); // viewport removed
+  }, [isDragging, brushToggleMode, getTile, factions, namedCells, onNamedCellClick, playerNames]); // viewport removed
 
   const handleWheel = useCallback((e) => {
     e.preventDefault();
@@ -1468,8 +1500,7 @@ function GameMap({
       />
 
       {hoverTile && !tilePopup && showTooltip && window.innerWidth >= 768 && (() => {
-        const tileKey = `${hoverTile.x}_${hoverTile.y}`;
-        const tileData = tiles[tileKey];
+        const tileData = getTile(hoverTile.x, hoverTile.y);
         const factionName = tileData?.factionId ? (factions[tileData.factionId]?.name || '不明') : null;
         const painterName = playerNames[tileData?.paintedBy] || tileData?.paintedBy || null;
 
@@ -1548,13 +1579,17 @@ function GameMap({
                   勢力: {tilePopup.factionName}
                 </div>
               )}
-              {tilePopup.painterName && <div className="popup-detail">塗: {tilePopup.painterName}</div>}
+              {tilePopup.paintedBy && (
+                <div className="popup-detail">
+                  塗: {playerNames[tilePopup.paintedBy] || tilePopup.paintedBy}
+                </div>
+              )}
 
               {/* Overpaint & Named Tile Info */}
               {(() => {
-                  const key = `${tilePopup.x}_${tilePopup.y}`;
-                  const tData = tiles[key];
+                  const tData = getTile(tilePopup.x, tilePopup.y);
                   if (!tData) return null;
+                  const key = `${tilePopup.x}_${tilePopup.y}`;
                   const cell = namedCells[key];
 
                   return (
@@ -1630,7 +1665,7 @@ function GameMap({
             {/* ネームドマス作成・レベルアップボタン */}
             {(() => {
                 const key = `${tilePopup.x}_${tilePopup.y}`;
-                const tileData = tiles[key];
+                const tileData = getTile(tilePopup.x, tilePopup.y);
                 const namedCell = namedCells[key];
 
 

@@ -17,6 +17,7 @@ import useFactionData from './hooks/useFactionData';
 import useMapWorkerPool from './hooks/useMapWorkerPool';
 import useNotifications from './hooks/useNotifications';
 import useSettings from './hooks/useSettings';
+import { useWorldState } from './hooks/useWorldState';
 import socket from './socket';
 
 // プレミアムトースト通知コンポーネント (メモ化して不要な再レンダリング防止)
@@ -46,6 +47,8 @@ function App() {
   const mapWorkerPool = useMapWorkerPool();
 
   // ===== カスタムフックによる状態管理の抽出 =====
+  const { setTiles, sharedData, version: worldVersion, importMappings, getTile } = useWorldState();
+
   const {
     skipConfirmation, setSkipConfirmation,
     isSidebarOpen, setIsSidebarOpen,
@@ -89,7 +92,6 @@ function App() {
   // ===== 残存するローカル状態 =====
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showAccountModal, setShowAccountModal] = useState(false);
-  const [mapTiles, setMapTiles] = useState({});
   const [playerNames, setPlayerNames] = useState({});
   const [namedCells, setNamedCells] = useState({});
   const [mapMode, setMapMode] = useState('normal');
@@ -175,243 +177,204 @@ function App() {
   }, [authStatus.gardenMode, refreshAuthStatus]);
 
   // 自動選択機能 (AP分だけランダムに隣接タイルを選択 - コスト考慮)
-  const handleAutoSelect = useCallback(() => {
+  const handleAutoSelect = useCallback(async () => {
     if (!playerData || !playerData.factionId || !playerData.ap) return;
+    if (!sharedData || !sharedData.sab) return;
 
-    const MAP_SIZE = 500;
-    const directions = [
-      [0, 1], [0, -1], [1, 0], [-1, 0]
-    ];
+    try {
+      // Worker に計算を依頼
+      const myFactionId = playerData.factionId;
+      const myFaction = factions[myFactionId];
+      const alliancesList = myFaction?.alliances || [];
 
-    // コスト計算用パラメータ
-    const occupiedCount = Object.keys(mapTiles).length;
-    const blankPercent = ((MAP_SIZE * MAP_SIZE - occupiedCount) / (MAP_SIZE * MAP_SIZE)) * 100;
-    const overwriteCost = blankPercent < 20 ? 2 : 1;
+      // マップの埋まり具合で上書きコストを決定（簡易計算）
+      // 本来は Worker 内で計算するが、パラメータとして渡す
+      const overwriteCost = 2; // デフォルト 2
 
-    const myTiles = Object.entries(mapTiles).filter(([k, t]) => t.factionId === playerData.factionId);
+      const { candidates } = await mapWorkerPool.sendTask('AUTO_SELECT_CANDIDATES', {
+        sharedData,
+        myFactionId,
+        alliances: alliancesList,
+        overwriteCost
+      });
 
-    // 候補リスト: { key, type: 'blank'|'enemy', cost }
-    const candidates = [];
-    const seen = new Set();
+      if (!candidates || candidates.length === 0) return;
 
-    // 自分の勢力タイルから隣接する空白or敵タイルを探す
-    myTiles.forEach(([key, tile]) => {
-        const [x, y] = key.split('_').map(Number);
-        directions.forEach(([dx, dy]) => {
-            const nx = x + dx;
-            const ny = y + dy;
-            if (nx >= 0 && nx < MAP_SIZE && ny >= 0 && ny < MAP_SIZE) {
-                const nKey = `${nx}_${ny}`;
-                if (seen.has(nKey)) return;
-
-                const nTile = mapTiles[nKey];
-                const nFid = nTile ? nTile.factionId : null;
-
-                // 自勢力・同盟勢力は除外
-                if (nFid === playerData.factionId) {
-                    seen.add(nKey);
-                    return;
-                }
-
-                // 同盟チェック
-                if (nFid && factions[playerData.factionId]?.alliances?.includes(nFid)) {
-                     seen.add(nKey);
-                     return;
-                }
-                // 保護チェック（サーバー側でも検証されるが、クライアント側でも簡易的に「明らかに塗れない」ものを除外）
-
-                let cost = 1;
-                let type = 'blank';
-
-                if (nFid) {
-                    type = 'enemy';
-                    cost = overwriteCost;
-
-                    // 中核マス防衛補正
-                    if (nTile.core && nTile.core.factionId === nFid) {
-                         // 期限切れチェック
-                         const now = Date.now();
-                         if (!nTile.core.expiresAt || new Date(nTile.core.expiresAt).getTime() > now) {
-                             cost += 1;
-                         }
-                    }
-                }
-
-                candidates.push({ key: nKey, type, cost });
-                seen.add(nKey);
-            }
-        });
-    });
-
-    if (candidates.length === 0) return;
-
-    // シャッフル（ランダム性を持たせる）
-    // 領土拡大を優先するため、コストが低い（空白マスなど）順にソートし、同コスト内ではランダムにする
-
-    const shuffled = candidates.sort((a, b) => {
+      // 領土拡大を優先するため、コストが低い（空白マスなど）順にソートし、同コスト内ではランダムにする
+      const shuffled = candidates.sort((a, b) => {
         if (a.cost !== b.cost) return a.cost - b.cost;
         return Math.random() - 0.5;
-    });
+      });
 
-    const selectedKeys = [];
-    let currentAp = playerData.ap;
+      const selectedKeys = [];
+      let currentAp = playerData.ap;
 
-    for (const cand of shuffled) {
+      for (const cand of shuffled) {
         if (currentAp >= cand.cost) {
-            selectedKeys.push(cand.key);
-            currentAp -= cand.cost;
+          selectedKeys.push(cand.key);
+          currentAp -= cand.cost;
         }
         if (currentAp <= 0) break;
-    }
+      }
 
-    // selectedTilesに追加 (重複なし)
-    setSelectedTiles(prev => {
+      // selectedTilesに追加 (重複なし)
+      setSelectedTiles(prev => {
         const next = [...prev];
         selectedKeys.forEach(key => {
-            if (!next.includes(key)) next.push(key);
+          if (!next.includes(key)) next.push(key);
         });
         return next;
-    });
-  }, [playerData, mapTiles, factions, namedCells]);
+      });
+    } catch (err) {
+      console.error("Auto selection failed:", err);
+      addNotification("自動選択に失敗しました", "error");
+    }
+  }, [playerData, sharedData, factions, mapWorkerPool, addNotification]);
 
   // マップ画像出力
   const handleExportMap = useCallback(async () => {
-    const MAP_SIZE = 250;
-    const TILE_RES = 4; // 高解像度化
+    if (!sharedData || !sharedData.sab) return;
+
+    const MAP_DIM = 500;
+    const TILE_RES = 4; // 高解像度化 (2000x2000)
     const canvas = document.createElement('canvas');
-    canvas.width = MAP_SIZE * TILE_RES;
-    canvas.height = MAP_SIZE * TILE_RES;
+    canvas.width = MAP_DIM * TILE_RES;
+    canvas.height = MAP_DIM * TILE_RES;
     const ctx = canvas.getContext('2d');
 
     // 背景 (白背景)
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // 同盟カラーマップを作成（同盟モード用）
-    const allianceColors = {};
-    if (mapColorMode === 'alliance') {
-      Object.values(factions).forEach(f => {
-        if (f.allianceId && factions[f.allianceId]) {
-          allianceColors[f.id] = factions[f.allianceId].color;
-        }
+    try {
+      // 1. Worker で勢力ごとの集計（重心）を実行
+      const centers = await mapWorkerPool.sendTask('AGGREGATE_FACTIONS', {
+        sharedData,
+        version: worldVersion
       });
-    }
 
-    // 重心計算用
-    const centers = {};
-    const allianceCenters = {};
+      // 2. ImageData を使用してタイルを一括描画 (高速化)
+      const imgData = ctx.createImageData(canvas.width, canvas.height);
+      const data = imgData.data;
 
-    // タイル描画 & 重心データ集計
-    Object.entries(mapTiles).forEach(([key, tile]) => {
-      const [x, y] = key.split('_').map(Number);
-      const fid = tile.faction || tile.factionId;
-      if (fid && factions[fid]) {
-        // 同盟モードの場合は同盟の色を使用
-        let color;
-        if (mapColorMode === 'alliance') {
-          color = allianceColors[fid] || factions[fid].color;
-        } else {
-          color = factions[fid].color;
-        }
-        ctx.fillStyle = color;
-        ctx.fillRect(x * TILE_RES, y * TILE_RES, TILE_RES, TILE_RES);
+      // 同盟カラーマップ（同盟モード用）
+      const allianceColors = {};
+      const allianceCenters = {};
+      if (mapColorMode === 'alliance') {
+        Object.values(factions).forEach(f => {
+          if (f.allianceId && factions[f.allianceId]) {
+            allianceColors[f.id] = factions[f.allianceId].color;
+            const aid = f.allianceId;
+            if (!allianceCenters[aid]) allianceCenters[aid] = { sumX: 0, sumY: 0, count: 0 };
+            const c = centers[f.id];
+            if (c) {
+              allianceCenters[aid].sumX += c.centerX * c.count;
+              allianceCenters[aid].sumY += c.centerY * c.count;
+              allianceCenters[aid].count += c.count;
+            }
+          }
+        });
+      }
 
-        // 勢力の重心計算
-        if (!centers[fid]) centers[fid] = { sumX: 0, sumY: 0, count: 0 };
-        centers[fid].sumX += x;
-        centers[fid].sumY += y;
-        centers[fid].count++;
+      const sabView = new DataView(sharedData.sab);
+      const TILE_BYTE_SIZE = 20;
 
-        // 同盟の重心計算（同盟モードの場合）
-        if (mapColorMode === 'alliance') {
-          const allianceId = factions[fid]?.allianceId;
-          if (allianceId && factions[allianceId]) {
-            if (!allianceCenters[allianceId]) allianceCenters[allianceId] = { sumX: 0, sumY: 0, count: 0 };
-            allianceCenters[allianceId].sumX += x;
-            allianceCenters[allianceId].sumY += y;
-            allianceCenters[allianceId].count++;
+      // 色文字列をRGBに変換する簡易キャッシュ
+      const colorCache = new Map();
+      const getRGB = (hex) => {
+        if (colorCache.has(hex)) return colorCache.get(hex);
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        const rgb = { r, g, b };
+        colorCache.set(hex, rgb);
+        return rgb;
+      };
+
+      for (let y = 0; y < MAP_DIM; y++) {
+        for (let x = 0; x < MAP_DIM; x++) {
+          const offset = (y * MAP_DIM + x) * TILE_BYTE_SIZE;
+          const fidIdx = sabView.getUint16(offset, true);
+          if (fidIdx === 65535) continue;
+
+          const fid = sharedData.factionsList ? sharedData.factionsList[fidIdx] : null;
+          if (!fid || !factions[fid]) continue;
+
+          let colorHex = (mapColorMode === 'alliance') ? (allianceColors[fid] || factions[fid].color) : factions[fid].color;
+          const { r, g, b } = getRGB(colorHex);
+
+          // TILE_RES x TILE_RES のピクセルを埋める
+          for (let py = 0; py < TILE_RES; py++) {
+            for (let px = 0; px < TILE_RES; px++) {
+              const idx = ((y * TILE_RES + py) * (MAP_DIM * TILE_RES) + (x * TILE_RES + px)) * 4;
+              data[idx] = r;
+              data[idx + 1] = g;
+              data[idx + 2] = b;
+              data[idx + 3] = 255;
+            }
           }
         }
       }
-    });
+      ctx.putImageData(imgData, 0, 0);
 
-    // 名前の描画
-    if (showFactionNames) {
-      // すべてのフォントのロード完了を待機
-      try {
-        await document.fonts.ready;
-        // 追加で明示的にロードを試みる
-        await document.fonts.load('700 16px "Noto Sans JP"');
-      } catch (e) {
-        console.warn("Font load failed, proceeding anyway", e);
+      // 3. 名前の描画
+      if (showFactionNames) {
+        try { await document.fonts.ready; } catch (e) {}
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.strokeStyle = '#000000';
+        ctx.fillStyle = '#ffffff';
+        ctx.lineWidth = 3;
+
+        if (mapColorMode === 'alliance') {
+          // 同盟名
+          Object.entries(allianceCenters).forEach(([aid, d]) => {
+            const alliance = factions[aid];
+            if (!alliance || d.count === 0) return;
+            const avgX = (d.sumX / d.count) * TILE_RES;
+            const avgY = (d.sumY / d.count) * TILE_RES;
+            const fontSize = Math.min(60, Math.max(12, Math.sqrt(d.count) * 2));
+            ctx.font = `700 ${fontSize}px "Noto Sans JP", sans-serif`;
+            ctx.strokeText(alliance.name, avgX, avgY);
+            ctx.fillText(alliance.name, avgX, avgY);
+          });
+          // 同盟なし勢力
+          Object.entries(centers).forEach(([fid, d]) => {
+            if (factions[fid]?.allianceId || d.count < 5) return;
+            const avgX = d.centerX * TILE_RES;
+            const avgY = d.centerY * TILE_RES;
+            const fontSize = Math.min(60, Math.max(12, Math.sqrt(d.count) * 2));
+            ctx.font = `700 ${fontSize}px "Noto Sans JP", sans-serif`;
+            ctx.strokeText(factions[fid].name, avgX, avgY);
+            ctx.fillText(factions[fid].name, avgX, avgY);
+          });
+        } else {
+          // 勢力名
+          Object.entries(centers).forEach(([fid, d]) => {
+            if (d.count < 5) return;
+            const avgX = d.centerX * TILE_RES;
+            const avgY = d.centerY * TILE_RES;
+            const fontSize = Math.min(60, Math.max(12, Math.sqrt(d.count) * 2));
+            ctx.font = `700 ${fontSize}px "Noto Sans JP", sans-serif`;
+            ctx.strokeText(factions[fid].name, avgX, avgY);
+            ctx.fillText(factions[fid].name, avgX, avgY);
+          });
+        }
       }
 
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.strokeStyle = '#000000'; // 黒縁取り
-      ctx.fillStyle = '#ffffff';   // 白文字
-      ctx.lineWidth = 3;
-
-      if (mapColorMode === 'alliance') {
-        // 同盟モード：同盟名を表示
-        Object.entries(allianceCenters).forEach(([allianceId, data]) => {
-          const alliance = factions[allianceId];
-          if (!alliance) return;
-
-          const avgX = (data.sumX / data.count) * TILE_RES;
-          const avgY = (data.sumY / data.count) * TILE_RES;
-
-          const fontSize = Math.min(60, Math.max(12, Math.sqrt(data.count) * 2));
-          ctx.font = `700 ${fontSize}px "Noto Sans JP", sans-serif`;
-
-          ctx.strokeText(alliance.name, avgX, avgY);
-          ctx.fillText(alliance.name, avgX, avgY);
-        });
-
-        // 同盟に属さない勢力は通常通り勢力名を表示
-        Object.entries(centers).forEach(([fid, data]) => {
-          const faction = factions[fid];
-          if (!faction || faction.allianceId) return; // 同盟所属勢力はスキップ
-
-          const avgX = (data.sumX / data.count) * TILE_RES;
-          const avgY = (data.sumY / data.count) * TILE_RES;
-
-          const fontSize = Math.min(60, Math.max(12, Math.sqrt(data.count) * 2));
-          ctx.font = `700 ${fontSize}px "Noto Sans JP", sans-serif`;
-
-          ctx.strokeText(faction.name, avgX, avgY);
-          ctx.fillText(faction.name, avgX, avgY);
-        });
-      } else {
-        // 勢力モード：勢力名を表示
-        Object.entries(centers).forEach(([fid, data]) => {
-          const faction = factions[fid];
-          if (!faction) return;
-
-          const avgX = (data.sumX / data.count) * TILE_RES;
-          const avgY = (data.sumY / data.count) * TILE_RES;
-
-          const fontSize = Math.min(60, Math.max(12, Math.sqrt(data.count) * 2));
-          ctx.font = `700 ${fontSize}px "Noto Sans JP", sans-serif`;
-
-          ctx.strokeText(faction.name, avgX, avgY);
-          ctx.fillText(faction.name, avgX, avgY);
-        });
-      }
-    }
-
-    // 画像としてダウンロード (setTimeoutで非同期にしてUIスレッドのブロックを最小限にする)
-    setTimeout(() => {
+      // 4. ダウンロード
       const link = document.createElement('a');
       const dateStr = new Date().toISOString().split('T')[0];
-      const modeSuffix = mapColorMode === 'alliance' ? '-alliance' : '';
-      link.download = `teien-map-${dateStr}${modeSuffix}.png`;
+      link.download = `teien-map-${dateStr}${mapColorMode === 'alliance' ? '-alliance' : ''}.png`;
       link.href = canvas.toDataURL('image/png');
-      document.body.appendChild(link);
       link.click();
-      document.body.removeChild(link);
-    }, 0);
-  }, [mapTiles, factions, showFactionNames, mapColorMode]);
+
+    } catch (err) {
+      console.error("Map export failed:", err);
+      addNotification("マップ出力に失敗しました", "error");
+    }
+  }, [sharedData, worldVersion, factions, showFactionNames, mapColorMode, mapWorkerPool, addNotification]);
 
 
   const [onlineUsers, setOnlineUsers] = useState(0);
@@ -603,27 +566,28 @@ function App() {
         // 1. キャッシュから読み込み（即座に表示）
         const cached = await getCachedTiles();
         if (cached && cached.tiles && Object.keys(cached.tiles).length > 0) {
-          setMapTiles(cached.tiles);
+          setTiles(cached.tiles);
           setMapLoadMessage("最新データを確認中...");
         }
 
-        // 2. Workerによるバックグラウンド読み込み (バイナリ版: 究極の高速化)
-        setMapLoadMessage("ワールドデータをロード中 (Binary)...");
-        const loadResult = await mapWorkerPool.sendTask('LOAD_MAP_DATA_BINARY', { url: '/api/map/binary' });
+        // 2. Workerによるバックグラウンド読み込み (バイナリ版: SABを渡して直接書き込ませる)
+        setMapLoadMessage("ワールドデータをロード中 (Binary + SAB)...");
+        const loadResult = await mapWorkerPool.sendTask('LOAD_MAP_DATA_BINARY', {
+          url: '/api/map/binary',
+          sab: sharedData.sab
+        });
 
-        const { tiles: processedTiles, version, playerNames } = loadResult;
-
+        const { version, playerNames, factionsList } = loadResult;
         setMapLoadProgress(100);
 
         if (playerNames) {
           setPlayerNames(playerNames);
         }
 
-        setMapTiles(processedTiles);
-        setMapLoading(false);
+        // マッピングを同期
+        importMappings({ factionsList, playerNames });
 
-        // 4. キャッシュに保存（バックグラウンド）
-        setCachedTiles(processedTiles, data.version);
+        setMapLoading(false);
 
       } catch(e) {
         console.error("Map fetch error:", e);
@@ -761,16 +725,17 @@ function App() {
             .catch(e => console.error("再接続時更新エラー", e?.message || String(e)));
 
         // 再接続時にマップ情報を最新化（データの不整合を防止）
-        fetch('/api/map', { credentials: 'include' })
-            .then(res => res.json())
-            .then(data => {
-                const loadedTiles = data?.tiles || {};
-                Object.values(loadedTiles).forEach(t => {
-                   if (t && t.factionId && !t.faction) t.faction = t.factionId;
-                });
-                setMapTiles(loadedTiles);
-            })
-            .catch(e => console.error("Reconnect Map fetch error:", e));
+        // 再接続時にマップ情報を最新化 (Binary + SAB)
+        mapWorkerPool.sendTask('LOAD_MAP_DATA_BINARY', {
+            url: '/api/map/binary',
+            sab: sharedData.sab
+        })
+        .then(({ version, playerNames, factionsList }) => {
+            console.log("Reconnect Map Updated (Binary)");
+            importMappings({ factionsList, playerNames });
+            if (playerNames) setPlayerNames(playerNames);
+        })
+        .catch(e => console.error("Reconnect Map fetch error:", e));
 
         // 再接続時に勢力・戦争・同盟情報を再取得（リアルタイム通知対応）
         fetch('/api/factions', { credentials: 'include' })
@@ -878,41 +843,9 @@ function App() {
     });
 
     // タイル情報のバッファ更新（Socket.js側でスロットリングされた更新を受信）
-    // [OPTIMIZED] Object.assign を使用してコピーコストを削減
+    // [NEW] SharedArrayBufferへの直接書き込みによりゼロコピー更新
     socket.on('tile:buffered', (updatedTiles) => {
-      setMapTiles(prev => {
-        // 差分更新のみを行う（全体コピーを避ける）
-        const keys = Object.keys(updatedTiles);
-        if (keys.length === 0) return prev;
-
-        // 少量の更新の場合は直接更新
-        if (keys.length <= 50) {
-          const next = Object.assign({}, prev);
-          for (const key of keys) {
-            const t = updatedTiles[key];
-            if (t === null) {
-              delete next[key];
-            } else {
-              if (t.factionId && !t.faction) t.faction = t.factionId;
-              next[key] = t;
-            }
-          }
-          return next;
-        }
-
-        // 大量更新の場合は Object.assign でマージ
-        const merged = Object.assign({}, prev, updatedTiles);
-        // null エントリを削除し、factionId を同期
-        for (const key of keys) {
-          const t = merged[key];
-          if (t === null) {
-            delete merged[key];
-          } else if (t && t.factionId && !t.faction) {
-            t.faction = t.factionId;
-          }
-        }
-        return merged;
-      });
+      setTiles(updatedTiles);
     });
 
     socket.on('war:started', (war) => {
@@ -1648,12 +1581,13 @@ function App() {
     if (!playerData) return;
 
     // クリックされたタイルに勢力があるか確認
-    const targetTile = mapTiles[key];
+    const targetTile = getTile(x, y);
 
-    if (targetTile && targetTile.faction) {
+    if (targetTile && (targetTile.factionId || targetTile.faction)) {
+        const tfid = targetTile.factionId || targetTile.faction;
         // 自分が無所属なら参加確認ポップアップ
         if (!playerData.factionId) {
-            const targetFaction = factions[targetTile.faction];
+            const targetFaction = factions[tfid];
             if (targetFaction) {
                 if (targetFaction.joinPolicy === 'closed') {
                     // 募集停止中なら表示しない、あるいはトーストで通知
@@ -1679,7 +1613,7 @@ function App() {
     } else {
       setSelectedTiles(prev => [...prev, { x, y }]);
     }
-  }, [pendingOrigin, playerData, selectedTiles, mapTiles, factions]);
+  }, [pendingOrigin, playerData, selectedTiles, sharedData, factions]);
 
   // 認証エラーハンドリング
   const handleAuthError = useCallback((status) => {
@@ -1755,7 +1689,7 @@ function App() {
     } catch (e) {
       addNotification('通信エラーが発生しました', "エラー");
     }
-  }, [selectedTiles, handleAuthError, playerData, mapTiles, factions, overpaintTargetCount]);
+  }, [selectedTiles, handleAuthError, playerData, sharedData, factions, overpaintTargetCount]);
 
   // タイル消去
   const handleErase = useCallback(async () => {
@@ -2720,7 +2654,9 @@ function App() {
 
       <div className="game-canvas">
         <GameMap
-          tiles={mapTiles}
+          tileData={sharedData}
+          getTile={getTile}
+          version={worldVersion}
           factions={factions}
           selectedTiles={selectedTiles}
           onTileClick={(x, y) => {
@@ -2981,7 +2917,9 @@ function App() {
         alliances={alliances}
         wars={wars}
         truces={truces}
-        mapTiles={mapTiles}
+        tileData={sharedData}
+        getTile={getTile}
+        version={worldVersion}
         selectedTiles={selectedTiles}
         onPaint={handlePaint}
         onErase={handleErase}
