@@ -1990,6 +1990,7 @@ async function generateCessionMapImage(tiles, factions, highlightTiles) {
 // AP補充計算 (ハイブリッド方式 - 改修版)
 // 毎時05分に一括処理: 書き込み数 + ランダム + (弱小) + 共有AP
 function handleApRefill(player, players, playerId, saveToDisk = true) {
+  if (!player || !playerId) return { player, refilledAmount: 0 };
   const now = new Date();
   const nowMs = now.getTime();
   const INTERVAL_MS = 5 * 60 * 1000; // 5分刻み
@@ -2076,12 +2077,13 @@ function handleApRefill(player, players, playerId, saveToDisk = true) {
       const targetIds = new Set();
       if (player.knownPostIds) {
         player.knownPostIds.forEach((id) => {
+          if (!id) return;
           targetIds.add(id);
-          targetIds.add(id.replace(/^ch-/, ""));
+          targetIds.add(String(id).replace(/^ch-/, ""));
         });
       }
       targetIds.add(playerId);
-      const cleanPlayerId = playerId.replace(/^game-/, "");
+      const cleanPlayerId = String(playerId).replace(/^game-/, "");
       targetIds.add(cleanPlayerId);
 
       const countedSessions = new Set();
@@ -3298,6 +3300,11 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
 app.get("/api/player", authenticate, async (req, res) => {
   try {
     const playerId = req.playerId;
+
+    if (req.isGuest || !playerId) {
+      return res.json({ player: null, isGuest: true });
+    }
+
     // [REMOVED] updateJSON ブロック内で同期するように変更
     // await syncPlayerWithGameIds(playerId, authKey);
 
