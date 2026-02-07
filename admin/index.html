@@ -507,6 +507,18 @@
                 <input type="number" id="gardenRefillAmount" min="0" />
               </div>
             </div>
+            <div class="setting-item" style="margin-bottom: 15px">
+              <label>チューリップ回復インターバル (時間)</label>
+              <input
+                type="number"
+                id="tulipRefillIntervalHours"
+                min="0"
+                step="0.5"
+              />
+              <small style="color: #666"
+                >※0に設定すると冷却時間なしで連続回復が可能になります。</small
+              >
+            </div>
           </div>
 
           <div class="setting-group">
@@ -875,6 +887,8 @@
           ap.gardenRefillCost ?? 30;
         document.getElementById("gardenRefillAmount").value =
           ap.gardenRefillAmount ?? 50;
+        document.getElementById("tulipRefillIntervalHours").value =
+          ap.tulipRefillIntervalHours ?? 3;
         document.getElementById("messageCost").value = ap.messageCost ?? 5;
         document.getElementById("mapImageInterval").value =
           mapSettings.intervalMinutes ?? 1;
@@ -1069,6 +1083,9 @@
             gardenRefillAmount: parseInt(
               document.getElementById("gardenRefillAmount").value,
               10,
+            ),
+            tulipRefillIntervalHours: parseFloat(
+              document.getElementById("tulipRefillIntervalHours").value,
             ),
             messageCost: parseInt(
               document.getElementById("messageCost").value,

@@ -1035,7 +1035,20 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
 
   // apSettingsの保存
   if (req.body.apSettings && typeof req.body.apSettings === "object") {
-    settings.apSettings = req.body.apSettings;
+    // 数値型への変換とバリデーション
+    const newAp = { ...req.body.apSettings };
+    if (newAp.tulipRefillIntervalHours !== undefined) {
+      newAp.tulipRefillIntervalHours = parseFloat(
+        newAp.tulipRefillIntervalHours,
+      );
+      if (
+        isNaN(newAp.tulipRefillIntervalHours) ||
+        newAp.tulipRefillIntervalHours < 0
+      ) {
+        newAp.tulipRefillIntervalHours = 3;
+      }
+    }
+    settings.apSettings = newAp;
   }
 
   // mapImageSettingsの保存
@@ -1523,11 +1536,14 @@ async function processSecretTriggers(isScheduled = false) {
           if (isWeak) {
             const refillAmount = settings.apSettings?.gardenRefillAmount ?? 50;
 
-            // [NEW] 3時間クールダウンチェック
-            // 🌷での補給 (processSecretTriggers 経由) は3時間に1回まで
+            const cooldownHours =
+              settings.apSettings?.tulipRefillIntervalHours ?? 3;
+            const cooldownMs = cooldownHours * 60 * 60 * 1000;
+
             if (
+              cooldownHours > 0 &&
               faction.lastRefillTime &&
-              now - faction.lastRefillTime < 3 * 60 * 60 * 1000
+              now - faction.lastRefillTime < cooldownMs
             ) {
               console.log(
                 `[SecretTrigger] Refill rejected for ${faction.name} (Cooldown active)`,
