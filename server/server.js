@@ -4454,6 +4454,8 @@ app.post(
         factionId,
         factionName: name,
         creatorName: playerDisplayName,
+        x: origin.x,
+        y: origin.y,
         origin,
       });
 

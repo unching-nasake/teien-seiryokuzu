@@ -71,7 +71,7 @@ export const getLogMessageText = (log) => {
     case "faction_joined_via_approval":
       return `${data.playerName || data.playerId || "不明"} が承認により「${data.factionName || data.factionId || "???"}」に加入しました (承認者: ${data.approverName || data.approvedBy || "不明"})`;
     case "faction_created":
-      return `新勢力「${data.factionName}」が誕生しました (創設者: ${data.creatorName || data.playerShortId || "不明"})`;
+      return `新勢力「${data.factionName}」が誕生しました (創設者: ${data.creatorName || data.playerShortId || "不明"})${data.x !== undefined ? ` (${data.x}, ${data.y})` : ""}`;
     case "faction_joined":
       return `${data.playerName || "不明"} が「${data.factionName || "???"}」に加入しました`;
     case "faction_left":
@@ -118,7 +118,8 @@ export const getLogMessageText = (log) => {
       const role =
         data.roleName && data.roleName !== "Member" ? `(${data.roleName})` : "";
       const faction = data.factionName ? `[${data.factionName}]` : "";
-      return `${data.creatorName || data.playerName || "不明"}${role}${faction} が 「${data.name || data.cellName || "???"}」 を建設しました`;
+      const coords = data.x !== undefined ? ` (${data.x}, ${data.y})` : "";
+      return `${data.creatorName || data.playerName || "不明"}${role}${faction} が 「${data.name || data.cellName || "???"}」 を建設しました${coords}`;
     }
     case "named_cell_levelup":
       return `「${data.cellName || "???"}」がレベル${data.newLevel || "?"}にアップグレードされました`;
