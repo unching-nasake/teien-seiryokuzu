@@ -1766,7 +1766,7 @@ parentPort.on("message", async (msg) => {
 // mode: "faction_full" (勢力名+ネームドマス), "faction_simple" (なし), "alliance" (同盟名)
 function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
   const TILE_SIZE = 2; // 500x500タイルの場合、2pxで1000px
-  const PADDING = 150; // 左右150pxずつで合計1300px（勢力名がはみ出さないように拡張）
+  const PADDING = 75; // 左右75pxずつで合計1150px
   const mapWidth = MAP_SIZE * TILE_SIZE;
   const mapHeight = MAP_SIZE * TILE_SIZE;
   const canvasWidth = mapWidth + PADDING * 2;
@@ -1775,9 +1775,13 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
   const canvas = createCanvas(canvasWidth, canvasHeight);
   const ctx = canvas.getContext("2d");
 
-  // 背景（白）
-  ctx.fillStyle = "#ffffff";
+  // 背景（黒）
+  ctx.fillStyle = "#000000";
   ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+  // マップ領域（白）
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(PADDING, PADDING, mapWidth, mapHeight);
 
   // 同盟モードの場合、勢力→同盟IDマッピングを作成
   const factionToAlliance = {};

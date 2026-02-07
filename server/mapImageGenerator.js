@@ -9,8 +9,8 @@ const fs = require("fs");
 // 定数
 const MAP_SIZE = 500; // 500x500タイル
 const TILE_SIZE = 2; // 1タイルあたり2px
-const PADDING = 150; // 左右上下の余白 (150px)
-const IMAGE_SIZE = MAP_SIZE * TILE_SIZE + PADDING * 2; // = 1300px
+const PADDING = 75; // 左右上下の余白 (75px)
+const IMAGE_SIZE = MAP_SIZE * TILE_SIZE + PADDING * 2; // = 1150px
 
 // パス設定
 const DATA_DIR = path.join(__dirname, "data");
@@ -90,9 +90,13 @@ async function generateMapImage(mode = "faction_full") {
   const canvas = createCanvas(IMAGE_SIZE, IMAGE_SIZE);
   const ctx = canvas.getContext("2d");
 
-  // 背景色 (白)
-  ctx.fillStyle = "#ffffff";
+  // 全体を背景色 (黒) で塗りつぶし
+  ctx.fillStyle = "#000000";
   ctx.fillRect(0, 0, IMAGE_SIZE, IMAGE_SIZE);
+
+  // マップ実体部分を白で塗りつぶし
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(PADDING, PADDING, MAP_SIZE * TILE_SIZE, MAP_SIZE * TILE_SIZE);
 
   // 1. タイル描画 (色ごとにバッチング) - 勢力タイルのみ描画
   const batchDraws = new Map();
