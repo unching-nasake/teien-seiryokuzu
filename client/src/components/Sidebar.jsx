@@ -128,7 +128,7 @@ function Sidebar({
   namedCells = {},
   onCreateNamedTile,
   onRenameNamedTile,
-  apSettings = { limits: { individual: 100, sharedBase: 50 }, gardenMode: false }, // AP設定
+  apSettings = { limits: { individual: 50, sharedBase: 50 }, gardenMode: false }, // AP設定
   onDeleteNamedTile, // ネームドマス削除用
   socket, // socket props
   onLoadMoreLogs, // ログページネーション
@@ -645,7 +645,7 @@ function Sidebar({
             <div className="panel-title">塗り権利 (AP)</div>
             <div className="ap-display">
               {(() => {
-                  let maxAp = apSettings?.limits?.individual || 100;
+                  let maxAp = apSettings?.limits?.individual || 50;
                   // 庭園モードかつ未認証の場合は上限半分
                   if (apSettings?.gardenMode && !playerData.lastAuthenticated) {
                     maxAp = Math.floor(maxAp / 2);

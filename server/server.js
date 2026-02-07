@@ -1266,7 +1266,7 @@ const ALLIANCE_LOCK_HOURS = 12; // 作成/加入から解散/脱退不可の時�
 const TRUCE_DURATION_HOURS = 12; // 停戦の継続時間
 
 // ===== Season 2: APシステム定数 =====
-const AP_MAX_LIMIT = 100; // AP上限 (50 → 100)
+const AP_MAX_LIMIT = 50; // AP上限のデフォルト値 (100から50に修正)
 // const SHARED_AP_LIMIT = 100; // 共有AP上限 (動的計算に変更: 50 + 50*人数)
 
 const FACTION_ACTION_COST = 0; // 勢力作成・脱退コスト (無料化)
@@ -2219,7 +2219,7 @@ function handleApRefill(player, players, playerId, saveToDisk = true) {
   let refilledAmount = null;
 
   // 個人AP上限の計算（スコープ外へ移動）
-  let indLimit = apConfig.limits?.individual ?? 100;
+  let indLimit = apConfig.limits?.individual ?? 50;
   if (settings.gardenMode) {
     // 庭園モードON時、一度も認証(lastAuthenticated)が行われていないユーザーの上限は半分
     // (期限切れでも過去に成功していればペナルティなし)
