@@ -13773,31 +13773,55 @@ if (!fs.existsSync(FULL_MAP_IMAGE_DIR)) {
   fs.mkdirSync(FULL_MAP_IMAGE_DIR, { recursive: true });
 }
 
-// 全体マップ画像を生成する関数（node-canvas方式）
+// 全体マップ画像を生成する関数（node-canvas方式 - Workerオフロード版）
 async function generateFullMapImageTask() {
   try {
-    console.log("[FullMapImage] Starting node-canvas generation...");
-    const { generateAllMapImages } = require("./mapImageGenerator");
-    const results = await generateAllMapImages();
+    console.log("[FullMapImage] Requesting node-canvas generation (Worker)...");
 
-    results.forEach((result, index) => {
-      if (result.success) {
-        console.log(
-          `[FullMapImage] Image ${index + 1} generated: ${result.path}`,
-        );
-        // 成功時にSocketイベント送信
-        const filename = path.basename(result.path, ".png");
-        let mode = "faction_full";
-        if (filename === "faction_simple") mode = "faction_simple";
-        else if (filename === "faction_full") mode = "faction_full";
+    // 全モード分のタスクを実行
+    const modes = ["faction_full", "faction_simple", "alliance"];
+    const results = [];
 
-        io.emit("map:image_updated", {
+    for (const mode of modes) {
+      const filename = `${mode}.png`;
+      const outputPath = path.join(DATA_DIR, "map_images", filename);
+
+      const response = await runWorkerTask("GENERATE_FULL_MAP_IMAGE", {
+        filePaths: {
+          mapState: MAP_STATE_PATH,
+          factions: FACTIONS_PATH,
+          namedCells: NAMED_CELLS_PATH,
+          alliances: ALLIANCES_PATH,
+        },
+        outputPath,
+        mode,
+      });
+
+      if (response.success) {
+        results.push({
+          success: true,
+          path: response.results.outputPath,
           mode,
+        });
+      } else {
+        results.push({
+          success: false,
+          error: response.error,
+          mode,
+        });
+      }
+    }
+
+    results.forEach((result) => {
+      if (result.success) {
+        console.log(`[FullMapImage] Image generated: ${result.path}`);
+        io.emit("map:image_updated", {
+          mode: result.mode,
           timestamp: Date.now(),
         });
       } else {
         console.error(
-          `[FullMapImage] Image ${index + 1} failed: ${result.error}`,
+          `[FullMapImage] Failed (${result.mode}): ${result.error}`,
         );
       }
     });

@@ -5,43 +5,49 @@ const { createCanvas, registerFont } = require("canvas");
 const shared = require("./shared");
 const { LockManager, MAP_SIZE, getTilePoints, calculateFactionPoints } = shared;
 
-// 日本語フォントを登録（node-canvas用）
-const fontPath = path.join(__dirname, "fonts", "NotoSansJP-Bold.ttf");
-if (fs.existsSync(fontPath)) {
-  try {
-    registerFont(fontPath, { family: "NotoSansJP", weight: "bold" });
-    console.log("[Worker] Japanese font registered:", fontPath);
-  } catch (e) {
-    console.warn("[Worker] Failed to register font:", e.message);
-  }
-} else {
-  console.warn("[Worker] Japanese font not found at:", fontPath);
-}
-
-// 絵文字フォントを登録（node-canvas用）- 複数のフォールバックで試行
-const emojiFontFiles = [
-  "NotoEmoji-VariableFont.ttf", // Variable Font（最も互換性が高い）
-  "NotoEmoji-Bold.ttf", // Bold版
-];
-
+let fontsRegistered = false;
 let emojiFontRegistered = false;
-for (const fontFile of emojiFontFiles) {
-  const fontPath = path.join(__dirname, "fonts", fontFile);
+function ensureFontsRegistered() {
+  if (fontsRegistered) return;
+
+  // 日本語フォントを登録（node-canvas用）
+  const fontPath = path.join(__dirname, "fonts", "NotoSansJP-Bold.ttf");
   if (fs.existsSync(fontPath)) {
     try {
-      registerFont(fontPath, { family: "NotoEmoji" });
-      console.log("[Worker] Emoji font registered:", fontPath);
-      emojiFontRegistered = true;
-      break;
+      registerFont(fontPath, { family: "NotoSansJP", weight: "bold" });
+      console.log("[Worker] Japanese font registered:", fontPath);
     } catch (e) {
-      console.warn(`[Worker] Failed to register ${fontFile}:`, e.message);
+      console.warn("[Worker] Failed to register font:", e.message);
+    }
+  } else {
+    console.warn("[Worker] Japanese font not found at:", fontPath);
+  }
+
+  // 絵文字フォントを登録（node-canvas用）- 複数のフォールバックで試行
+  const emojiFontFiles = [
+    "NotoEmoji-VariableFont.ttf", // Variable Font（最も互換性が高い）
+    "NotoEmoji-Bold.ttf", // Bold版
+  ];
+
+  for (const fontFile of emojiFontFiles) {
+    const fontPath = path.join(__dirname, "fonts", fontFile);
+    if (fs.existsSync(fontPath)) {
+      try {
+        registerFont(fontPath, { family: "NotoEmoji" });
+        console.log("[Worker] Emoji font registered:", fontPath);
+        emojiFontRegistered = true;
+        break;
+      } catch (e) {
+        console.warn(`[Worker] Failed to register ${fontFile}:`, e.message);
+      }
     }
   }
-}
-if (!emojiFontRegistered) {
-  console.warn(
-    "[Worker] No emoji font could be registered. Emoji will be removed from labels.",
-  );
+  if (!emojiFontRegistered) {
+    console.warn(
+      "[Worker] No emoji font could be registered. Emoji will be removed from labels.",
+    );
+  }
+  fontsRegistered = true;
 }
 
 // 絵文字を除去するヘルパー関数（フォント登録失敗時のフォールバック用）
@@ -1121,6 +1127,7 @@ parentPort.on("message", async (msg) => {
       const { tiles, factions, highlightTiles, tempDir } = data;
       const filePaths = data.filePaths || {};
 
+      ensureFontsRegistered();
       // tilesが渡されていない場合はファイルからロード
       let mapTiles = tiles;
       if (!mapTiles && filePaths.mapState) {
@@ -1718,6 +1725,7 @@ parentPort.on("message", async (msg) => {
       const namedCells = loadJSON(filePaths.namedCells, {});
       const alliances = loadJSON(filePaths.alliances, { alliances: {} });
 
+      ensureFontsRegistered();
       const imageBuffer = generateFullMapImage(
         mapState,
         factions.factions,
