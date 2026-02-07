@@ -1,0 +1,312 @@
+:root {
+  --primary-color: #007bff;
+  --danger-color: #dc3545;
+  --success-color: #28a745;
+  --warning-color: #ffc107;
+  --bg-color: #f4f7f6;
+  --card-bg: #ffffff;
+}
+body {
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  background-color: var(--bg-color);
+  margin: 0;
+  padding: 20px;
+  color: #333;
+}
+.container {
+  max-width: 800px;
+  margin: 0 auto;
+  background: var(--card-bg);
+  padding: 30px;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+}
+h1 {
+  margin-top: 0;
+  font-size: 24px;
+  text-align: center;
+  color: #2c3e50;
+}
+/* パスワード入力（上部固定） */
+.top-controls {
+  background: #e9ecef;
+  padding: 15px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.top-controls label {
+  font-weight: bold;
+  white-space: nowrap;
+}
+.top-controls input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+}
+
+/* ゲームステータスカード（黄色） */
+.status-card {
+  background-color: var(--warning-color);
+  padding: 12px 20px;
+  border-radius: 8px;
+  margin-bottom: 25px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: bold;
+  box-shadow: 0 2px 8px rgba(255, 193, 7, 0.3);
+}
+.status-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#statusText {
+  font-size: 1rem;
+}
+#toggleBtn {
+  padding: 6px 16px;
+  font-size: 0.9rem;
+  background: #343a40;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+#toggleBtn:hover {
+  opacity: 0.8;
+}
+
+/* タブメニュー */
+.tabs {
+  display: flex;
+  border-bottom: 2px solid #dee2e6;
+  margin-bottom: 20px;
+}
+.tab-btn {
+  padding: 10px 20px;
+  cursor: pointer;
+  border: none;
+  background: none;
+  font-size: 1rem;
+  font-weight: bold;
+  color: #6c757d;
+  position: relative;
+}
+.tab-btn.active {
+  color: var(--primary-color);
+}
+.tab-btn.active::after {
+  content: "";
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: var(--primary-color);
+}
+
+.tab-content {
+  display: none;
+}
+.tab-content.active {
+  display: block;
+}
+
+/* 設定項目 */
+.section {
+  margin-bottom: 25px;
+}
+.section h3 {
+  border-left: 4px solid var(--primary-color);
+  padding-left: 10px;
+  margin-bottom: 15px;
+  color: #34495e;
+}
+.setting-group {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 15px;
+  margin-bottom: 15px;
+}
+.setting-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.setting-item label {
+  font-size: 0.9rem;
+  font-weight: bold;
+  color: #555;
+}
+input[type="number"],
+input[type="text"],
+textarea {
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 0.95rem;
+}
+
+/* ボタン */
+.save-btn {
+  width: 100%;
+  padding: 12px;
+  background-color: var(--success-color);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 1rem;
+  font-weight: bold;
+  cursor: pointer;
+  margin-top: 10px;
+}
+.save-btn:hover {
+  background-color: #218838;
+}
+
+/* 危険な操作 */
+.danger-zone {
+  margin-top: 40px;
+  border: 1px solid #ffc9c9;
+  border-radius: 8px;
+  background-color: #fff5f5;
+}
+.danger-zone summary {
+  padding: 10px 15px;
+  font-weight: bold;
+  color: var(--danger-color);
+  cursor: pointer;
+  list-style: none;
+}
+.danger-zone summary::before {
+  content: "⚠️ ";
+}
+.danger-content {
+  padding: 15px;
+  border-top: 1px solid #ffc9c9;
+}
+.reset-btn {
+  background-color: var(--danger-color);
+  color: white;
+  border: none;
+  padding: 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  width: 100%;
+  font-weight: bold;
+}
+
+/* お知らせリスト */
+.notice-list {
+  max-height: 400px;
+  overflow-y: auto;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  padding: 10px;
+  margin-bottom: 20px;
+}
+.notice-item {
+  background-color: #f8f9fa;
+  padding: 12px;
+  border-radius: 6px;
+  margin-bottom: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+.notice-info h4 {
+  margin: 0 0 5px 0;
+}
+.notice-date {
+  font-size: 0.8rem;
+  color: #999;
+}
+.del-notice-btn {
+  background: var(--danger-color);
+  color: white;
+  border: none;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+#feedback {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  padding: 10px 20px;
+  border-radius: 4px;
+  color: white;
+  display: none;
+  z-index: 1000;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+}
+.feedback-success {
+  background-color: var(--success-color);
+}
+.feedback-error {
+  background-color: var(--danger-color);
+}
+
+/* ログインモーダル */
+#loginModal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+#loginModal .modal-content {
+  background: white;
+  padding: 40px;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  max-width: 400px;
+  width: 90%;
+}
+#loginModal h2 {
+  margin-top: 0;
+  text-align: center;
+  color: #2c3e50;
+}
+#loginModal input {
+  width: 100%;
+  padding: 12px;
+  margin: 15px 0;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 1rem;
+  box-sizing: border-box;
+}
+#loginModal button {
+  width: 100%;
+  padding: 12px;
+  background: var(--primary-color);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 1rem;
+  font-weight: bold;
+  cursor: pointer;
+}
+#loginModal button:hover {
+  opacity: 0.9;
+}
+#loginModal .error-message {
+  color: var(--danger-color);
+  font-size: 0.9rem;
+  margin-top: 10px;
+  text-align: center;
+}
