@@ -13,7 +13,11 @@ let canvas = null;
 let ctx = null;
 
 // [Stateful Worker] データキャッシュ
-let cachedTiles = {};
+let cachedTiles = {}; // 互換性のため維持 (部分更新用)
+// [NEW] フラット配列: インデックス = y * MAP_SIZE + x
+// 要素: Tile Object (参照)
+const tilesFlatArray = new Array(MAP_SIZE * MAP_SIZE).fill(null);
+
 let cachedFactions = {};
 let cachedAlliances = {};
 let cachedPlayerColors = {};
@@ -25,6 +29,10 @@ let cachedTheme = {
 // 最後に描画したViewport (不要な再描画防止用)
 let lastViewport = null;
 
+// [NEW] Parallel Processing Settings
+let workerIndex = 0;
+let totalWorkers = 1;
+
 /**
  * 初期化: OffscreenCanvasを受け取る
  */
@@ -32,7 +40,7 @@ function init(offscreenCanvas) {
   canvas = offscreenCanvas;
   ctx = canvas.getContext("2d");
   console.log(
-    "[RenderWorker] Initialized with canvas:",
+    `[RenderWorker ${workerIndex}/${totalWorkers}] Initialized with canvas:`,
     canvas.width,
     "x",
     canvas.height,
@@ -46,7 +54,7 @@ function resize(width, height) {
   if (canvas) {
     canvas.width = width;
     canvas.height = height;
-    console.log("[RenderWorker] Resized to:", width, "x", height);
+    // console.log("[RenderWorker] Resized to:", width, "x", height);
   }
 }
 
@@ -62,9 +70,17 @@ function renderChunks(data) {
   const centerX = width / 2;
   const centerY = height / 2;
 
-  // クリア
-  ctx.fillStyle = blankTileColor || "#ffffff";
-  ctx.fillRect(0, 0, width, height);
+  // クリア (担当領域のみクリアすべきだが、透明Canvasなので全クリアでOK)
+  ctx.clearRect(0, 0, width, height);
+  // 背景色はWorker 0のみが描画、または全Workerが描画しない（MainThreadのContainerで背景色を持つ）
+  // 以前のロジック: ctx.fillStyle = blankTileColor || "#ffffff"; ctx.fillRect(0, 0, width, height);
+  // マルチレイヤーの場合、最下層以外は透明である必要がある。
+  // 今回は一旦、全Workerでクリアし、背景色は描画しない（GameMap側で背景divを持つ想定）
+  // または、workerIndex === 0 のみ背景を描画する。
+  if (workerIndex === 0) {
+    ctx.fillStyle = blankTileColor || "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+  }
 
   // 表示範囲計算
   const tilesX = Math.ceil(width / tileSize) + 2;
@@ -85,6 +101,10 @@ function renderChunks(data) {
 
   for (let cx = startChunkX; cx < endChunkX; cx++) {
     for (let cy = startChunkY; cy < endChunkY; cy++) {
+      // [PARALLEL] Interleaved based on chunk Y (or X+Y)
+      // Chunks are large, so row interleaving on chunks is fine.
+      if (cy % totalWorkers !== workerIndex) continue;
+
       const color = chunkColors[`${cx}_${cy}`] || blankTileColor;
       const screenX = centerX + (cx * CHUNK_SIZE - viewport.x) * tileSize;
       const screenY = centerY + (cy * CHUNK_SIZE - viewport.y) * tileSize;
@@ -121,7 +141,20 @@ function renderTiles(data) {
   const height = data.height || canvas.height;
 
   // データ更新（もし渡されていればキャッシュも更新）
-  if (data.tiles) cachedTiles = data.tiles;
+  if (data.tiles) {
+    // updateTiles logic is handled in UPDATE_TILES message usually,
+    // but if passed here, we need to sync flat array too.
+    // For simplicity/performance, assume main update comes via UPDATE_TILES.
+    // If data.tiles provided here, we process it.
+    const tiles = data.tiles;
+    Object.assign(cachedTiles, tiles);
+    // Sync flat array
+    Object.values(tiles).forEach((t) => {
+      if (t.x >= 0 && t.x < MAP_SIZE && t.y >= 0 && t.y < MAP_SIZE) {
+        tilesFlatArray[t.y * MAP_SIZE + t.x] = t;
+      }
+    });
+  }
   if (data.factions) cachedFactions = data.factions;
   if (data.alliances) cachedAlliances = data.alliances;
   if (data.playerColors) cachedPlayerColors = data.playerColors;
@@ -132,8 +165,8 @@ function renderTiles(data) {
     cachedTheme.highlightCoreOnly = data.highlightCoreOnly;
   if (data.mapColorMode) cachedTheme.mapColorMode = data.mapColorMode;
 
-  // 描画に使用するデータ
-  const tiles = cachedTiles;
+  // 描画に使用するデータ (Use Flat Array for iteration)
+  // const tiles = cachedTiles; // Unused for iteration now
   const factions = cachedFactions;
   const alliances = cachedAlliances;
   const playerColors = cachedPlayerColors;
@@ -147,8 +180,11 @@ function renderTiles(data) {
   const showGrid = viewport.zoom > 2.0;
 
   // クリア (宇宙色)
-  ctx.fillStyle = "#1a1a2e";
-  ctx.fillRect(0, 0, width, height);
+  ctx.clearRect(0, 0, width, height);
+  if (workerIndex === 0) {
+    ctx.fillStyle = "#1a1a2e";
+    ctx.fillRect(0, 0, width, height);
+  }
 
   // 表示範囲計算
   const tilesX = Math.ceil(width / tileSize) + 2;
@@ -168,8 +204,11 @@ function renderTiles(data) {
 
   for (let x = Math.max(0, startX); x <= Math.min(MAP_SIZE - 1, endX); x++) {
     for (let y = Math.max(0, startY); y <= Math.min(MAP_SIZE - 1, endY); y++) {
-      const tileKey = `${x}_${y}`;
-      const tile = tiles[tileKey];
+      // [PARALLEL] Interleaved based on Y
+      if (y % totalWorkers !== workerIndex) continue;
+
+      // [OPTIMIZED] Use Flat Array Access
+      const tile = tilesFlatArray[y * MAP_SIZE + x];
 
       // 最適化: タイルがない場合は背景色(blankTileColor)と同じならスキップ
       // デフォルト背景は #1a1a2e
@@ -216,10 +255,19 @@ function renderTiles(data) {
         }
 
         // 塗装数モード時の外縁境界線 (低ズーム時はスキップ)
+        // [OPTIMIZED] Flat array neighbor check needed?
+        // Since we are iterating x,y, we can easily check neighbors in flat array
+        // NOTE: For borders to work seamlessly across worker boundaries,
+        // each worker needs access to neighbor data (which they do via full `tilesFlatArray`).
+        // Accessing nY which might be handled by another worker is fine for READ.
+        // We only DRAW the border if it belongs to THIS tile (which we own).
         if (!skipBorders && f && mapColorMode === "overpaint") {
           const checkBorder = (dx, dy, type) => {
-            const nk = `${x + dx}_${y + dy}`;
-            const nt = tiles[nk];
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || nx >= MAP_SIZE || ny < 0 || ny >= MAP_SIZE) return;
+
+            const nt = tilesFlatArray[ny * MAP_SIZE + nx];
             const nfid = nt ? nt.factionId || nt.faction : null;
             if (nfid !== fid) {
               factionBorderRects.push(
@@ -314,7 +362,11 @@ self.onmessage = function (e) {
   const { type, data } = e.data;
 
   try {
-    if (type === "INIT") {
+    if (type === "SETUP_WORKER") {
+      workerIndex = data.workerIndex;
+      totalWorkers = data.totalWorkers;
+      // console.log(`[RenderWorker] Setup: Index=${workerIndex}, Total=${totalWorkers}`);
+    } else if (type === "INIT") {
       init(data.canvas);
       self.postMessage({ type: "INIT_COMPLETE", success: true });
     } else if (type === "RESIZE") {
@@ -325,8 +377,23 @@ self.onmessage = function (e) {
       const { tiles, replace } = data;
       if (replace) {
         cachedTiles = tiles || {};
+        // Full Reset Flat Array
+        tilesFlatArray.fill(null);
+        if (tiles) {
+          Object.values(tiles).forEach((t) => {
+            if (t.x >= 0 && t.x < MAP_SIZE && t.y >= 0 && t.y < MAP_SIZE) {
+              tilesFlatArray[t.y * MAP_SIZE + t.x] = t;
+            }
+          });
+        }
       } else if (tiles) {
         Object.assign(cachedTiles, tiles);
+        // Partial Update Flat Array
+        Object.values(tiles).forEach((t) => {
+          if (t.x >= 0 && t.x < MAP_SIZE && t.y >= 0 && t.y < MAP_SIZE) {
+            tilesFlatArray[t.y * MAP_SIZE + t.x] = t;
+          }
+        });
       }
     } else if (type === "UPDATE_DATA") {
       // [Stateful] その他データ更新

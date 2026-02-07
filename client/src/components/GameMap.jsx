@@ -1,7 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-// import useMapWorkerPool from '../hooks/useMapWorkerPool'; // Removed internal usage
-import useRenderWorker from '../hooks/useRenderWorker';
+import { useMultiRenderWorker } from '../hooks/useMultiRenderWorker';
 
 // マップ定数
 const MAP_SIZE = 500;
@@ -91,15 +90,18 @@ function GameMap({
   workerPool = null, // [NEW] 共有WorkerPoolを受け取る
 }) {
 
-  const baseCanvasRef = useRef(null);
+
+
+  const baseCanvasRef = useRef(null); // Used for compatibility, points to first layer
   const overlayCanvasRef = useRef(null);
-  const canvasRef = overlayCanvasRef; // 互換性のため (イベントハンドラ等で使用)
+  const canvasContainerRef = useRef(null); // [NEW] Container for multi-layers
+  const canvasRef = overlayCanvasRef; // 互換性のため
+
   const [viewport, setViewport] = useState(() => {
     try {
       const saved = localStorage.getItem('teien_map_viewport');
       if (saved) {
         const parsed = JSON.parse(saved);
-        // [NEW] 読み込み時に最小ズーム0.5を適用
         return {
              ...parsed,
              zoom: Math.max(0.1, parsed.zoom)
@@ -112,34 +114,105 @@ function GameMap({
   });
   const [canvasDimensions, setCanvasDimensions] = useState({ width: 0, height: 0 });
 
-  // [NEW] ズームレベル変更時にコールバックを呼び出す
-  // [OPTIMIZED] ズーム操作中フラグを設定してスロットリングを強化
+  // [NEW] Multi-Threaded Render Worker Hook
+  // Debounce tile updates to avoid excessive transfers
+  const [debouncedTileData, setDebouncedTileData] = useState(tiles);
   useEffect(() => {
-    if (onZoomChange) {
-      onZoomChange(viewport.zoom);
-    }
+     // Simple debounce or just pass through?
+     // For 250k tiles, deep compare or copy is expensive.
+     // Just pass reference update.
+     setDebouncedTileData(tiles);
+  }, [tiles]);
 
-    // ズーム中フラグを設定
-    isZoomingRef.current = true;
+  const {
+      initWorkers,
+      updateTiles: updateWorkerTiles,
+      resize: resizeWorker,
+      render: renderAllWorkers,
+      workerReady,
+      workerCount
+  } = useMultiRenderWorker(
+      debouncedTileData,
+      factions,
+      alliances,
+      playerNames, // pass playerNames as playerColors was used for that mode? No, playerColors usually derived or passed.
+      {
+          blankTileColor,
+          highlightCoreOnly,
+          mapColorMode
+      }
+  );
 
-    // 200ms後にフラグをリセット
-    if (zoomTimeoutRef.current) {
-      clearTimeout(zoomTimeoutRef.current);
-    }
-    zoomTimeoutRef.current = setTimeout(() => {
-      isZoomingRef.current = false;
-    }, 200);
-  }, [viewport.zoom, onZoomChange]);
+  // Canvas Refs for multi-layer are managed inside container
 
-  // [NEW] ズーム制限 (Min 0.1)
+  // Initialize Canvases and Workers
   useEffect(() => {
-    if (viewport.zoom < 0.1) {
-      setViewport(prev => ({ ...prev, zoom: 0.1 }));
-    }
-  }, [viewport.zoom]);
+      if (!canvasContainerRef.current) return;
+      if (workerReady) return;
 
-  // [NEW] 最小ズームは常に0.1
-  const minZoomLimit = 0.1;
+      console.log(`[GameMap] Initializing ${workerCount} layers`);
+
+      // Create N canvas elements
+      const canvases = [];
+      canvasContainerRef.current.innerHTML = ''; // Clean
+
+      for (let i = 0; i < workerCount; i++) {
+          const c = document.createElement('canvas');
+          c.style.position = 'absolute';
+          c.style.top = '0';
+          c.style.left = '0';
+          c.style.width = '100%';
+          c.style.height = '100%';
+          c.style.pointerEvents = 'none'; // Click-through to overlay
+          c.id = `map-layer-${i}`;
+          canvasContainerRef.current.appendChild(c);
+          canvases.push(c);
+      }
+
+      initWorkers(canvases);
+
+      // Assign first canvas to baseCanvasRef for compatibility (if needed by other logic)
+      if (canvases.length > 0) {
+          baseCanvasRef.current = canvases[0];
+      }
+
+  }, [initWorkers, workerCount, workerReady]);
+
+  // Update Tiles when data changes
+  useEffect(() => {
+     // Trigger worker update
+     updateWorkerTiles(debouncedTileData, true);
+  }, [debouncedTileData, updateWorkerTiles]);
+
+  // Helper refs
+  const isZoomingRef = useRef(false);
+  const zoomTimeoutRef = useRef(null);
+  const lastRenderTimeRef = useRef(0);
+  const renderReqRef = useRef(null);
+  const viewportRef = useRef(viewport);
+  const wheelTimeoutRef = useRef(null);
+
+
+  useEffect(() => {
+    viewportRef.current = viewport;
+  }, [viewport]);
+
+  // [NEW] Trigger Worker Rendering on viewport/canvas changes
+  useEffect(() => {
+    if (!workerReady) return;
+
+    const { width, height } = canvasDimensions;
+    if (width === 0 || height === 0) return;
+
+    // Throttle rendering
+    const now = performance.now();
+    if (now - lastRenderTimeRef.current < 8) return; // ~120fps cap
+    lastRenderTimeRef.current = now;
+
+    renderAllWorkers(viewport, width, height);
+  }, [viewport, canvasDimensions, workerReady, renderAllWorkers]);
+
+  // ... (zoom logic)
 
   // プレイヤーIDごとのランダム色生成 (Memoized)
   const playerColors = useMemo(() => {
@@ -178,6 +251,13 @@ function GameMap({
     localStorage.setItem('teien_map_viewport', JSON.stringify(viewport));
   }, [viewport]);
 
+  // ズームレベル変更時にコールバック
+  useEffect(() => {
+    if (onZoomChange) {
+      onZoomChange(viewport.zoom);
+    }
+  }, [viewport.zoom, onZoomChange]);
+
   // 外部からのジャンプ要求を監視
   useEffect(() => {
     if (mapJumpCoord) {
@@ -192,85 +272,7 @@ function GameMap({
   const lastSelectedRef = useRef(null); // ブラシモード中の重複選択防止
   const labelRegionsRef = useRef([]); // ラベル領域保存用Ref
 
-  // [NEW] OffscreenCanvas Worker
-  const { initCanvas, resize: resizeWorker, updateTiles, updateData, renderChunks, renderTiles, isReady: workerReady, isSupported, canvasTransferred } = useRenderWorker();
-  const [useOffscreenCanvas, setUseOffscreenCanvas] = useState(false);
-  const offscreenInitializedRef = useRef(false);
 
-  // [NEW] Worker初期化 (OffscreenCanvas転送)
-  useEffect(() => {
-    // 既に初期化済みならスキップ
-    if (offscreenInitializedRef.current || !baseCanvasRef.current) return;
-
-    // OffscreenCanvasがサポートされているかチェック
-    if (isSupported()) {
-        const success = initCanvas(baseCanvasRef.current);
-        if (success) {
-            setUseOffscreenCanvas(true);
-            offscreenInitializedRef.current = true;
-            console.log("OffscreenCanvas initialized successfully.");
-        }
-    }
-  }, [baseCanvasRef.current, isSupported, initCanvas]); // 依存配列にbaseCanvasRef.currentを含める
-
-  // [NEW] リサイズ同期 (Worker)
-  // [NEW] リサイズ同期 (Worker)
-  useEffect(() => {
-      if (useOffscreenCanvas && workerReady) {
-          resizeWorker(canvasDimensions.width, canvasDimensions.height);
-
-          // [FIX] リサイズ後に即座に再描画してズレを防ぐ
-          // viewport は頻繁に変わるため依存配列には入れず、Refから最新値を取得して使う
-          const currentViewport = viewportRef.current;
-
-          renderTiles({
-              viewport: currentViewport,
-              width: canvasDimensions.width,
-              height: canvasDimensions.height
-          });
-
-          // [FIX] リサイズ直後のタイミング問題対策として遅延再描画も行う
-          const timer = setTimeout(() => {
-            renderTiles({
-                viewport: viewportRef.current, // ここでも最新のRefを使う
-                width: canvasDimensions.width,
-                height: canvasDimensions.height
-            });
-          }, 100);
-          return () => clearTimeout(timer);
-      }
-  }, [canvasDimensions, useOffscreenCanvas, workerReady, resizeWorker, renderTiles]); // viewport を削除
-
-  // [Stateful Worker] データ同期 (Tiles)
-  useEffect(() => {
-      if (useOffscreenCanvas && workerReady) {
-          // タイルデータ更新（全置換: 差分検知はApp側で行うのが理想だが、ここではprop変更を検知して送信）
-          // 移動中はtilesが変わらないので送信されない -> 高速化！
-          updateTiles(tiles, true);
-      }
-  }, [tiles, useOffscreenCanvas, workerReady, updateTiles]);
-
-  // [Stateful Worker] データ同期 (その他)
-  useEffect(() => {
-      if (useOffscreenCanvas && workerReady) {
-          updateData({
-              factions,
-              alliances,
-              playerColors,
-              theme: {
-                  blankTileColor: blankTileColor || '#1a1a2e', // デフォルト宇宙色
-                  highlightCoreOnly,
-                  mapColorMode
-              }
-          });
-      }
-  }, [factions, alliances, playerColors, blankTileColor, highlightCoreOnly, mapColorMode, useOffscreenCanvas, workerReady, updateData]);
-
-  // [NEW] 描画スロットリング用
-  const lastRenderTimeRef = useRef(0);
-  const renderThrottleMs = 16; // ~60fps (ただしズーム中は倍に)
-  const isZoomingRef = useRef(false);
-  const zoomTimeoutRef = useRef(null);
 
   // ピンチズーム・誤操作防止用State
   const touchState = useRef({
@@ -488,217 +490,7 @@ function GameMap({
 
   // 1. ベースレイヤー描画 (背景 + タイル) - 重い処理
   // [OPTIMIZED] requestAnimationFrameベースのスロットリングで連続ズーム時のカクつきを防止
-  useEffect(() => {
-    const canvas = baseCanvasRef.current;
-    if (!canvas) return;
 
-    // スロットリング: 前回の描画からの経過時間をチェック
-    const now = performance.now();
-    const elapsed = now - lastRenderTimeRef.current;
-
-    // [OPTIMIZED] ズーム中もスロットリングを緩和して滑らかさを優先 (OffscreenCanvasなら負荷は分散される)
-    // ただし、余りにも頻繁な更新は防ぐため最低限の間隔(8ms ~ 120fps)は空ける
-    const throttle = 8;
-
-    if (elapsed < throttle) {
-      // 次のフレームで再試行するためにRAFを予約するが、
-      // ここで再帰的に呼ぶとループする可能性があるため、
-      // 実際には単純にスキップして、次のReact renderサイクルまたはイベントを待つ方が安全。
-      // ただし、滑らかなアニメーションのためには「次のフレーム」での実行が必要。
-      return;
-    }
-    lastRenderTimeRef.current = now;
-
-    const width = canvas.width;
-    const height = canvas.height;
-
-    // [OPTIMIZED] OffscreenCanvasモードならWorkerに任せる
-    if (useOffscreenCanvas) {
-        if (!workerReady) return; // Worker準備中
-
-        // Stateful Worker化: 描画リクエストにはデータを含めない (Viewportのみ)
-        // データは別途 useEffect で同期済み
-        renderTiles({
-            viewport,
-            width,
-            height
-        });
-        return; // メインスレッド描画を終了
-    }
-
-    // --- 以下、メインスレッド描画フォールバック (OffscreenCanvas非対応環境用) ---
-
-    // 2Dコンテキスト取得 (OffscreenCanvas転送済みならここでエラーになる可能性があるが、useOffscreenCanvasフラグでガードしている)
-    // [FIX] InvalidStateError防止: 転送済みフラグもチェック
-    if (offscreenInitializedRef.current || canvasTransferred) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    // グリッド表示判定 (閾値を2.0に引き上げ)
-    const showGrid = viewport.zoom > 2.0;
-
-    // 背景
-    ctx.fillStyle = '#1a1a2e';
-    ctx.fillRect(0, 0, width, height);
-
-    const tileSize = TILE_SIZE * viewport.zoom;
-    const centerX = width / 2;
-    const centerY = height / 2;
-
-    // 表示範囲計算
-    const tilesX = Math.ceil(width / tileSize) + 2;
-    const tilesY = Math.ceil(height / tileSize) + 2;
-
-    const startX = Math.floor(viewport.x - tilesX / 2);
-    const startY = Math.floor(viewport.y - tilesY / 2);
-    const endX = Math.ceil(viewport.x + tilesX / 2);
-    const endY = Math.ceil(viewport.y + tilesY / 2);
-
-    // 同盟表示モード用判定
-    let myAllianceMembers = new Set();
-    if (allianceDisplayMode && playerFactionId) {
-        myAllianceMembers.add(playerFactionId);
-        const myFaction = factions[playerFactionId];
-        if (myFaction?.allianceId && alliances[myFaction.allianceId]) {
-            alliances[myFaction.allianceId].members.forEach(id => myAllianceMembers.add(id));
-        }
-    }
-
-    // 描画バッチ
-    const batchDraws = new Map(); // color -> rects
-    // プレイヤーモード時の勢力境界線用バッチ
-    const factionBorderRects = [];
-
-    // LOD描画モード: chunkColorsが計算されている場合（zoom < 閾値）はチャンク単位で描画
-    // [REMOVED]
-    if (false) {
-      // Removed functionality
-    } else {
-      // 通常描画モード: タイル単位で描画
-      // 通常描画モード: タイル単位で描画
-      for (let x = Math.max(0, startX); x <= Math.min(MAP_SIZE - 1, endX); x++) {
-        for (let y = Math.max(0, startY); y <= Math.min(MAP_SIZE - 1, endY); y++) {
-          const screenX = centerX + (x - viewport.x) * tileSize;
-          const screenY = centerY + (y - viewport.y) * tileSize;
-
-          const tileKey = `${x}_${y}`;
-          const tile = tiles[tileKey];
-
-          const drawSize = showGrid ? Math.max(1, tileSize - 1) : Math.ceil(tileSize) + 0.5;
-          let color = blankTileColor;
-
-          // タイルがある場合の色決定ロジック
-          if (tile) {
-               const fid = tile.factionId || tile.faction;
-               const f = factions[fid];
-
-               // --- 動的カラー解決 (Hyper-Offloading 2.2) ---
-               // tile.color よりも勢力の現在の色(factions[fid]?.color)を優先することで、
-               // 勢力の色変更が全タイルに即座に波及するようにする。
-               const factionColor = factions[fid]?.color || '#aaaaaa';
-               color = tile.customColor || factionColor;
-
-                if (mapColorMode === 'player') {
-                    if (tile.paintedBy) {
-                        color = playerColors[tile.paintedBy] || '#cccccc';
-                    } else {
-                        color = '#cccccc';
-                    }
-                } else if (mapColorMode === 'overpaint') {
-                    // 5段階 (0-4)
-                    const count = Math.min(4, Math.max(0, tile.overpaint || 0));
-                    // 0(base) -> 4(max)
-                    // 1層(0): HSL(h, 60%, 45%) (暗め)
-                    // ...
-                    // 5層(4): HSL(h, 100%, 75%) (鮮やか)
-
-                    const ratio = count / 4; // 0.0 to 1.0
-
-                    const hue = 240 + (ratio * 60); // 240(Blue) -> 300(Magenta)
-                    const saturation = 60 + (ratio * 40); // 60 -> 100
-                    const lightness = 45 + (ratio * 30); // 45 -> 75
-
-                    color = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
-                } else if (mapColorMode === 'alliance') {
-                    if (f && f.allianceId && alliances[f.allianceId]) {
-                        color = alliances[f.allianceId].color;
-                    } else {
-                        color = '#111111';
-                    }
-                } else {
-                    color = tile.customColor || tile.color || '#ffffff';
-                }
-
-                // 塗装数モード時の外縁境界線判定 (隣接タイルが異なる勢力の時だけ引く)
-                if (f && mapColorMode === 'overpaint') {
-                    const checkBorder = (dx, dy, type) => {
-                        const nk = `${x + dx}_${y + dy}`;
-                        const nt = tiles[nk];
-                        const nfid = nt ? (nt.factionId || nt.faction) : null;
-                        if (nfid !== fid) {
-                            factionBorderRects.push({ x: screenX, y: screenY, w: drawSize, h: drawSize, type });
-                        }
-                    };
-                    checkBorder(0, -1, 'top');
-                    checkBorder(0, 1, 'bottom');
-                    checkBorder(-1, 0, 'left');
-                    checkBorder(1, 0, 'right');
-                }
-
-                // 中核マス強調モード
-                if (highlightCoreOnly) {
-                    const currentFid = tile.factionId || tile.faction;
-                    const isCore = tile.core && tile.core.factionId === currentFid;
-                    if (!isCore) {
-                        color = '#222233';
-                    }
-                }
-            }
-
-          if (!batchDraws.has(color)) {
-            batchDraws.set(color, []);
-          }
-          batchDraws.get(color).push({ x: screenX, y: screenY, w: drawSize, h: drawSize });
-        }
-      }
-    }
-
-    // [OPTIMIZED] Path2Dを使ったバッチ描画（オブジェクト生成オーバーヘッド削減）
-    batchDraws.forEach((rects, color) => {
-      const path = new Path2D();
-      for (let i = 0; i < rects.length; i++) {
-        const r = rects[i];
-        path.rect(r.x, r.y, r.w, r.h);
-      }
-      ctx.fillStyle = color;
-      ctx.fill(path);
-    });
-
-    // 塗装数モード時の勢力境界線 (外縁のみ)
-    if (factionBorderRects.length > 0) {
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)'; // 黒
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        for (const r of factionBorderRects) {
-            if (r.type === 'top') {
-                ctx.moveTo(r.x, r.y);
-                ctx.lineTo(r.x + r.w, r.y);
-            } else if (r.type === 'bottom') {
-                ctx.moveTo(r.x, r.y + r.h);
-                ctx.lineTo(r.x + r.w, r.y + r.h);
-            } else if (r.type === 'left') {
-                ctx.moveTo(r.x, r.y);
-                ctx.lineTo(r.x, r.y + r.h);
-            } else if (r.type === 'right') {
-                ctx.moveTo(r.x + r.w, r.y);
-                ctx.lineTo(r.x + r.w, r.y + r.h);
-            }
-        }
-        ctx.stroke();
-    }
-
-  }, [viewport, tiles, factions, mapColorMode, alliances, playerFactionId, highlightCoreOnly, canvasDimensions, blankTileColor]);
 
   // 2. オーバーレイ描画 (ハイライト、文字、枠線) - 軽い処理 (60fps対応)
   useEffect(() => {
@@ -1087,22 +879,23 @@ function GameMap({
     if (!parent) return;
 
     const resize = () => {
-        // [FIX] OffscreenCanvasモード時はwidth/heightを直接変更できないためスキップ
-        // 代わりにsetCanvasDimensions経由でWorkerに通知される
-        // canvasTransferred もチェックして転送済みならスキップ
-        if (baseCanvasRef.current && !useOffscreenCanvas && !canvasTransferred) {
-            try {
-                baseCanvasRef.current.width = parent.clientWidth;
-                baseCanvasRef.current.height = parent.clientHeight;
-            } catch (e) {
-                // OffscreenCanvas転送済みの場合はエラーになるため無視
-            }
-        }
+        const width = parent.clientWidth;
+        const height = parent.clientHeight;
+
         if (overlayCanvasRef.current) {
-            overlayCanvasRef.current.width = parent.clientWidth;
-            overlayCanvasRef.current.height = parent.clientHeight;
+            overlayCanvasRef.current.width = width;
+            overlayCanvasRef.current.height = height;
         }
-        setCanvasDimensions({ width: parent.clientWidth, height: parent.clientHeight });
+        setCanvasDimensions({ width, height });
+
+        // Worker側のリサイズは useMultiRenderWorker 側で検知して実行されるか、
+        // ここで明示的に呼ぶ必要がある場合は resizeWorker(width, height) を呼ぶ
+        // useMultiRenderWorkerのresizeはuseEffectでcanvasDimensionsを監視しているか、
+        // あるいは親コンポーネントからresizeを呼ぶ設計か確認が必要。
+        // 現在の構成では GameMap 内で resizeWorker を受け取っているので、ここで呼ぶのが確実。
+        if (resizeWorker) {
+             resizeWorker(width, height);
+        }
     };
 
     // 初期化
@@ -1117,7 +910,7 @@ function GameMap({
     return () => {
         observer.disconnect();
     };
-  }, [useOffscreenCanvas]); // 依存配列にuseOffscreenCanvasを追加
+  }, [resizeWorker]); // useOffscreenCanvas依存を削除
 
   // スクリーン座標からタイル座標へ変換
   const screenToTile = useCallback((screenX, screenY) => {
@@ -1287,14 +1080,54 @@ function GameMap({
     lastSelectedRef.current = null;
   };
 
-  const wheelTimeoutRef = useRef(null);
 
-  // Viewport Ref for event handlers (to avoid re-attaching listeners on every frame)
-  const viewportRef = useRef(viewport);
+
+  // Additional Data Sync is handled by the hook's internal effects
+
+  // Resize handler
+  const updateCanvasSize = useCallback(() => {
+      // Use canvasContainerRef for reliable sizing (it's the parent of worker canvases)
+      const container = canvasContainerRef.current;
+      if (!container) return;
+
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+
+      console.log(`[GameMap] updateCanvasSize: ${width}x${height}`);
+
+      if (overlayCanvasRef.current) {
+          overlayCanvasRef.current.width = width;
+          overlayCanvasRef.current.height = height;
+      }
+      setCanvasDimensions({ width, height });
+
+      // Sync size to all workers
+      if (resizeWorker) {
+          resizeWorker(width, height);
+      }
+
+  }, [resizeWorker]);
+
+  // Initial setup and resize observer
   useEffect(() => {
-    viewportRef.current = viewport;
-  }, [viewport]);
+      const container = canvasContainerRef.current;
+      if (!container) {
+          console.log('[GameMap] ResizeObserver: container not found');
+          return;
+      }
 
+      console.log('[GameMap] Setting up ResizeObserver');
+      updateCanvasSize();
+
+      const observer = new ResizeObserver(() => {
+          updateCanvasSize();
+      });
+      observer.observe(container);
+
+      return () => {
+          observer.disconnect();
+      };
+  }, [updateCanvasSize]);
 
   // タッチイベント
   const handleTouchStart = useCallback((e) => {
@@ -1564,8 +1397,9 @@ function GameMap({
 
   return (
     <>
-      <canvas
-        ref={baseCanvasRef}
+      {/* Container for dynamically created worker canvases */}
+      <div
+        ref={canvasContainerRef}
         style={{
             position: 'absolute',
             top: 0,
@@ -1575,6 +1409,7 @@ function GameMap({
             zIndex: 1
         }}
       />
+      {/* Overlay canvas for UI elements */}
       <canvas
         ref={overlayCanvasRef}
         style={{
