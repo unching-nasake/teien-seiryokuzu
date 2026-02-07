@@ -80,16 +80,27 @@ const useFactionData = (playerData) => {
 
   // ランキングデータ生成
   const leaderboardItems = useMemo(() => {
-    return Object.values(factions)
+    const sorted = Object.values(factions)
       .filter((f) => f && typeof f === "object")
-      .sort((a, b) => (b.totalPoints || 0) - (a.totalPoints || 0))
-      .map((f, index) => ({
+      .sort((a, b) => (b.totalPoints || 0) - (a.totalPoints || 0));
+
+    let currentRank = 1;
+    return sorted.map((f, index) => {
+      // ポイントが前の勢力より低い場合のみランクを更新 (同点なら維持)
+      if (
+        index > 0 &&
+        (f.totalPoints || 0) < (sorted[index - 1].totalPoints || 0)
+      ) {
+        currentRank = index + 1;
+      }
+      return {
         id: f.id,
-        rank: index + 1,
+        rank: currentRank,
         name: f.name,
         color: f.color,
         count: f.totalPoints || 0,
-      }));
+      };
+    });
   }, [factions]);
 
   return {

@@ -138,8 +138,12 @@ function TimelapseViewer({ onClose, factions, showFactionNames: initialShowFacti
      items.sort((a, b) => b.count - a.count);
 
      // 5. ランク付与
+     let currentRank = 1;
      items.forEach((item, index) => {
-         item.rank = index + 1;
+         if (index > 0 && item.count < items[index - 1].count) {
+             currentRank = index + 1;
+         }
+         item.rank = currentRank;
      });
 
      setLeaderboardItems(items);

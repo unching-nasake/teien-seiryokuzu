@@ -7733,6 +7733,32 @@ app.post(
       }
       // --- End Destruction Check ---
 
+      if (!destroyedDetails && erasedKeys.length > 0) {
+        // [Fix] Erase時にポイント再計算と通知を行う
+        await updateRankingCache();
+        const rankData = cachedFactionRanks.find(
+          (r) => r.id === player.factionId,
+        );
+
+        if (rankData && factions.factions[player.factionId]) {
+          const currentFaction = factions.factions[player.factionId];
+          // メモリ上の値を更新 (getEnrichedFactionが参照するため)
+          currentFaction.totalPoints = rankData.points;
+
+          io.emit("faction:updated", {
+            factionId: player.factionId,
+            faction: getEnrichedFaction(player.factionId, factions, players),
+          });
+
+          // ポイントだけの軽量更新も送る
+          io.emit("faction:pointsUpdated", {
+            factionId: player.factionId,
+            points: rankData.points,
+            rank: rankData.rank,
+          });
+        }
+      }
+
       res.json({
         success: true,
         erasedCount: erasedKeys.length,
