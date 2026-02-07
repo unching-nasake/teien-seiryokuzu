@@ -9,17 +9,22 @@
   <body>
     <!-- ログインモーダル -->
     <div id="loginModal" style="display: none">
-      <div class="modal-content">
+      <form
+        class="modal-content"
+        onsubmit="
+          event.preventDefault();
+          adminLogin();
+        "
+      >
         <h2>🔐 Admin認証</h2>
         <input
           type="password"
           id="loginPassword"
           placeholder="管理者パスワードを入力"
-          onkeypress="if (event.key === 'Enter') adminLogin();"
         />
-        <button onclick="adminLogin()">ログイン</button>
+        <button type="submit">ログイン</button>
         <div id="loginError" class="error-message"></div>
-      </div>
+      </form>
     </div>
 
     <div class="container" id="adminPanel" style="display: none">
@@ -330,7 +335,13 @@
 
       <!-- セキュリティ設定タブ -->
       <div id="securityTab" class="tab-content">
-        <div class="section">
+        <form
+          class="section"
+          onsubmit="
+            event.preventDefault();
+            changePassword();
+          "
+        >
           <h3>🔐 管理者パスワード変更</h3>
           <div class="setting-item" style="margin-bottom: 15px">
             <label>現在のパスワード</label>
@@ -338,6 +349,7 @@
               type="password"
               id="currentPassword"
               placeholder="現在のパスワードを入力"
+              autocomplete="current-password"
             />
           </div>
           <div class="setting-group">
@@ -347,6 +359,7 @@
                 type="password"
                 id="newPassword"
                 placeholder="新しいパスワードを入力"
+                autocomplete="new-password"
               />
             </div>
             <div class="setting-item">
@@ -355,13 +368,12 @@
                 type="password"
                 id="confirmPassword"
                 placeholder="もう一度入力"
+                autocomplete="new-password"
               />
             </div>
           </div>
-          <button class="save-btn" onclick="changePassword()">
-            パスワードを更新する
-          </button>
-        </div>
+          <button type="submit" class="save-btn">パスワードを更新する</button>
+        </form>
       </div>
 
       <!-- アカウント設定タブ -->
