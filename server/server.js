@@ -114,8 +114,8 @@ app.use((req, res, next) => {
 // ワーカープールの初期化
 const { Worker } = require("worker_threads");
 const numCPUs = require("os").cpus().length;
-// シングルプロセスなので全コアをWorker Threadsに使用
-const numWorkers = numCPUs;
+// [OPTIMIZATION] APIレスポンスとSocket.ioの安定性のために、論理コア数 - 1 のWorkerを使用
+const numWorkers = numCPUs >= 2 ? numCPUs - 1 : 1;
 const isPM2 = process.env.NODE_APP_INSTANCE !== undefined;
 
 const workers = [];
@@ -13495,56 +13495,97 @@ async function runParallelCoreRecalculate() {
 // 定期メンテナンス: 1分ごとに実行
 setInterval(async () => {
   try {
-    // console.log("[Maintenance] Starting Coreification check (Worker)...");
-    // Workerに一任
-    const result = await runWorkerTask("PROCESS_COREIFICATION", {
+    const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
+    const allTileKeys = Object.keys(mapState.tiles);
+    const CHUNK_COUNT = 4;
+
+    // 1. タイルチャンク分割 (期限切れチェック用)
+    const tileChunks = Array.from({ length: CHUNK_COUNT }, () => ({}));
+    allTileKeys.forEach((key) => {
+      const y = parseInt(key.split("_")[1]);
+      const chunkIdx = Math.min(
+        CHUNK_COUNT - 1,
+        Math.floor((y / MAP_SIZE) * CHUNK_COUNT),
+      );
+      tileChunks[chunkIdx][key] = mapState.tiles[key];
+    });
+
+    // 2. 勢力グループ分割 (拡大チェック用)
+    const factionsData = loadJSON(FACTIONS_PATH, { factions: {} });
+    const fids = Object.keys(factionsData.factions);
+    const factionGroups = Array.from({ length: CHUNK_COUNT }, () => []);
+    fids.forEach((fid, i) => factionGroups[i % CHUNK_COUNT].push(fid));
+
+    console.log(
+      `[Maintenance] Starting parallel coreification (Maintenance: ${CHUNK_COUNT} workers, Expansion: ${CHUNK_COUNT} workers)...`,
+    );
+
+    const coreTileSettings =
+      loadJSON(SYSTEM_SETTINGS_PATH, {}).coreTileSettings || {};
+
+    const baseTaskData = {
       filePaths: {
         mapState: MAP_STATE_PATH,
         factions: FACTIONS_PATH,
       },
-      factions: [], // 全てチェック (check all)
+      coreTileSettings,
+    };
+
+    // メンテナンスと拡大を並列実行
+    const tasks = [
+      ...tileChunks.map((chunk) =>
+        runWorkerTask("PROCESS_COREIFICATION", {
+          ...baseTaskData,
+          tiles: chunk,
+        }),
+      ),
+      ...factionGroups.map((group) =>
+        runWorkerTask("PROCESS_COREIFICATION", {
+          ...baseTaskData,
+          factionIds: group,
+        }),
+      ),
+    ];
+
+    const results = await Promise.all(tasks);
+    const mergedUpdatedTiles = {};
+
+    results.forEach((res) => {
+      if (res.success && res.results && res.results.updatedTiles) {
+        Object.assign(mergedUpdatedTiles, res.results.updatedTiles);
+      } else if (!res.success) {
+        console.error("[Maintenance] Worker task failed:", res.error);
+      }
     });
 
-    if (
-      result &&
-      result.results &&
-      result.results.updatedTiles &&
-      Object.keys(result.results.updatedTiles).length > 0
-    ) {
+    if (Object.keys(mergedUpdatedTiles).length > 0) {
       // updateJSON を使って安全に反映
       await updateJSON(MAP_STATE_PATH, (data) => {
         let changed = false;
-        Object.entries(result.results.updatedTiles).forEach(
-          ([key, tileVal]) => {
-            // 競合チェック: もしメインスレッドで既に削除されていたり別の変更が入っている場合はどうする？
-            // coreの状態変更だけなので上書きして良いケースが大半だが、念のため存在確認
-            if (data.tiles[key]) {
-              // マージ: サーバー上の最新状態に対して、Workerが計算した core プロパティ変更を適用
-              const current = data.tiles[key];
-              // タイル所有者が変わっていない場合のみ適用 (所有者変更＝コア消失等の可能性があるため)
-              const currentFid = current.factionId || current.faction;
-              const workerTileFid = tileVal.factionId || tileVal.faction;
+        Object.entries(mergedUpdatedTiles).forEach(([key, tileVal]) => {
+          if (data.tiles[key]) {
+            const current = data.tiles[key];
+            const currentFid = current.factionId || current.faction;
+            const workerTileFid = tileVal.factionId || tileVal.faction;
 
-              if (currentFid === workerTileFid) {
-                // coreプロパティを同期
-                if (tileVal.core) {
-                  current.core = tileVal.core;
-                  delete current.coreificationUntil;
-                  delete current.coreificationFactionId;
-                } else {
-                  delete current.core;
-                }
-                changed = true;
+            if (currentFid === workerTileFid) {
+              if (tileVal.core) {
+                current.core = tileVal.core;
+                delete current.coreificationUntil;
+                delete current.coreificationFactionId;
+              } else {
+                delete current.core;
               }
+              changed = true;
             }
-          },
-        );
+          }
+        });
 
         if (changed) {
           console.log(
-            `[Maintenance] Applied core updates to ${Object.keys(result.results.updatedTiles).length} tiles.`,
+            `[Maintenance] Applied core updates to ${Object.keys(mergedUpdatedTiles).length} tiles.`,
           );
-          batchEmitTileUpdate(Object.keys(result.results.updatedTiles));
+          batchEmitTileUpdate(Object.keys(mergedUpdatedTiles));
         }
         return changed; // 保存トリガー
       });
@@ -14343,11 +14384,9 @@ async function generateFullMapImageTask() {
   try {
     console.log("[FullMapImage] Requesting node-canvas generation (Worker)...");
 
-    // 全モード分のタスクを実行
+    // 全モード分のタスクを並列実行
     const modes = ["faction_full", "faction_simple", "alliance"];
-    const results = [];
-
-    for (const mode of modes) {
+    const tasks = modes.map(async (mode) => {
       const filename = `${mode}.png`;
       const outputPath = path.join(DATA_DIR, "map_images", filename);
 
@@ -14362,20 +14401,15 @@ async function generateFullMapImageTask() {
         mode,
       });
 
-      if (response.success) {
-        results.push({
-          success: true,
-          path: response.results.outputPath,
-          mode,
-        });
-      } else {
-        results.push({
-          success: false,
-          error: response.error,
-          mode,
-        });
-      }
-    }
+      return {
+        success: response.success,
+        path: response.success ? response.results.outputPath : null,
+        error: response.success ? null : response.error,
+        mode,
+      };
+    });
+
+    const results = await Promise.all(tasks);
 
     results.forEach((result) => {
       if (result.success) {
@@ -14644,3 +14678,85 @@ async function migratePlayerNames() {
   }
 }
 migratePlayerNames();
+
+// [OPTIMIZATION] マップ整合性チェック 定期実行 (Worker並列版)
+// 10分ごとに実行し、ゴースト勢力タイルや色の不一致などを修正
+setInterval(
+  async () => {
+    try {
+      const CHUNK_COUNT = 4;
+      const coreTileSettings =
+        loadJSON(SYSTEM_SETTINGS_PATH, {}).coreTileSettings || {};
+
+      console.log(
+        `[Integrity] Starting parallel integrity check (4 workers)...`,
+      );
+
+      const tasks = Array.from({ length: CHUNK_COUNT }, (_, i) => {
+        const startY = Math.floor((MAP_SIZE / CHUNK_COUNT) * i);
+        const endY =
+          i === CHUNK_COUNT - 1
+            ? MAP_SIZE - 1
+            : Math.floor((MAP_SIZE / CHUNK_COUNT) * (i + 1)) - 1;
+        return runWorkerTask("CHECK_INTEGRITY_PARTIAL", {
+          filePaths: {
+            mapState: MAP_STATE_PATH,
+            factions: FACTIONS_PATH,
+          },
+          startY,
+          endY,
+          coreTileSettings,
+        });
+      });
+
+      const results = await Promise.all(tasks);
+      const mergedUpdatedTiles = {};
+      let anyChanges = false;
+
+      results.forEach((res) => {
+        if (res.success && res.results) {
+          if (res.results.changed) anyChanges = true;
+          Object.assign(mergedUpdatedTiles, res.results.updatedTiles);
+        }
+      });
+
+      if (anyChanges) {
+        await updateJSON(MAP_STATE_PATH, (data) => {
+          let actualChanged = false;
+          Object.entries(mergedUpdatedTiles).forEach(([key, val]) => {
+            if (val === null) {
+              if (data.tiles[key]) {
+                delete data.tiles[key];
+                actualChanged = true;
+              }
+            } else {
+              // 所有者が変わっていない場合のみ同期を許可 (整合性チェック中の競合回避)
+              const current = data.tiles[key];
+              if (current) {
+                const currentFid = current.factionId || current.faction;
+                const workerFid = val.factionId || val.faction;
+                if (currentFid === workerFid) {
+                  data.tiles[key] = val;
+                  actualChanged = true;
+                }
+              } else {
+                // 削除されていた場合などは何もしない
+              }
+            }
+          });
+
+          if (actualChanged) {
+            batchEmitTileUpdate(Object.keys(mergedUpdatedTiles));
+          }
+          return actualChanged;
+        });
+        console.log(
+          `[Integrity] Map integrity fixed. Updated ${Object.keys(mergedUpdatedTiles).length} tiles.`,
+        );
+      }
+    } catch (e) {
+      console.error("[Integrity] Error in parallel integrity check:", e);
+    }
+  },
+  10 * 60 * 1000,
+);

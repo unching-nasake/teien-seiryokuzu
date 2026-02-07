@@ -7,7 +7,8 @@ import { useCallback, useEffect, useRef } from "react";
 // Workerプールのサイズ（論理コア数、最小2）
 const getPoolSize = () => {
   const cores = navigator.hardwareConcurrency || 4;
-  return Math.max(2, cores);
+  // [OPTIMIZATION] UIスレッド（メインスレッド）の反応性を保つため、1コア分を空ける
+  return cores >= 2 ? cores - 1 : 1;
 };
 
 export function useMapWorkerPool() {

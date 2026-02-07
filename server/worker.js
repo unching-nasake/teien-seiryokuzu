@@ -1441,59 +1441,61 @@ parentPort.on("message", async (msg) => {
       parentPort.postMessage({ success: false, taskId, error: e.message });
     }
   } else if (type === "PROCESS_COREIFICATION") {
-    // 中核化維持・確定処理タスク
-    const { filePaths, coreTileSettings } = data; // [NEW] 設定受け取り
+    // 中核化維持・確定処理タスク (並列対応)
+    const { filePaths, coreTileSettings, tiles, factionIds } = data;
     try {
-      const mapState = loadJSON(filePaths.mapState, { tiles: {} });
+      const mapData = tiles
+        ? { tiles }
+        : loadJSON(filePaths.mapState, { tiles: {} });
       const factionsData = loadJSON(filePaths.factions, { factions: {} });
-
-      // ロジック実行: recalculateAllFactionCores は既にWorker内にあるが、機能拡張が必要
-      // 今回は既存の recalculateAllFactionCores の内部ロジックを利用・拡張して
-      // 「自動中核化（拡大）」と「期限切れ削除」の両方を行う
 
       const nowMs = Date.now();
       const updatedTiles = {};
-      const ONE_HOUR = 60 * 60 * 1000;
 
-      Object.values(mapState.tiles).forEach((tile) => {
+      // 1. 期限切れチェック & 恒久化 (タイルチャンク走査)
+      Object.entries(mapData.tiles).forEach(([key, tile]) => {
         if (tile.core && tile.core.expiresAt) {
           if (new Date(tile.core.expiresAt).getTime() <= nowMs) {
             // 期限切れ
-            updatedTiles[`${tile.x}_${tile.y}`] = { ...tile };
-            delete updatedTiles[`${tile.x}_${tile.y}`].core;
+            updatedTiles[key] = { ...tile };
+            delete updatedTiles[key].core;
           } else {
             // 自勢力チェック
             const fid = tile.faction || tile.factionId;
             if (fid === tile.core.factionId) {
               // 自勢力で維持されていれば恒久化(expiresAt削除)
-              updatedTiles[`${tile.x}_${tile.y}`] = { ...tile };
-              delete updatedTiles[`${tile.x}_${tile.y}`].core.expiresAt;
+              updatedTiles[key] = { ...tile };
+              delete updatedTiles[key].core.expiresAt;
             }
           }
         }
       });
 
-      // 2. 自動中核化 (拡大)
-      const targetData = factionsData.factions;
-      // 全数チェックだと重いが、Workerなのである程度許容。
-      // ただし、mapStateをなめる回数を減らすため、先に勢力ごとのタイルリストを作る
+      // 2. 自動中核化 (拡大) - 勢力リストを限定して実行可能
+      const targetFids = factionIds || Object.keys(factionsData.factions);
+
+      // mapState は全タイル必要 (クラスタ判定のため)
+      const fullMapState = tiles
+        ? loadJSON(filePaths.mapState, { tiles: {} })
+        : mapData;
+
       const factionTiles = {};
-      Object.entries(mapState.tiles).forEach(([key, t]) => {
+      Object.entries(fullMapState.tiles).forEach(([key, t]) => {
         const fid = t.faction || t.factionId;
-        if (fid && targetData[fid]) {
+        if (fid && targetFids.includes(fid)) {
           if (!factionTiles[fid]) factionTiles[fid] = [];
           factionTiles[fid].push({ key, ...t });
         }
       });
 
-      Object.keys(targetData).forEach((fid) => {
-        const tiles = factionTiles[fid] || [];
-        const count = tiles.length;
-        const knownKeys = tiles.map((t) => t.key);
+      targetFids.forEach((fid) => {
+        const fTiles = factionTiles[fid] || [];
+        if (fTiles.length === 0) return;
 
+        const knownKeys = fTiles.map((t) => t.key);
         const clusterInfo = getFactionClusterInfoWorker(
           fid,
-          mapState,
+          fullMapState,
           [],
           knownKeys,
         );
@@ -1502,24 +1504,24 @@ parentPort.on("message", async (msg) => {
           if (!cluster.hasCore) return;
 
           cluster.tiles.forEach((key) => {
-            const tile = mapState.tiles[key];
+            const tile = fullMapState.tiles[key];
             if (!tile) return;
             if (updatedTiles[key]) return; // 既に更新対象ならスキップ(削除優先)
 
             // 既に自分の中核ならスキップ
             if (tile.core && tile.core.factionId === fid) return;
             // 他人の有効な中核ならスキップ
-            if (tile.core && tile.core.factionId !== fid) return; // 奪取ロジックは別途あるはずだがここでは触らない
+            if (tile.core && tile.core.factionId !== fid) return;
 
             let shouldCore = false;
-            // 小規模(閾値以下)即時 or 大規模1時間
             const instantThreshold =
               coreTileSettings?.instantCoreThreshold ?? 400;
-            if (count <= instantThreshold) {
+            if (fTiles.length <= instantThreshold) {
               shouldCore = true;
             } else {
               const pTime = new Date(tile.paintedAt || 0).getTime();
-              if (nowMs - pTime >= ONE_HOUR) {
+              if (nowMs - pTime >= 60 * 60 * 1000) {
+                // 1時間
                 shouldCore = true;
               }
             }
@@ -1539,7 +1541,7 @@ parentPort.on("message", async (msg) => {
       parentPort.postMessage({
         success: true,
         taskId,
-        results: { updatedTiles }, // 変更されたタイルのみを返す
+        results: { updatedTiles },
         workerId,
       });
     } catch (e) {
