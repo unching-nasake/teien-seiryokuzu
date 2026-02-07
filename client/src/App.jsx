@@ -1362,11 +1362,11 @@ function App() {
         const message = data.message || "";
         addNotification(message, title);
 
-        // AP関連の場合はエフェクトも出す?
-        if (message.includes("AP")) {
-            setApUpdated(true);
-            setTimeout(() => setApUpdated(false), 1000);
-        }
+        // AP関連の場合はエフェクトも出す? (省略)
+        // if (message.includes("AP")) {
+        //     setApUpdated(true);
+        //     setTimeout(() => setApUpdated(false), 1000);
+        // }
     });
 
     // 戦争のリアルタイム更新
