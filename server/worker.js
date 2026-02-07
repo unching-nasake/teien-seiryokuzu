@@ -1765,8 +1765,8 @@ parentPort.on("message", async (msg) => {
 // 全体マップ画像生成関数 (3パターンモード対応)
 // mode: "faction_full" (勢力名+ネームドマス), "faction_simple" (なし), "alliance" (同盟名)
 function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
-  const TILE_SIZE = 4; // 小さめのタイルサイズで高速化
-  const PADDING = 150; // 勢力名がはみ出さないようにパディングを追加（150pxに拡張）
+  const TILE_SIZE = 2; // 500x500タイルの場合、2pxで1000px
+  const PADDING = 100; // 左右100pxずつで合計1200px
   const mapWidth = MAP_SIZE * TILE_SIZE;
   const mapHeight = MAP_SIZE * TILE_SIZE;
   const canvasWidth = mapWidth + PADDING * 2;
@@ -1818,12 +1818,12 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
     }
   });
 
-  // 金枠（50x50センターエリア）
+  // 金枠（50x50センターエリア: 225～274）
   ctx.strokeStyle = "#FFD700";
   ctx.lineWidth = 2;
   ctx.strokeRect(
-    PADDING + 100 * TILE_SIZE,
-    PADDING + 100 * TILE_SIZE,
+    PADDING + 225 * TILE_SIZE,
+    PADDING + 225 * TILE_SIZE,
     50 * TILE_SIZE,
     50 * TILE_SIZE,
   );
