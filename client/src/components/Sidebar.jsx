@@ -903,17 +903,23 @@ function Sidebar({
                       </div>
                   );
               })()}
-              <button
-                className="btn btn-warning"
-                onClick={() => {
-                  if (window.confirm(`選択した ${selectedTiles.length} マスを消去しますか？\n（あなたの所有権を解除し中立に戻します）`)) {
-                    onErase();
-                  }
-                }}
-                disabled={selectedTiles.length === 0}
-              >
-                消去
-              </button>
+              {playerData?.permissions?.canErase && selectedTiles.length > 0 && selectedTiles.every(t => {
+                  const key = `${t.x}_${t.y}`;
+                  const tData = mapTiles[key];
+                  return tData && (tData.faction || tData.factionId) === playerData.factionId;
+              }) && (
+                <button
+                  className="btn btn-warning"
+                  onClick={() => {
+                    if (window.confirm(`選択した ${selectedTiles.length} マスを消去しますか？\n（あなたの所有権を解除し中立に戻します）`)) {
+                      onErase();
+                    }
+                  }}
+                  disabled={selectedTiles.length === 0}
+                >
+                  消去
+                </button>
+              )}
               <button
                 className="btn btn-blue"
                 onClick={onClearSelection}
