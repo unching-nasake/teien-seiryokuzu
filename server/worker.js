@@ -94,8 +94,54 @@ let coreCoordsCache = null;
 // 構造: { version, data: Map<factionId, clusterInfo> }
 let clusterCache = null;
 
+// [OPTIMIZATION] 同盟メンバーキャッシュ (allianceId -> Set<factionId>)
+// 構造: { version, data: Map<allianceId, Set<factionId>> }
+let allianceMembersCache = null;
+
+// [OPTIMIZATION] 勢力ポイントキャッシュ (factionId -> points)
+// 構造: { version, data: Map<factionId, number> }
+let factionPointsCache = null;
+
 // キャッシュバージョン (mapState変更時にインクリメント)
 let cacheVersion = 0;
+
+/**
+ * 同盟メンバーSetを取得（キャッシュ利用）
+ * @param {string} factionId - 勢力ID
+ * @param {Object} alliances - 同盟データ
+ * @param {Object} factions - 勢力データ
+ * @returns {Set<string>} 同盟関係にある勢力IDのSet（自分含む）
+ */
+function getAlliedFactionIds(factionId, alliances, factions) {
+  const result = new Set([factionId]);
+
+  const faction = factions?.factions?.[factionId];
+  if (!faction?.allianceId) return result;
+
+  const allianceId = faction.allianceId;
+
+  // キャッシュチェック
+  if (allianceMembersCache?.data?.has(allianceId)) {
+    const cached = allianceMembersCache.data.get(allianceId);
+    cached.forEach((fid) => result.add(fid));
+    return result;
+  }
+
+  // キャッシュミス: 同盟メンバーをSetに追加
+  const alliance = alliances?.alliances?.[allianceId];
+  if (alliance?.members) {
+    alliance.members.forEach((m) => result.add(m.factionId));
+
+    // キャッシュに保存
+    if (!allianceMembersCache) {
+      allianceMembersCache = { version: cacheVersion, data: new Map() };
+    }
+    const memberSet = new Set(alliance.members.map((m) => m.factionId));
+    allianceMembersCache.data.set(allianceId, memberSet);
+  }
+
+  return result;
+}
 
 /**
  * ZOC影響範囲マップを構築
@@ -202,6 +248,16 @@ function ensureCachesValid(mapState, namedCells, factions, alliances) {
       data: buildCoreCoordsMap(mapState),
     };
     // console.log(`[Worker] Core Coords Cache rebuilt: ${coreCoordsCache.data.size} factions`);
+  }
+
+  // 同盟キャッシュのバージョンチェック（同盟データ変更時に無効化）
+  if (allianceMembersCache && allianceMembersCache.version !== currentVersion) {
+    allianceMembersCache = null; // バージョン変更で無効化
+  }
+
+  // 勢力ポイントキャッシュのバージョンチェック
+  if (factionPointsCache && factionPointsCache.version !== currentVersion) {
+    factionPointsCache = null; // バージョン変更で無効化
   }
 }
 
@@ -875,17 +931,12 @@ parentPort.on("message", async (msg) => {
         (filePaths?.namedCells ? loadJSON(filePaths.namedCells) : {});
 
       // 1. ZOC Check [OPTIMIZED] キャッシュベースの高速版
-      const playerFaction = factions.factions[player.factionId];
-      const alliedFids = new Set([player.factionId]);
-      if (
-        playerFaction &&
-        playerFaction.allianceId &&
-        alliances.alliances[playerFaction.allianceId]
-      ) {
-        alliances.alliances[playerFaction.allianceId].members.forEach((m) =>
-          alliedFids.add(m),
-        );
-      }
+      // [OPTIMIZED] 同盟メンバーSetをキャッシュから取得
+      const alliedFids = getAlliedFactionIds(
+        player.factionId,
+        alliances,
+        factions,
+      );
 
       // キャッシュを更新/構築
       ensureCachesValid(mapState, namedCells, factions, alliances);
