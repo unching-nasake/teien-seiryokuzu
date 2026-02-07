@@ -4017,6 +4017,9 @@ app.post(
 
     try {
       let updatedPlayer = null;
+      let nameChanged = false;
+      let newName = "";
+
       await updateJSON(PLAYERS_PATH, (data) => {
         const p = data.players[req.playerId];
         if (!p) throw new Error("Player not found");
@@ -4028,12 +4031,42 @@ app.post(
 
         // displayName の更新
         if (typeof displayName === "string" && displayName.trim()) {
-          p.displayName = displayName.trim();
+          const trimmed = displayName.trim();
+          if (p.displayName !== trimmed) {
+            p.displayName = trimmed;
+            nameChanged = true;
+            newName = trimmed;
+          }
         }
 
         updatedPlayer = { ...p };
         return data;
       });
+
+      // [NEW] duplicate_ip.json の同期更新
+      if (nameChanged && newName) {
+        // 非同期で実行し、レスポンスをブロックしない（エラーログは出す）
+        updateJSON(
+          DUPLICATE_IP_PATH,
+          (data) => {
+            if (!data) return data;
+
+            Object.values(data).forEach((entry) => {
+              if (entry.accounts && Array.isArray(entry.accounts)) {
+                entry.accounts.forEach((acc) => {
+                  if (acc.id === req.playerId && acc.username !== newName) {
+                    acc.username = newName;
+                  }
+                });
+              }
+            });
+            return data;
+          },
+          {},
+        ).catch((e) =>
+          console.error("[Sync] Error updating duplicate_ip.json:", e),
+        );
+      }
 
       res.json({
         success: true,
