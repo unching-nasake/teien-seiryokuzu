@@ -889,12 +889,19 @@ parentPort.on("message", async (msg) => {
         (a, b) => b.points - a.points,
       );
 
-      const ranks = sorted.map((s, i) => ({
-        id: s.id,
-        rank: i + 1,
-        tiles: s.tiles,
-        points: s.points,
-      }));
+      let currentRank = 1;
+      const ranks = sorted.map((s, i) => {
+        // ポイントが前の勢力より低い場合のみランクを更新 (同点なら維持)
+        if (i > 0 && s.points < sorted[i - 1].points) {
+          currentRank = i + 1;
+        }
+        return {
+          id: s.id,
+          rank: currentRank,
+          tiles: s.tiles,
+          points: s.points,
+        };
+      });
 
       parentPort.postMessage({
         success: true,
