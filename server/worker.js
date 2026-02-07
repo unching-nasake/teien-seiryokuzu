@@ -82,6 +82,179 @@ function removeEmoji(str) {
 // ===== キャッシュシステム (Workerレベル) =====
 const jsonCache = new Map();
 
+// [OPTIMIZATION] ZOC影響範囲キャッシュ
+// 構造: { version, data: Map<"x_y", { namedKey, ownerFid, alliedFids: Set }> }
+let zocInfluenceCache = null;
+
+// [OPTIMIZATION] 中核マス座標キャッシュ (勢力ID -> [{ x, y, factionId }])
+// 構造: { version, data: Map<factionId, [{ x, y }]> }
+let coreCoordsCache = null;
+
+// [OPTIMIZATION] クラスタ情報キャッシュ (勢力ID -> クラスタ情報)
+// 構造: { version, data: Map<factionId, clusterInfo> }
+let clusterCache = null;
+
+// キャッシュバージョン (mapState変更時にインクリメント)
+let cacheVersion = 0;
+
+/**
+ * ZOC影響範囲マップを構築
+ * @param {Object} mapState - マップ状態
+ * @param {Object} namedCells - ネームドマス一覧
+ * @param {Object} factions - 勢力一覧
+ * @param {Object} alliances - 同盟一覧
+ * @returns {Map<string, Object>} ZOC影響マップ (key: "x_y", value: { namedKey, ownerFid, alliedFids })
+ */
+function buildZocInfluenceMap(mapState, namedCells, factions, alliances) {
+  const zocMap = new Map();
+  const ZOC_RADIUS = 5;
+
+  for (const [nKey, namedData] of Object.entries(namedCells)) {
+    const ncTile = mapState.tiles[nKey];
+    const ownerFid = ncTile ? ncTile.factionId : null;
+    if (!ownerFid) continue; // 無所属のネームドマスはZOCを持たない
+
+    // 所有者の同盟勢力を取得
+    const alliedFids = new Set([ownerFid]);
+    const ncFaction = factions.factions ? factions.factions[ownerFid] : null;
+    if (
+      ncFaction &&
+      ncFaction.allianceId &&
+      alliances.alliances?.[ncFaction.allianceId]
+    ) {
+      alliances.alliances[ncFaction.allianceId].members.forEach((m) =>
+        alliedFids.add(m),
+      );
+    }
+
+    // ZOC範囲内の全座標をマップに登録
+    const nx = namedData.x;
+    const ny = namedData.y;
+    for (let dx = -ZOC_RADIUS; dx <= ZOC_RADIUS; dx++) {
+      for (let dy = -ZOC_RADIUS; dy <= ZOC_RADIUS; dy++) {
+        const tx = nx + dx;
+        const ty = ny + dy;
+        if (tx < 0 || tx >= MAP_SIZE || ty < 0 || ty >= MAP_SIZE) continue;
+        // ネームドマス自体はスキップ（ZOC対象外であるため特別扱い）
+        if (tx === nx && ty === ny) continue;
+
+        const key = `${tx}_${ty}`;
+        // 複数のネームドマスからの影響もあり得るが、ここでは最初の一つを記録
+        // （必要に応じて配列にしてもよいが、現状の実装と整合させる）
+        if (!zocMap.has(key)) {
+          zocMap.set(key, {
+            namedKey: nKey,
+            namedX: nx,
+            namedY: ny,
+            ownerFid,
+            alliedFids,
+          });
+        }
+      }
+    }
+  }
+
+  return zocMap;
+}
+
+/**
+ * 中核マス座標マップを構築
+ * @param {Object} mapState - マップ状態
+ * @returns {Map<string, Array>} 勢力ID -> 中核マス座標リスト
+ */
+function buildCoreCoordsMap(mapState) {
+  const coreMap = new Map();
+
+  for (const key in mapState.tiles) {
+    const tile = mapState.tiles[key];
+    if (tile.core && tile.core.factionId) {
+      const fid = tile.core.factionId;
+      const [x, y] = key.split("_").map(Number);
+      if (!coreMap.has(fid)) {
+        coreMap.set(fid, []);
+      }
+      coreMap.get(fid).push({ x, y });
+    }
+  }
+
+  return coreMap;
+}
+
+/**
+ * キャッシュをリフレッシュ（必要な場合のみ再構築）
+ */
+function ensureCachesValid(mapState, namedCells, factions, alliances) {
+  // mtimeベースでバージョンチェック（jsonCacheを活用）
+  const mapCached = jsonCache.get(mapState._path);
+  const currentVersion = mapCached?.mtime || Date.now();
+
+  if (!zocInfluenceCache || zocInfluenceCache.version !== currentVersion) {
+    zocInfluenceCache = {
+      version: currentVersion,
+      data: buildZocInfluenceMap(mapState, namedCells, factions, alliances),
+    };
+    // console.log(`[Worker] ZOC Cache rebuilt: ${zocInfluenceCache.data.size} entries`);
+  }
+
+  if (!coreCoordsCache || coreCoordsCache.version !== currentVersion) {
+    coreCoordsCache = {
+      version: currentVersion,
+      data: buildCoreCoordsMap(mapState),
+    };
+    // console.log(`[Worker] Core Coords Cache rebuilt: ${coreCoordsCache.data.size} factions`);
+  }
+}
+
+/**
+ * 指定座標がネームドマスZOC範囲内で、かつ攻撃側の中核マスが近いかチェック
+ * @returns {{ isZoc: boolean, isZocReduced: boolean }}
+ */
+function checkZocWithCache(x, y, targetFactionId, playerFactionId, alliedFids) {
+  if (!zocInfluenceCache || !coreCoordsCache) {
+    return { isZoc: false, isZocReduced: false };
+  }
+
+  const key = `${x}_${y}`;
+  const zocData = zocInfluenceCache.data.get(key);
+
+  if (!zocData) {
+    return { isZoc: false, isZocReduced: false };
+  }
+
+  // 自勢力または同盟のネームドマスからのZOCは無視
+  if (zocData.alliedFids.has(playerFactionId)) {
+    return { isZoc: false, isZocReduced: false };
+  }
+
+  // ターゲットタイルが敵（ネームドマス所有者または同盟）のものかチェック
+  if (!zocData.alliedFids.has(targetFactionId)) {
+    return { isZoc: false, isZocReduced: false };
+  }
+
+  // ZOC適用確定
+  let isZocReduced = false;
+  const ZOC_RADIUS = 5;
+
+  // 攻撃側の中核マスがネームドマス射程内にあるかチェック
+  for (const fid of alliedFids) {
+    const cores = coreCoordsCache.data.get(fid);
+    if (cores) {
+      for (const core of cores) {
+        if (
+          Math.abs(core.x - zocData.namedX) <= ZOC_RADIUS &&
+          Math.abs(core.y - zocData.namedY) <= ZOC_RADIUS
+        ) {
+          isZocReduced = true;
+          break;
+        }
+      }
+    }
+    if (isZocReduced) break;
+  }
+
+  return { isZoc: true, isZocReduced };
+}
+
 // ヘルパー: statベースのキャッシュを使用したJSON読み込み
 function loadJSON(filePath, defaultValue = {}, ignoreCache = false) {
   // 多くのタスク呼び出しにわたるパフォーマンス向上のため、Workerレベルでのキャッシュが重要
@@ -701,7 +874,7 @@ parentPort.on("message", async (msg) => {
         data.namedCells ||
         (filePaths?.namedCells ? loadJSON(filePaths.namedCells) : {});
 
-      // 1. ZOC Check
+      // 1. ZOC Check [OPTIMIZED] キャッシュベースの高速版
       const playerFaction = factions.factions[player.factionId];
       const alliedFids = new Set([player.factionId]);
       if (
@@ -714,60 +887,26 @@ parentPort.on("message", async (msg) => {
         );
       }
 
+      // キャッシュを更新/構築
+      ensureCachesValid(mapState, namedCells, factions, alliances);
+
+      // [OPTIMIZED] キャッシュベースのZOC判定 - O(tiles) instead of O(tiles × namedCells × mapTiles)
       for (const t of tiles) {
         const targetTile = mapState.tiles[`${t.x}_${t.y}`];
         const targetFactionId = targetTile ? targetTile.factionId : null;
-        for (const [nKey, namedData] of Object.entries(namedCells)) {
-          // mapStateから所有者を取得
-          const ncTile = mapState.tiles[nKey];
-          const ncFactionId = ncTile ? ncTile.factionId : null;
 
-          if (ncFactionId && ncFactionId !== player.factionId) {
-            const enemyAlliedFids = new Set([ncFactionId]);
-            const ncFaction = factions.factions[ncFactionId];
-            if (
-              ncFaction &&
-              ncFaction.allianceId &&
-              alliances.alliances[ncFaction.allianceId]
-            ) {
-              alliances.alliances[ncFaction.allianceId].members.forEach((m) =>
-                enemyAlliedFids.add(m),
-              );
-            }
+        const { isZoc, isZocReduced } = checkZocWithCache(
+          t.x,
+          t.y,
+          targetFactionId,
+          player.factionId,
+          alliedFids,
+        );
 
-            const radius = 5; // 定数化されたZOC半径
-            if (
-              Math.abs(t.x - namedData.x) <= radius &&
-              Math.abs(t.y - namedData.y) <= radius
-            ) {
-              // 簡易ZOC判定: 半径5マスの範囲 (11x11)
-              // 敵勢力またはその同盟勢力が所有し、かつネームドマスそのものではない場合にZOC適用
-              if (
-                enemyAlliedFids.has(targetFactionId) &&
-                !(t.x === namedData.x && t.y === namedData.y)
-              ) {
-                t.isZoc = true;
-
-                // 攻撃側（または同盟）の中核マスがネームドマスの射程内にあればコスト軽減
-                let isCoreNear = false;
-                for (const k in mapState.tiles) {
-                  const tile = mapState.tiles[k];
-                  if (tile.core && alliedFids.has(tile.core.factionId)) {
-                    const [cx, cy] = k.split("_").map(Number);
-                    if (
-                      Math.abs(cx - namedData.x) <= radius &&
-                      Math.abs(cy - namedData.y) <= radius
-                    ) {
-                      isCoreNear = true;
-                      break;
-                    }
-                  }
-                }
-                if (isCoreNear) {
-                  t.isZocReduced = true;
-                }
-              }
-            }
+        if (isZoc) {
+          t.isZoc = true;
+          if (isZocReduced) {
+            t.isZocReduced = true;
           }
         }
       }

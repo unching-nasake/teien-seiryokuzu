@@ -243,6 +243,36 @@ function runWorkerTask(type, data) {
   });
 }
 
+/**
+ * [OPTIMIZATION] 複数のWorkerに並列でタスクを分散し、結果をマージして返す
+ * @param {string} type - タスクタイプ
+ * @param {Object} baseData - すべてのWorkerに共通で渡すデータ
+ * @param {Array} chunks - 各Workerに分割して渡すタイルチャンク配列
+ * @param {Function} mergeResults - 結果をマージする関数
+ * @returns {Promise<Object>} マージされた結果
+ */
+async function runParallelWorkerTasks(type, baseData, chunks, mergeResults) {
+  const tasks = chunks.map((chunk, index) => {
+    return runWorkerTask(type, {
+      ...baseData,
+      tiles: chunk,
+      chunkIndex: index,
+    });
+  });
+
+  const results = await Promise.all(tasks);
+
+  // エラーチェック
+  for (const result of results) {
+    if (!result.success) {
+      return result; // 最初のエラーを返す
+    }
+  }
+
+  // 結果をマージ
+  return mergeResults(results);
+}
+
 const io = new Server(server, {
   cors: {
     origin: (origin, callback) => {

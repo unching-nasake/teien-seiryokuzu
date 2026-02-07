@@ -352,7 +352,7 @@ function Sidebar({
       } finally {
         setIsEstimating(false);
       }
-    }, 300); // 300ms debounce
+    }, 3000); // 3秒のデバウンス - タイル選択中はリクエストを遅延
 
     return () => clearTimeout(timer);
   }, [selectedTiles, overpaintTargetCount]);
