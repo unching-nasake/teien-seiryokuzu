@@ -197,6 +197,29 @@ function GameMap({
   const [useOffscreenCanvas, setUseOffscreenCanvas] = useState(false);
   const offscreenInitializedRef = useRef(false);
 
+  // [NEW] Worker初期化 (OffscreenCanvas転送)
+  useEffect(() => {
+    // 既に初期化済みならスキップ
+    if (offscreenInitializedRef.current || !baseCanvasRef.current) return;
+
+    // OffscreenCanvasがサポートされているかチェック
+    if (isSupported()) {
+        const success = initCanvas(baseCanvasRef.current);
+        if (success) {
+            setUseOffscreenCanvas(true);
+            offscreenInitializedRef.current = true;
+            console.log("OffscreenCanvas initialized successfully.");
+        }
+    }
+  }, [baseCanvasRef.current, isSupported, initCanvas]); // 依存配列にbaseCanvasRef.currentを含める
+
+  // [NEW] リサイズ同期 (Worker)
+  useEffect(() => {
+      if (useOffscreenCanvas && workerReady) {
+          resizeWorker(canvasDimensions.width, canvasDimensions.height);
+      }
+  }, [canvasDimensions, useOffscreenCanvas, workerReady, resizeWorker]);
+
   // [NEW] 描画スロットリング用
   const lastRenderTimeRef = useRef(0);
   const renderThrottleMs = 16; // ~60fps (ただしズーム中は倍に)
@@ -437,9 +460,33 @@ function GameMap({
     }
     lastRenderTimeRef.current = now;
 
-    const ctx = canvas.getContext('2d');
     const width = canvas.width;
     const height = canvas.height;
+
+    // [OPTIMIZED] OffscreenCanvasモードならWorkerに任せる
+    if (useOffscreenCanvas) {
+        if (!workerReady) return; // Worker準備中
+
+        renderTiles({
+            viewport,
+            tiles,
+            factions,
+            alliances,
+            mapColorMode,
+            blankTileColor,
+            playerColors, // Memoized
+            highlightCoreOnly,
+            width,
+            height
+        });
+        return; // メインスレッド描画を終了
+    }
+
+    // --- 以下、メインスレッド描画フォールバック (OffscreenCanvas非対応環境用) ---
+
+    // 2Dコンテキスト取得 (OffscreenCanvas転送済みならここでエラーになる可能性があるが、useOffscreenCanvasフラグでガードしている)
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
     // グリッド表示判定 (閾値を2.0に引き上げ)
     const showGrid = viewport.zoom > 2.0;
