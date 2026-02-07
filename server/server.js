@@ -13224,6 +13224,53 @@ async function updateRankingCache() {
       console.log(
         `[Rank] Ranking cache updated. Count: ${cachedFactionRanks.length}`,
       );
+
+      // リアルタイム同期のためのブロードキャスト
+      const updates = [];
+      const playersData = loadJSON(PLAYERS_PATH, { players: {} });
+      const factionsData = loadJSON(FACTIONS_PATH, { factions: {} });
+      const alliancesData = loadJSON(ALLIANCES_PATH, { alliances: {} });
+      const settings = loadJSON(SYSTEM_SETTINGS_PATH, { apSettings: {} });
+      const gameIds = settings.gardenMode
+        ? loadJSON(GAME_IDS_PATH, {}, true)
+        : null;
+
+      // 統計情報 (factionPoints) があれば利用
+      const preCalcStats = result.results.factionPoints
+        ? { factionPoints: result.results.factionPoints }
+        : null;
+      const top3Alliances = getTop3AllianceIds(
+        alliancesData.alliances,
+        factionsData,
+        preCalcStats,
+      );
+
+      cachedFactionRanks.forEach(({ id, rank }) => {
+        const faction = factionsData.factions[id];
+        if (!faction) return;
+
+        // アクティブ人数算出
+        const { activeMemberCount } = calculateFactionSharedAPLimit(
+          faction,
+          playersData,
+          settings,
+          gameIds,
+        );
+
+        const isWeak = isWeakFactionUnified(
+          rank,
+          activeMemberCount,
+          id,
+          faction.allianceId,
+          top3Alliances,
+        );
+
+        updates.push({ id, rank, isWeak });
+      });
+
+      if (updates.length > 0) {
+        io.emit("ranking:updated", updates);
+      }
     }
   } catch (err) {
     console.error("Failed to update ranking cache:", err);

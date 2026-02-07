@@ -1000,6 +1000,26 @@ function App() {
       }
     });
 
+    socket.on('ranking:updated', (updates) => {
+      setFactions(prev => {
+        const next = { ...prev };
+        let changed = false;
+        updates.forEach(({ id, rank, isWeak }) => {
+          if (next[id]) {
+            if (next[id].rank !== rank || next[id].isWeak !== isWeak) {
+              next[id] = { ...next[id], rank, isWeak };
+              changed = true;
+            }
+          }
+        });
+        if (changed) {
+          factionsRef.current = next;
+          return next;
+        }
+        return prev;
+      });
+    });
+
     socket.on('faction:created', ({ factionId, faction }) => {
       setFactions(prev => {
         const next = { ...prev, [factionId]: faction };
