@@ -1698,8 +1698,6 @@ function App() {
 
   // タイル塗り実行
   // タイル塗り実行 (引数で対象タイルを指定可能に)
-  // タイル塗り実行
-  // タイル塗り実行 (引数で対象タイルを指定可能に)
   const handlePaint = useCallback(async (overrideTiles = null, action = 'paint') => {
     if (!playerData) {
       handleAuthError(401);
@@ -1709,107 +1707,10 @@ function App() {
     const targetTiles = isOverride ? overrideTiles : selectedTiles;
     if (!targetTiles || targetTiles.length === 0) return;
 
-    // 事前チェック: APコスト計算と滅亡確認
-    let cost = 0;
-    // クラスタ検出 (コスト計算用)
-    const myFid = playerData.factionId;
-    const targetSet = new Set(targetTiles.map(t => `${t.x}_${t.y}`));
-    const visited = new Set();
-    const clusters = [];
-
-    // 1. targetTiles からクラスタ（隣接するタイルの塊）を生成
-    for (const t of targetTiles) {
-        const key = `${t.x}_${t.y}`;
-        if (visited.has(key)) continue;
-
-        const cluster = [];
-        const queue = [t];
-        visited.add(key);
-
-        while (queue.length > 0) {
-            const current = queue.shift();
-            cluster.push(current);
-
-            const neighbors = [
-                { x: current.x, y: current.y - 1 },
-                { x: current.x, y: current.y + 1 },
-                { x: current.x - 1, y: current.y },
-                { x: current.x + 1, y: current.y }
-            ];
-
-            for (const n of neighbors) {
-                const nKey = `${n.x}_${n.y}`;
-                if (targetSet.has(nKey) && !visited.has(nKey)) {
-                    visited.add(nKey);
-                    queue.push(n);
-                }
-            }
-        }
-        clusters.push(cluster);
-    }
-
-    // 2. クラスタごとの AP コスト算出
-    for (const cluster of clusters) {
-        let isConnectedToSelf = false;
-
-        // クラスタ内のいずれかのタイルが、既に自分の領土に隣接しているか確認
-        for (const t of cluster) {
-             const neighbors = [
-                { x: t.x, y: t.y - 1 },
-                { x: t.x, y: t.y + 1 },
-                { x: t.x - 1, y: t.y },
-                { x: t.x + 1, y: t.y }
-            ];
-
-            for (const n of neighbors) {
-                // If neighbor is NOT in target set (already handled by clustering), check mapTiles
-                const nKey = `${n.x}_${n.y}`;
-                if (!targetSet.has(nKey)) {
-                    const mapTile = mapTiles[nKey];
-                    if (mapTile && (mapTile.factionId === myFid || mapTile.faction === myFid)) {
-                        isConnectedToSelf = true;
-                        break;
-                    }
-                }
-            }
-            if (isConnectedToSelf) break;
-        }
-
-        // コスト適用
-        for (const t of cluster) {
-            const tKey = `${t.x}_${t.y}`;
-            const tileOnMap = mapTiles[tKey];
-            const isEnemy = tileOnMap && (tileOnMap.factionId || tileOnMap.faction) && (tileOnMap.factionId !== myFid && tileOnMap.faction !== myFid);
-            const isBlank = !tileOnMap || (!tileOnMap.factionId && !tileOnMap.faction);
-
-            let tileCost = 1;
-
-            // 敵陣または空白地への侵攻ロジック
-            if (isEnemy || isBlank) {
-                // 自領土に直接接続されていない（同盟領土経由など）場合は、飛び地ペナルティとしてコスト増加(+1)
-                if (!isConnectedToSelf) {
-                    tileCost += 1;
-                }
-            }
-            // 重ね塗りなどの特殊コストロジックはサーバー側の検証に準拠（ここでは見積もりを算出）
-
-            cost += tileCost;
-        }
-    }
-
-    // 共有AP考慮
-    const myFaction = factions[playerData.factionId];
-    const sharedAP = (myFaction && typeof myFaction.sharedAP === 'number') ? myFaction.sharedAP : 0;
-    const useShared = !!playerData.autoConsumeSharedAp;
-    const availableAP = (playerData.ap || 0) + (useShared ? sharedAP : 0);
-
-    if (availableAP < cost) {
-      alert(`APが足りません (必要: ${cost}AP, 所持: ${availableAP}AP)`);
-      return;
-    }
-
+    // 重ね塗りの場合は確認ダイアログを表示
+    // （AP判定はサーバー側で行うため、クライアント側では計算しない）
     if (action === 'overpaint' && !isOverride) {
-        if (!window.confirm(`選択した${targetTiles.length}マスを重ね塗り(強化)しますか？\n指定回数: ${overpaintTargetCount}回\n消費AP: ${cost}`)) {
+        if (!window.confirm(`選択した${targetTiles.length}マスを重ね塗り(強化)しますか？\n指定回数: ${overpaintTargetCount}回`)) {
             return;
         }
     }
