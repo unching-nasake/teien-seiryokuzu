@@ -157,7 +157,7 @@ function runWorkerTask(type, data) {
     // 最小保留タスク戦略（Least Pending Tasks）
     let minLoad = Infinity;
     let workerId = 0;
-    for (let i = 0; i < numCPUs; i++) {
+    for (let i = 0; i < numWorkers; i++) {
       if (workerLoad[i] < minLoad) {
         minLoad = workerLoad[i];
         workerId = i;
@@ -1784,25 +1784,55 @@ async function clampFactionSharedAP(
 // シークレットトリガーの処理
 async function processSecretTriggers(isScheduled = false) {
   if (!isScheduled) {
-    console.log(`[SecretTrigger] Starting periodic check (Worker)...`);
+    console.log(
+      `[SecretTrigger] Starting periodic check (Worker - Parallel)...`,
+    );
   }
 
   try {
-    const response = await runWorkerTask("CHECK_SECRET_TRIGGERS", {
-      filePaths: {
-        gameIds: GAME_IDS_PATH,
-        players: PLAYERS_PATH,
-        factions: FACTIONS_PATH,
-        mapState: MAP_STATE_PATH,
-      },
-    });
+    const gameIds = loadJSON(GAME_IDS_PATH, {});
+    const keys = Object.keys(gameIds).filter(
+      (k) => gameIds[k].secretTriggers && gameIds[k].secretTriggers.length > 0,
+    );
 
-    if (!response.success) {
-      console.error(`[SecretTrigger] Worker error:`, response.error);
+    if (keys.length === 0) {
+      if (!isScheduled)
+        console.log(`[SecretTrigger] No secret triggers found in gameIds.`);
       return;
     }
 
-    const { appliedTriggers, ranksMap, factionPoints } = response.results || {};
+    const chunks = Array.from({ length: numWorkers }, () => []);
+    keys.forEach((key, i) => chunks[i % numWorkers].push(key));
+
+    const results = await runParallelWorkerTasks(
+      "CHECK_SECRET_TRIGGERS",
+      {
+        filePaths: {
+          gameIds: GAME_IDS_PATH,
+          players: PLAYERS_PATH,
+          factions: FACTIONS_PATH,
+          mapState: MAP_STATE_PATH,
+        },
+      },
+      chunks.map((keysChunk) => ({ gameKeys: keysChunk })),
+      (workerResults) => {
+        const mergedTriggers = [];
+        let mergedRanksMap = {};
+        workerResults.forEach((res) => {
+          if (res.results) {
+            if (res.results.appliedTriggers) {
+              mergedTriggers.push(...res.results.appliedTriggers);
+            }
+            if (res.results.ranksMap) {
+              Object.assign(mergedRanksMap, res.results.ranksMap);
+            }
+          }
+        });
+        return { appliedTriggers: mergedTriggers, ranksMap: mergedRanksMap };
+      },
+    );
+
+    const { appliedTriggers, ranksMap } = results;
 
     if (!appliedTriggers || appliedTriggers.length === 0) {
       if (!isScheduled)
@@ -1812,6 +1842,9 @@ async function processSecretTriggers(isScheduled = false) {
 
     // 表示用にランク配列を再構築 (必要最小限のコンテキスト)
     const ranks = Object.entries(ranksMap).map(([id, rank]) => ({ id, rank }));
+
+    // 弱小判定のために最新の勢力ポイントを取得
+    const { updates: factionPoints } = await recalculateAllFactionPoints();
 
     // メインスレッドの状態に適用 & 永続化
     let triggersCount = 0;
@@ -3011,29 +3044,61 @@ async function runScheduledTasks() {
   await processSecretTriggers(true);
 }
 
-// プレイヤーの knownPostIds にある Game Key を 内部ID に置換・統合する
-function resolvePlayerIds() {
-  // console.log("Resolving player IDs...");
-  // 排他制御を行いながら更新
-  updateJSON(
-    PLAYERS_PATH,
-    async (players) => {
-      const gameIds = loadJSON(GAME_IDS_PATH, {});
+// プレイヤーの knownPostIds にある Game Key を 内部ID に置換・統合する (並列版)
+async function resolvePlayerIds() {
+  try {
+    const playersData = loadJSON(PLAYERS_PATH, { players: {} });
+    const pids = Object.keys(playersData.players);
+    if (pids.length === 0) return;
 
-      for (const player of Object.values(players.players)) {
-        syncPlayerWithGameIdsInternal(player, null, gameIds);
-      }
-      return players;
-    },
-    { players: {} },
-  ).catch((e) => console.error("Error in resolvePlayerIds:", e));
+    const chunks = Array.from({ length: numWorkers }, () => []);
+    pids.forEach((pid, i) => chunks[i % numWorkers].push(pid));
 
-  // [NEW] 定期的なWorkerキャッシュパージ
-  console.log("[Core] Broadcating CLEAR_CACHE to all workers...");
-  for (let i = 0; i < workers.length; i++) {
-    runWorkerTask("CLEAR_CACHE", { workerId: i }).catch((e) =>
-      console.error(`[Core] Failed to clear cache for Worker ${i}:`, e.message),
+    const tasks = chunks.map((chunk) =>
+      runWorkerTask("RESOLVE_PLAYER_IDS", {
+        playerIds: chunk,
+        filePaths: {
+          players: PLAYERS_PATH,
+          gameIds: GAME_IDS_PATH,
+        },
+      }),
     );
+
+    const results = await Promise.all(tasks);
+    const allUpdatedPlayers = {};
+    let anyChanged = false;
+
+    results.forEach((res) => {
+      if (res.success && res.results.changed) {
+        anyChanged = true;
+        Object.assign(allUpdatedPlayers, res.results.updatedPlayers);
+      }
+    });
+
+    if (anyChanged) {
+      await updateJSON(PLAYERS_PATH, (data) => {
+        Object.entries(allUpdatedPlayers).forEach(([pid, p]) => {
+          data.players[pid] = p;
+        });
+        return data;
+      });
+      console.log(
+        `[ResolveID] Parallel resolution completed. Updated ${Object.keys(allUpdatedPlayers).length} players.`,
+      );
+    }
+
+    // [NEW] 定期的なWorkerキャッシュパージ
+    console.log("[Core] Broadcating CLEAR_CACHE to all workers...");
+    for (let i = 0; i < workers.length; i++) {
+      runWorkerTask("CLEAR_CACHE", { workerId: i }).catch((e) =>
+        console.error(
+          `[Core] Failed to clear cache for Worker ${i}:`,
+          e.message,
+        ),
+      );
+    }
+  } catch (e) {
+    console.error("Error in resolvePlayerIds:", e);
   }
 }
 
@@ -4301,24 +4366,36 @@ app.get("/api/map/lite", async (req, res) => {
           liteTiles[key].coreFid = tile.coreificationFactionId;
         }
       });
-
-      // [UPDATE] playerNames (ID->Name) のマッピングを追加
-      const playersData = loadJSON(PLAYERS_PATH, { players: {} });
-      const playerNames = {};
-      Object.values(playersData.players).forEach((p) => {
-        // 必要な情報だけに絞る (ID and Name)
-        if (p.id) playerNames[p.id] = p.displayName || toShortId(p.id);
-      });
-
-      res.json({
-        tiles: liteTiles,
-        version: Date.now(),
-        playerNames: playerNames,
-      });
-    } catch (fallbackError) {
-      console.error("Fallback failed:", fallbackError);
-      res.status(500).json({ error: "Failed to generate map data" });
+      res.json({ tiles: liteTiles, version: Date.now(), playerNames: {} });
+    } catch (e2) {
+      res.status(500).send(e2.message);
     }
+  }
+});
+
+// [NEW] バイナリ版マップAPI (究極の高速化)
+app.get("/api/map/binary", async (req, res) => {
+  try {
+    const playersData = loadJSON(PLAYERS_PATH, { players: {} });
+    const playerNames = {};
+    Object.entries(playersData.players).forEach(([playerId, p]) => {
+      playerNames[playerId] = p.displayName || toShortId(playerId);
+    });
+
+    const result = await runWorkerTask("GENERATE_BINARY_MAP", {
+      playerNames,
+      filePaths: { mapState: MAP_STATE_PATH },
+    });
+
+    if (result && result.success && result.results && result.results.binary) {
+      res.header("Content-Type", "application/octet-stream");
+      res.send(result.results.binary);
+    } else {
+      throw new Error("Worker returned invalid binary data");
+    }
+  } catch (e) {
+    console.error("Binary map generation failed:", e);
+    res.status(500).send(e.message);
   }
 });
 
@@ -13213,20 +13290,66 @@ async function recalculateAllFactionPoints() {
   const factions = loadJSON(FACTIONS_PATH, { factions: {} });
   const players = loadJSON(PLAYERS_PATH, { players: {} });
 
-  // --- [REFACTOR] 計算をWorkerにオフロード ---
-  const response = await runWorkerTask("RECALCULATE_POINTS", {
-    filePaths: {
-      mapState: MAP_STATE_PATH,
-      factions: FACTIONS_PATH,
-      players: PLAYERS_PATH, // destruction logic needs players
-    },
-  });
-  if (!response.success) {
-    console.error("[RecalcError] Worker failed:", response.error);
-    return factions;
-  }
+  // --- [PARALLEL] チャンク分割計算 ---
+  const allTileKeys = Object.keys(mapState.tiles);
+  const chunks = Array.from({ length: numWorkers }, () => ({}));
 
-  const { updates, destroyedFids, destroyedTileKeys } = response.results;
+  allTileKeys.forEach((key) => {
+    const y = parseInt(key.split("_")[1]);
+    const chunkIdx = Math.min(
+      numWorkers - 1,
+      Math.floor((y / MAP_SIZE) * numWorkers),
+    );
+    chunks[chunkIdx][key] = mapState.tiles[key];
+  });
+
+  console.log(`[Rank] Recalculating all points using ${numWorkers} workers...`);
+
+  const results = await runParallelWorkerTasks(
+    "RECALCULATE_POINTS",
+    {
+      filePaths: {
+        mapState: MAP_STATE_PATH,
+        factions: FACTIONS_PATH,
+        players: PLAYERS_PATH,
+      },
+    },
+    chunks,
+    (workerResults) => {
+      const mergedUpdates = {};
+      const mergedDestroyedFids = new Set();
+      const mergedDestroyedTileKeys = {};
+
+      workerResults.forEach((res) => {
+        if (res.results) {
+          // ポイントマージ
+          Object.entries(res.results.updates || {}).forEach(([fid, pts]) => {
+            mergedUpdates[fid] = (mergedUpdates[fid] || 0) + pts;
+          });
+          // 滅亡判定はメインスレッドで最終決定 (すべての中核がなくなったか)
+          // ただし、Worker側ですでに判定されている場合は収集
+          if (res.results.destroyedFids) {
+            res.results.destroyedFids.forEach((fid) =>
+              mergedDestroyedFids.add(fid),
+            );
+          }
+          if (res.results.destroyedTileKeys) {
+            Object.assign(
+              mergedDestroyedTileKeys,
+              res.results.destroyedTileKeys,
+            );
+          }
+        }
+      });
+      return {
+        updates: mergedUpdates,
+        destroyedFids: Array.from(mergedDestroyedFids),
+        destroyedTileKeys: mergedDestroyedTileKeys,
+      };
+    },
+  );
+
+  const { updates, destroyedFids, destroyedTileKeys } = results;
   let factionsChanged = false;
 
   // ポイント更新を反映
@@ -13302,7 +13425,7 @@ async function recalculateAllFactionPoints() {
   checkAllianceAndWarIntegrity();
   checkMapIntegrity();
 
-  return factions;
+  return { updates, destroyedFids, destroyedTileKeys };
 }
 
 async function checkMapIntegrity() {
@@ -13497,7 +13620,7 @@ setInterval(async () => {
   try {
     const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
     const allTileKeys = Object.keys(mapState.tiles);
-    const CHUNK_COUNT = 4;
+    const CHUNK_COUNT = numWorkers;
 
     // 1. タイルチャンク分割 (期限切れチェック用)
     const tileChunks = Array.from({ length: CHUNK_COUNT }, () => ({}));
@@ -13517,7 +13640,7 @@ setInterval(async () => {
     fids.forEach((fid, i) => factionGroups[i % CHUNK_COUNT].push(fid));
 
     console.log(
-      `[Maintenance] Starting parallel coreification (Maintenance: ${CHUNK_COUNT} workers, Expansion: ${CHUNK_COUNT} workers)...`,
+      `[Maintenance] Starting parallel coreification (Maintenance: ${numWorkers} workers, Expansion: ${numWorkers} workers)...`,
     );
 
     const coreTileSettings =
@@ -14684,12 +14807,12 @@ migratePlayerNames();
 setInterval(
   async () => {
     try {
-      const CHUNK_COUNT = 4;
+      const CHUNK_COUNT = numWorkers;
       const coreTileSettings =
         loadJSON(SYSTEM_SETTINGS_PATH, {}).coreTileSettings || {};
 
       console.log(
-        `[Integrity] Starting parallel integrity check (4 workers)...`,
+        `[Integrity] Starting parallel integrity check (${numWorkers} workers)...`,
       );
 
       const tasks = Array.from({ length: CHUNK_COUNT }, (_, i) => {

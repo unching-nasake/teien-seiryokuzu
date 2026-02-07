@@ -607,92 +607,16 @@ function App() {
           setMapLoadMessage("最新データを確認中...");
         }
 
-        // 2. 軽量APIからデータ取得
-        setMapLoadMessage("ワールドデータをダウンロード中...");
-        const response = await fetch('/api/map/lite', { credentials: 'include' });
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        // 2. Workerによるバックグラウンド読み込み (バイナリ版: 究極の高速化)
+        setMapLoadMessage("ワールドデータをロード中 (Binary)...");
+        const loadResult = await mapWorkerPool.sendTask('LOAD_MAP_DATA_BINARY', { url: '/api/map/binary' });
 
-        const contentLength = response.headers.get('Content-Length');
-        const totalBytes = contentLength ? parseInt(contentLength, 10) : 0;
-        setMapLoadTotal(totalBytes);
+        const { tiles: processedTiles, version, playerNames } = loadResult;
 
-        const reader = response.body.getReader();
-        let receivedLength = 0;
-        let chunks = [];
+        setMapLoadProgress(100);
 
-        while(true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          chunks.push(value);
-          receivedLength += value.length;
-          setMapLoadProgress(receivedLength);
-        }
-
-        setMapLoadMessage("データを展開中...");
-
-        // Combine chunks
-        const chunksAll = new Uint8Array(receivedLength);
-        let position = 0;
-        for(let chunk of chunks) {
-          chunksAll.set(chunk, position);
-          position += chunk.length;
-        }
-
-        const text = new TextDecoder("utf-8").decode(chunksAll);
-        const data = JSON.parse(text);
-
-        // 3. データ展開 (並列処理)
-        const liteTiles = data?.tiles || {};
-        const tileKeys = Object.keys(liteTiles);
-        const totalTiles = tileKeys.length;
-
-        setMapLoadTotal(totalTiles);
-        setMapLoadProgress(0);
-        setMapLoadMessage("並列処理で展開中 (" + mapWorkerPool.poolSize + " cores)...");
-
-        // キーをチャンクに分割
-        const CHUNK_SIZE = Math.ceil(totalTiles / (mapWorkerPool.poolSize || 4));
-        const keyChunks = [];
-        for (let i = 0; i < totalTiles; i += CHUNK_SIZE) {
-            keyChunks.push(tileKeys.slice(i, i + CHUNK_SIZE));
-        }
-
-        // 各チャンクの処理用データを作成
-        // liteTiles全体を渡すと重いので、各チャンクに必要な部分だけ抽出... したいが、
-        // 抽出自体が重くなる可能性がある。
-        // ここは「キーのリスト」と「liteTiles全体」を渡すより、
-        // メインスレッドで分割して渡すのがセオリーだが、分割コストがかかる。
-        // しかしliteTilesは単一オブジェクト。
-        // メインスレッドで部分オブジェクトを作るのが最も確実。
-
-        const tasks = [];
-        for (const keys of keyChunks) {
-            const chunkData = {};
-            for (const key of keys) {
-                chunkData[key] = liteTiles[key];
-            }
-            tasks.push({
-                type: "PROCESS_LITE_CHUNK",
-                data: { tiles: chunkData }
-            });
-        }
-
-        // WorkerPoolで並列実行
-        const results = await mapWorkerPool.sendParallelTasks(tasks);
-
-        // 結果を結合
-        let processedTiles = {};
-        for (const res of results) {
-            Object.assign(processedTiles, res);
-        }
-
-        setMapLoadProgress(totalTiles);
-
-
-
-        if (data.playerNames) {
-          setPlayerNames(data.playerNames);
+        if (playerNames) {
+          setPlayerNames(playerNames);
         }
 
         setMapTiles(processedTiles);

@@ -1765,12 +1765,13 @@ parentPort.on("message", async (msg) => {
       const ranksMap = {};
       sortedRanks.forEach((r) => (ranksMap[r.id] = r.rank));
 
-      const gameKeys = Object.keys(gameIds);
+      const gameKeys = data.gameKeys || Object.keys(gameIds);
       const appliedTriggers = [];
 
       gameKeys.forEach((authKeyInGameIds) => {
         const info = gameIds[authKeyInGameIds];
-        if (!info.secretTriggers || info.secretTriggers.length === 0) return;
+        if (!info || !info.secretTriggers || info.secretTriggers.length === 0)
+          return;
 
         // プレイヤーの特定
         let playerId = authKeyInGameIds;
@@ -1795,17 +1796,11 @@ parentPort.on("message", async (msg) => {
         }
 
         if (!player || !player.factionId) {
-          console.log(
-            `[Worker-SecretTrigger] Player ${playerId}: no factionId (player: ${!!player}, factionId: ${player?.factionId})`,
-          );
           return;
         }
 
         const faction = factions.factions[player.factionId];
         if (!faction) {
-          console.log(
-            `[Worker-SecretTrigger] Player ${playerId}: faction ${player.factionId} not found`,
-          );
           return;
         }
 
@@ -1832,6 +1827,77 @@ parentPort.on("message", async (msg) => {
         results: {
           appliedTriggers,
           ranksMap,
+          workerId,
+        },
+      });
+    } catch (e) {
+      parentPort.postMessage({ success: false, taskId, error: e.message });
+    }
+  } else if (type === "RESOLVE_PLAYER_IDS") {
+    // プレイヤーリストの同期処理を並列化
+    try {
+      const { filePaths, playerIds } = data;
+      const playersData = loadJSON(filePaths.players, { players: {} });
+      const gameIds = loadJSON(filePaths.gameIds, {});
+
+      const updatedPlayers = {};
+      let changed = false;
+
+      const targetIds = playerIds || Object.keys(playersData.players);
+
+      targetIds.forEach((pid) => {
+        const player = playersData.players[pid];
+        if (!player) return;
+
+        // server.js の syncPlayerWithGameIdsInternal と同等のロジックを実行
+        let playerUpdated = false;
+
+        const isGameKey = (k) => k && /^(game-)?[0-9a-f]{8}$/i.test(k);
+
+        // knowPostIds 内の認証キーを内部IDに置換
+        if (player.knownPostIds && Array.isArray(player.knownPostIds)) {
+          const originalIds = [...player.knownPostIds];
+          const newKnownIds = new Set(player.knownPostIds);
+
+          for (const id of originalIds) {
+            if (isGameKey(id)) {
+              const entry = gameIds[id];
+              if (entry && entry.id) {
+                const internalId = entry.id;
+                if (!newKnownIds.has(internalId)) {
+                  newKnownIds.add(internalId);
+                  playerUpdated = true;
+                }
+                if (newKnownIds.has(id)) {
+                  newKnownIds.delete(id);
+                  playerUpdated = true;
+                }
+                // 履歴へ移動
+                if (!player.authHistory) player.authHistory = [];
+                if (!player.authHistory.includes(id)) {
+                  player.authHistory.push(id);
+                  playerUpdated = true;
+                }
+              }
+            }
+          }
+          if (playerUpdated) {
+            player.knownPostIds = Array.from(newKnownIds);
+          }
+        }
+
+        if (playerUpdated) {
+          updatedPlayers[pid] = player;
+          changed = true;
+        }
+      });
+
+      parentPort.postMessage({
+        success: true,
+        taskId,
+        results: {
+          changed,
+          updatedPlayers,
           workerId,
         },
       });
@@ -2083,7 +2149,129 @@ parentPort.on("message", async (msg) => {
     } catch (e) {
       parentPort.postMessage({ success: false, taskId, error: e.message });
     }
-  } else if (type === "CLEAR_CACHE") {
+  } else if (type === "GENERATE_BINARY_MAP") {
+    try {
+      const { filePaths, playerNames } = data;
+      const mapState = loadJSON(filePaths.mapState, { tiles: {} });
+      const tiles = Object.entries(mapState.tiles);
+      const tileCount = tiles.length;
+
+      // Factions mapping (Index for indices)
+      const factionsSet = new Set();
+      tiles.forEach(([, t]) => {
+        const fid = t.faction || t.factionId;
+        if (fid) factionsSet.add(fid);
+      });
+      const factionList = Array.from(factionsSet);
+      const factionMap = new Map(factionList.map((f, i) => [f, i]));
+
+      let factionNamesSize = 0;
+      factionList.forEach((f) => {
+        factionNamesSize += 2 + Buffer.from(f).length; // ID (2 length + body)
+      });
+
+      // Player names mapping
+      const pEntries = Object.entries(playerNames || {});
+      let playerNamesSize = 0;
+      pEntries.forEach(([id, name]) => {
+        playerNamesSize +=
+          2 + Buffer.from(id).length + 2 + Buffer.from(name).length;
+      });
+
+      const TILE_DATA_SIZE = 20; // X(2), Y(2), FID(2), COLOR(4), FLAGS(1), EXP(8), RSVD(1)
+      const headerSize =
+        4 + 1 + 8 + 4 + 2 + factionNamesSize + 4 + playerNamesSize;
+      const totalSize = headerSize + tileCount * TILE_DATA_SIZE;
+
+      const buffer = Buffer.allocUnsafe(totalSize);
+      let offset = 0;
+
+      // Header
+      buffer.write("TMAP", offset);
+      offset += 4;
+      buffer.writeUInt8(1, offset);
+      offset += 1;
+      buffer.writeDoubleLE(Date.now(), offset);
+      offset += 8; // Version as timestamp
+
+      // Factions
+      buffer.writeUInt16LE(factionList.length, offset);
+      offset += 2;
+      factionList.forEach((f) => {
+        const b = Buffer.from(f);
+        buffer.writeUInt16LE(b.length, offset);
+        offset += 2;
+        b.copy(buffer, offset);
+        offset += b.length;
+      });
+
+      // Players
+      buffer.writeUInt32LE(pEntries.length, offset);
+      offset += 4;
+      pEntries.forEach(([id, name]) => {
+        const bid = Buffer.from(id);
+        const bname = Buffer.from(name);
+        buffer.writeUInt16LE(bid.length, offset);
+        offset += 2;
+        bid.copy(buffer, offset);
+        offset += bid.length;
+
+        buffer.writeUInt16LE(bname.length, offset);
+        offset += 2;
+        bname.copy(buffer, offset);
+        offset += bname.length;
+      });
+
+      // Tiles
+      buffer.writeUInt32LE(tileCount, offset);
+      offset += 4;
+
+      tiles.forEach(([key, tile]) => {
+        const [x, y] = key.split("_").map(Number);
+        const fid = tile.faction || tile.factionId;
+        const fidIdx = fid ? (factionMap.get(fid) ?? 65535) : 65535; // 65535 = null
+
+        buffer.writeInt16LE(x, offset);
+        offset += 2;
+        buffer.writeInt16LE(y, offset);
+        offset += 2;
+        buffer.writeUInt16LE(fidIdx, offset);
+        offset += 2;
+
+        const colorStr = tile.customColor || tile.color || "#ffffff";
+        const colorInt = parseInt(colorStr.replace("#", ""), 16) || 0xffffff;
+        buffer.writeUInt32LE(colorInt, offset);
+        offset += 4;
+
+        let flags = 0;
+        if (tile.core) flags |= 1;
+        if (tile.coreificationUntil) flags |= 2;
+        buffer.writeUInt8(flags, offset);
+        offset += 1;
+
+        const exp = tile.core
+          ? new Date(tile.core.expiresAt || 0).getTime()
+          : tile.coreificationUntil
+            ? new Date(tile.coreificationUntil).getTime()
+            : 0;
+        buffer.writeDoubleLE(exp, offset);
+        offset += 8;
+
+        buffer.writeUInt8(0, offset);
+        offset += 1;
+      });
+
+      parentPort.postMessage(
+        {
+          success: true,
+          taskId,
+          results: { binary: buffer },
+        },
+        [buffer.buffer],
+      );
+    } catch (e) {
+      parentPort.postMessage({ success: false, taskId, error: e.message });
+    }
     try {
       const { workerId } = data;
       const beforeSize = jsonCache.size;

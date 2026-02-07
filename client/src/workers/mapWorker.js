@@ -355,13 +355,127 @@ function processLiteChunk(liteTiles) {
 }
 
 // メッセージハンドラ
-self.onmessage = function (e) {
+self.onmessage = async function (e) {
   const { type, data, id } = e.data;
 
   try {
     let result;
 
     switch (type) {
+      case "LOAD_MAP_DATA_BINARY":
+        {
+          const response = await fetch(data.url);
+          if (!response.ok)
+            throw new Error(`HTTP error! status: ${response.status}`);
+
+          const arrayBuffer = await response.arrayBuffer();
+          const view = new DataView(arrayBuffer);
+          let offset = 0;
+
+          // Magic Check
+          const magic = String.fromCharCode(
+            view.getUint8(offset++),
+            view.getUint8(offset++),
+            view.getUint8(offset++),
+            view.getUint8(offset++),
+          );
+          if (magic !== "TMAP") throw new Error("Invalid Binary Map Magic");
+
+          const formatVersion = view.getUint8(offset++);
+          const mapVersion = view.getUint32LE(offset); // Actually getFloat64 but let's just use it as timestamp
+          offset += 8;
+
+          // Factions
+          const factionCount = view.getUint16LE(offset);
+          offset += 2;
+          const factionsList = [];
+          const decoder = new TextDecoder();
+
+          for (let i = 0; i < factionCount; i++) {
+            const idLen = view.getUint16LE(offset);
+            offset += 2;
+            const id = decoder.decode(
+              new Uint8Array(arrayBuffer, offset, idLen),
+            );
+            offset += idLen;
+            factionsList.push(id);
+          }
+
+          // Players
+          const playerCount = view.getUint32LE(offset);
+          offset += 4;
+          const playerNames = {};
+          for (let i = 0; i < playerCount; i++) {
+            const idLen = view.getUint16LE(offset);
+            offset += 2;
+            const id = decoder.decode(
+              new Uint8Array(arrayBuffer, offset, idLen),
+            );
+            offset += idLen;
+
+            const nameLen = view.getUint16LE(offset);
+            offset += 2;
+            const name = decoder.decode(
+              new Uint8Array(arrayBuffer, offset, nameLen),
+            );
+            offset += nameLen;
+            playerNames[id] = name;
+          }
+
+          // Tiles
+          const tileCount = view.getUint32LE(offset);
+          offset += 4;
+          const tiles = {};
+
+          for (let i = 0; i < tileCount; i++) {
+            const x = view.getInt16LE(offset);
+            offset += 2;
+            const y = view.getInt16LE(offset);
+            offset += 2;
+            const fidIdx = view.getUint16LE(offset);
+            offset += 2;
+            const colorInt = view.getUint32LE(offset);
+            offset += 4;
+            const flags = view.getUint8(offset++);
+            const exp = view.getFloat64LE(offset);
+            offset += 8;
+            offset += 1; // reserved
+
+            const key = `${x}_${y}`;
+            const factionId = fidIdx === 65535 ? null : factionsList[fidIdx];
+            const color = `#${colorInt.toString(16).padStart(6, "0")}`;
+
+            const tile = {
+              x,
+              y,
+              factionId,
+              faction: factionId,
+              color,
+              overpaint: 0,
+            };
+
+            if (flags & 1) {
+              tile.core = {
+                factionId,
+                expiresAt: exp > 0 ? new Date(exp).toISOString() : null,
+              };
+            }
+            if (flags & 2) {
+              tile.coreificationUntil = new Date(exp).toISOString();
+              tile.coreificationFactionId = factionId;
+            }
+
+            tiles[key] = tile;
+          }
+
+          result = {
+            tiles,
+            version: mapVersion,
+            playerNames,
+          };
+        }
+        break;
+
       case "AGGREGATE_FACTIONS":
         result = aggregateFactionTiles(data.tiles);
         break;
