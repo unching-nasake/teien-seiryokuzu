@@ -204,9 +204,24 @@ export const useMultiRenderWorker = (
     [broadcast],
   );
 
-  // Render Trigger - render to inactive buffer
+  // [NEW] スロットリング用 - 最小レンダリング間隔 (ms)
+  const MIN_RENDER_INTERVAL = 16; // ~60fps
+  const lastRenderTimeRef = useRef(0);
+
+  // Render Trigger - render to inactive buffer with throttling
   const render = useCallback(
     (viewport, width, height) => {
+      const now = performance.now();
+      const elapsed = now - lastRenderTimeRef.current;
+
+      // スロットリング: 前回のレンダーから十分な時間が経っていない場合はスキップ
+      // ただし、前回のレンダーがまだ完了していない場合もスキップ
+      if (elapsed < MIN_RENDER_INTERVAL && pendingRendersRef.current > 0) {
+        // スキップするが、最後のリクエストは後で処理するためにスケジュール
+        return;
+      }
+
+      lastRenderTimeRef.current = now;
       renderIdRef.current++;
       const renderId = renderIdRef.current;
       pendingRendersRef.current = WORKER_COUNT;

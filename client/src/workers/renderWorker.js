@@ -223,8 +223,7 @@ function renderTiles(data) {
   const centerY = height / 2;
   const showGrid = viewport.zoom > 2.0;
 
-  // [REVERTED] キャンバス全体をクリア＆背景塗りつぶし
-  // 各ワーカーが担当行を描画する前に、全ワーカーが背景色で塗りつぶす
+  // キャンバス全体をクリア＆背景塗りつぶし
   // Worker 0 は不透明背景、他は透明にすることで重ねて表示
   ctx.clearRect(0, 0, width, height);
   if (workerIndex === 0) {
