@@ -102,7 +102,7 @@ function GameMap({
         // [NEW] 読み込み時に最小ズーム0.5を適用
         return {
              ...parsed,
-             zoom: Math.max(0.5, parsed.zoom)
+             zoom: Math.max(0.1, parsed.zoom)
         };
       }
       return { x: 125, y: 125, zoom: 4 };
@@ -131,15 +131,15 @@ function GameMap({
     }, 200);
   }, [viewport.zoom, onZoomChange]);
 
-  // [NEW] ズーム制限 (Min 0.5)
+  // [NEW] ズーム制限 (Min 0.1)
   useEffect(() => {
-    if (viewport.zoom < 0.5) {
-      setViewport(prev => ({ ...prev, zoom: 0.5 }));
+    if (viewport.zoom < 0.1) {
+      setViewport(prev => ({ ...prev, zoom: 0.1 }));
     }
   }, [viewport.zoom]);
 
-  // [NEW] 最小ズームは常に0.5
-  const minZoomLimit = 0.5;
+  // [NEW] 最小ズームは常に0.1
+  const minZoomLimit = 0.1;
 
   // プレイヤーIDごとのランダム色生成 (Memoized)
   const playerColors = useMemo(() => {
@@ -495,14 +495,17 @@ function GameMap({
     // スロットリング: 前回の描画からの経過時間をチェック
     const now = performance.now();
     const elapsed = now - lastRenderTimeRef.current;
-    const throttle = isZoomingRef.current ? 32 : renderThrottleMs; // ズーム中は32ms (~30fps)
+
+    // [OPTIMIZED] ズーム中もスロットリングを緩和して滑らかさを優先 (OffscreenCanvasなら負荷は分散される)
+    // ただし、余りにも頻繁な更新は防ぐため最低限の間隔(8ms ~ 120fps)は空ける
+    const throttle = 8;
 
     if (elapsed < throttle) {
-      // スキップ (ただし次フレームで再描画をスケジュール)
-      const rafId = requestAnimationFrame(() => {
-        // 強制的に再レンダリングをトリガー (viewportの参照は変わらないので何もしない)
-      });
-      return () => cancelAnimationFrame(rafId);
+      // 次のフレームで再試行するためにRAFを予約するが、
+      // ここで再帰的に呼ぶとループする可能性があるため、
+      // 実際には単純にスキップして、次のReact renderサイクルまたはイベントを待つ方が安全。
+      // ただし、滑らかなアニメーションのためには「次のフレーム」での実行が必要。
+      return;
     }
     lastRenderTimeRef.current = now;
 
@@ -1367,7 +1370,7 @@ function GameMap({
       const lastDist = touchState.current.startDist;
       if (lastDist > 0) {
         const ratio = dist / lastDist;
-        const minZoom = 0.5;
+        const minZoom = 0.1;
         setViewport(prev => ({
           ...prev,
           zoom: Math.max(minZoom, Math.min(4, touchState.current.startZoom * ratio))
@@ -1521,16 +1524,16 @@ function GameMap({
         wheelTimeoutRef.current = null;
     }, 16);
 
-    const minZoom = 0.5;
+    const minZoom = 0.1;
     // const delta = e.deltaY > 0 ? 0.9 : 1.1;
     setViewport(prev => {
         let newZoom = prev.zoom;
         if (e.deltaY > 0) {
             // Zoom Out
-            newZoom -= 0.25;
+            newZoom -= 0.1;
         } else {
             // Zoom In
-            newZoom += 0.25;
+            newZoom += 0.1;
         }
         return {
             ...prev,

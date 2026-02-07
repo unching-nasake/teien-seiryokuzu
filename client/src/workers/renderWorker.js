@@ -158,17 +158,28 @@ function renderTiles(data) {
   const endX = Math.ceil(viewport.x + tilesX / 2);
   const endY = Math.ceil(viewport.y + tilesY / 2);
 
-  // 色ごとにバッチング
+  // 色ごとにバッチング (フラット配列: [x, y, w, h, ...])
+  // Map<color, number[]>
   const batchDraws = new Map();
   const factionBorderRects = [];
 
+  // 最適化: ズームが小さい場合は境界線計算をスキップ
+  const skipBorders = mapColorMode === "overpaint" && viewport.zoom < 0.5;
+
   for (let x = Math.max(0, startX); x <= Math.min(MAP_SIZE - 1, endX); x++) {
     for (let y = Math.max(0, startY); y <= Math.min(MAP_SIZE - 1, endY); y++) {
-      const screenX = centerX + (x - viewport.x) * tileSize;
-      const screenY = centerY + (y - viewport.y) * tileSize;
-
       const tileKey = `${x}_${y}`;
       const tile = tiles[tileKey];
+
+      // 最適化: タイルがない場合は背景色(blankTileColor)と同じならスキップ
+      // デフォルト背景は #1a1a2e
+      if (!tile) {
+        // 背景色と同じなら描画しない（クリア済みだから）
+        if ((blankTileColor || "#ffffff") === "#1a1a2e") continue;
+      }
+
+      const screenX = centerX + (x - viewport.x) * tileSize;
+      const screenY = centerY + (y - viewport.y) * tileSize;
 
       const drawSize = showGrid
         ? Math.max(1, tileSize - 1)
@@ -204,20 +215,26 @@ function renderTiles(data) {
           color = tile.customColor || tile.color || "#ffffff";
         }
 
-        // 塗装数モード時の外縁境界線
-        if (f && mapColorMode === "overpaint") {
+        // 塗装数モード時の外縁境界線 (低ズーム時はスキップ)
+        if (!skipBorders && f && mapColorMode === "overpaint") {
           const checkBorder = (dx, dy, type) => {
             const nk = `${x + dx}_${y + dy}`;
             const nt = tiles[nk];
             const nfid = nt ? nt.factionId || nt.faction : null;
             if (nfid !== fid) {
-              factionBorderRects.push({
-                x: screenX,
-                y: screenY,
-                w: drawSize,
-                h: drawSize,
-                type,
-              });
+              factionBorderRects.push(
+                screenX,
+                screenY,
+                drawSize,
+                drawSize,
+                type === "top"
+                  ? 0
+                  : type === "bottom"
+                    ? 1
+                    : type === "left"
+                      ? 2
+                      : 3,
+              );
             }
           };
           checkBorder(0, -1, "top");
@@ -239,17 +256,18 @@ function renderTiles(data) {
       if (!batchDraws.has(color)) {
         batchDraws.set(color, []);
       }
-      batchDraws
-        .get(color)
-        .push({ x: screenX, y: screenY, w: drawSize, h: drawSize });
+      // フラット配列に追加
+      const arr = batchDraws.get(color);
+      arr.push(screenX, screenY, drawSize, drawSize);
     }
   }
 
-  // まとめて描画
+  // まとめて描画 (Flat Array)
   batchDraws.forEach((rects, color) => {
     ctx.beginPath();
-    for (const r of rects) {
-      ctx.rect(r.x, r.y, r.w, r.h);
+    // i += 4 でループ
+    for (let i = 0; i < rects.length; i += 4) {
+      ctx.rect(rects[i], rects[i + 1], rects[i + 2], rects[i + 3]);
     }
     ctx.fillStyle = color;
     ctx.fill();
@@ -260,19 +278,30 @@ function renderTiles(data) {
     ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (const r of factionBorderRects) {
-      if (r.type === "top") {
-        ctx.moveTo(r.x, r.y);
-        ctx.lineTo(r.x + r.w, r.y);
-      } else if (r.type === "bottom") {
-        ctx.moveTo(r.x, r.y + r.h);
-        ctx.lineTo(r.x + r.w, r.y + r.h);
-      } else if (r.type === "left") {
-        ctx.moveTo(r.x, r.y);
-        ctx.lineTo(r.x, r.y + r.h);
-      } else if (r.type === "right") {
-        ctx.moveTo(r.x + r.w, r.y);
-        ctx.lineTo(r.x + r.w, r.y + r.h);
+    // Flat Array: [x, y, w, h, type] type: 0=top, 1=bottom, 2=left, 3=right
+    for (let i = 0; i < factionBorderRects.length; i += 5) {
+      const x = factionBorderRects[i];
+      const y = factionBorderRects[i + 1];
+      const w = factionBorderRects[i + 2];
+      const h = factionBorderRects[i + 3];
+      const type = factionBorderRects[i + 4];
+
+      if (type === 0) {
+        // top
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + w, y);
+      } else if (type === 1) {
+        // bottom
+        ctx.moveTo(x, y + h);
+        ctx.lineTo(x + w, y + h);
+      } else if (type === 2) {
+        // left
+        ctx.moveTo(x, y);
+        ctx.lineTo(x, y + h);
+      } else if (type === 3) {
+        // right
+        ctx.moveTo(x + w, y);
+        ctx.lineTo(x + w, y + h);
       }
     }
     ctx.stroke();
