@@ -1278,8 +1278,8 @@ function Sidebar({
             padding: '16px',
             marginBottom: '16px',
             display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between'
+            flexDirection: 'column',
+            gap: '12px'
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
               <div style={{
@@ -1292,21 +1292,46 @@ function Sidebar({
                 justifyContent: 'center',
                 fontSize: '1.2rem',
                 color: '#fff',
-                boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+                boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)',
+                flexShrink: 0
               }}>
                 {playerData.displayName?.charAt(0) || 'U'}
               </div>
-              <div>
-                <div style={{ fontSize: '0.9rem', fontWeight: 'bold', color: '#fff' }}>{playerData.displayName}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                  <div style={{ fontSize: '0.9rem', fontWeight: 'bold', color: '#fff' }}>{playerData.displayName}</div>
+                  {apSettings?.gardenMode && (
+                    <span style={{
+                      fontSize: '0.7em',
+                      padding: '2px 6px',
+                      borderRadius: '4px',
+                      background: playerData.lastAuthenticated ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)',
+                      color: playerData.lastAuthenticated ? '#34d399' : '#fbbf24',
+                      border: `1px solid ${playerData.lastAuthenticated ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`,
+                      whiteSpace: 'nowrap'
+                    }}>
+                      {playerData.lastAuthenticated ? '✅ 認証済' : '⚠️ 未認証'}
+                    </span>
+                  )}
+                </div>
                 <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>ID: {playerData.id?.substring(0, 8)}...</div>
               </div>
             </div>
             <button
               className="btn btn-secondary"
               onClick={onOpenAccountSettings}
-              style={{ padding: '6px 12px', fontSize: '0.8rem', minWidth: 'auto', background: 'rgba(255,255,255,0.05)' }}
+              style={{
+                width: '100%',
+                padding: '8px',
+                fontSize: '0.85rem',
+                background: 'rgba(255,255,255,0.05)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px'
+              }}
             >
-              ⚙️ 設定
+              ⚙️ アカウント設定
             </button>
           </div>
         )}

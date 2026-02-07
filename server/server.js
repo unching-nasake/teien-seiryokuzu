@@ -283,6 +283,32 @@ async function safeRename(oldPath, newPath, retries = 5, delay = 100) {
   }
 }
 
+// [NEW] 管理者IDの読み込み
+let currentAdminId = null;
+function loadAdminId() {
+  try {
+    if (fs.existsSync(ADMIN_ID_PATH)) {
+      currentAdminId = fs.readFileSync(ADMIN_ID_PATH, "utf-8").trim();
+      console.log(`[Admin] Loaded Admin ID: ${currentAdminId}`);
+    } else {
+      currentAdminId = null;
+    }
+  } catch (e) {
+    console.error("[Admin] Failed to load admin-id.txt:", e);
+    currentAdminId = null;
+  }
+}
+
+// 初期読み込みと監視
+loadAdminId();
+if (fs.existsSync(DATA_DIR)) {
+  fs.watch(DATA_DIR, (eventType, filename) => {
+    if (filename === "admin-id.txt") {
+      loadAdminId();
+    }
+  });
+}
+
 // メモリ更新 & ディスク保存 (非同期Worker版 - 非ブロッキング順序保証)
 async function saveJSON(filePath, data, options = {}) {
   if (!filePath) {
@@ -2405,10 +2431,7 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
 
   // 弱小勢力判定
   let isWeak = false;
-  let adminId = "";
-  if (fs.existsSync(ADMIN_ID_PATH)) {
-    adminId = fs.readFileSync(ADMIN_ID_PATH, "utf-8").trim();
-  }
+  let adminId = currentAdminId || "";
 
   // 統計情報がある場合はそれからランクを取得、なければメモリ内のキャッシュから取得
   const rankData = preCalcStats?.ranks
