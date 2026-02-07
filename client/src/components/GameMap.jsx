@@ -159,10 +159,22 @@ function GameMap({
   }, [initWorkers, workerCount, workerReady]);
 
   // Update Tiles when data changes
+  // Update Tiles when data changes
   useEffect(() => {
+     if (!workerReady) return;
+
      // Trigger worker update
      updateWorkerTiles(debouncedTileData, true);
-  }, [debouncedTileData, updateWorkerTiles]);
+
+     // [FIX] データ更新後、即座に再描画をリクエスト
+     const { width, height } = canvasDimensions;
+     if (width > 0 && height > 0) {
+         // スロットリングを無視して強制描画したいが、render関数はスロットリングされている。
+         // しかし、ユーザー操作によるデータ更新なので、スロットリングされても数ms後には描画されるはず。
+         // 念のため少し遅延させるか、そのまま呼ぶ。
+         renderAllWorkers(viewport, width, height);
+     }
+  }, [debouncedTileData, updateWorkerTiles, workerReady, renderAllWorkers, viewport, canvasDimensions]);
 
   // Helper refs
   const isZoomingRef = useRef(false);
