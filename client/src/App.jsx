@@ -348,8 +348,8 @@ function App() {
 
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.strokeStyle = '#ffffff'; // 白縁取り
-      ctx.fillStyle = '#000000';   // 黒文字
+      ctx.strokeStyle = '#000000'; // 黒縁取り
+      ctx.fillStyle = '#ffffff';   // 白文字
       ctx.lineWidth = 3;
 
       if (mapColorMode === 'alliance') {

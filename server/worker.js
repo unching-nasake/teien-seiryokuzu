@@ -1893,9 +1893,13 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
         ctx.font = `bold ${fontSize}px NotoSansJP, NotoEmoji, sans-serif`;
 
         const displayName = removeEmoji(alliance.name);
-        ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
-        ctx.fillText(displayName, centerX + 1, centerY + 1);
-        ctx.fillStyle = "#ffffff";
+
+        // [MODIFIED] High Contrast Label (Black Outline + White Text)
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "#000000"; // Black outline
+        ctx.strokeText(displayName, centerX, centerY);
+
+        ctx.fillStyle = "#ffffff"; // White text
         ctx.fillText(displayName, centerX, centerY);
       });
     } else {
@@ -2001,9 +2005,12 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
           bottom: centerY + textHeight / 2,
         });
 
-        ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
-        ctx.fillText(displayName, centerX + 1, centerY + 1);
-        ctx.fillStyle = "#ffffff";
+        // [MODIFIED] High Contrast Label (Black Outline + White Text)
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "#000000"; // Black outline
+        ctx.strokeText(displayName, centerX, centerY);
+
+        ctx.fillStyle = "#ffffff"; // White text
         ctx.fillText(displayName, centerX, centerY);
       });
     }
@@ -2020,12 +2027,14 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
       ctx.fillStyle = "#FFD700";
       ctx.fillText("★", screenX, screenY - 8);
 
-      // 名前ラベル（小さめ）
+      // 名前ラベル（小さめ + 縁取り）
       if (cell.name) {
-        ctx.fillStyle = "rgba(0, 0, 0, 0.8)";
-        ctx.fillText(cell.name, screenX + 1, screenY + 8);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#000000";
+        ctx.strokeText(cell.name, screenX, screenY + 8);
+
         ctx.fillStyle = "#ffffff";
-        ctx.fillText(cell.name, screenX, screenY + 7);
+        ctx.fillText(cell.name, screenX, screenY + 8);
       }
     });
   }
