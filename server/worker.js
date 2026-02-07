@@ -1821,11 +1821,16 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
     if (faction) {
       let color = tile.customColor || faction.color || "#888888";
 
-      // 同盟モードでは同盟ごとに色分け
-      if (mode === "alliance" && factionToAlliance[fid]) {
-        const alliance = alliances[factionToAlliance[fid]];
-        if (alliance && alliance.color) {
-          color = alliance.color;
+      // 同盟モードでは同盟ごとに色分け、未加入は灰色
+      if (mode === "alliance") {
+        const allianceId = factionToAlliance[fid];
+        if (allianceId) {
+          const alliance = alliances[allianceId];
+          if (alliance && alliance.color) {
+            color = alliance.color;
+          }
+        } else {
+          color = "#888888"; // 未加入は灰色
         }
       }
 

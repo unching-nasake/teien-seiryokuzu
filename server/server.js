@@ -14048,6 +14048,7 @@ app.get("/map", (req, res) => {
   <div class="tabs">
     <button class="tab active" onclick="switchTab('faction_full')">勢力表示（詳細）</button>
     <button class="tab" onclick="switchTab('faction_simple')">勢力表示（シンプル）</button>
+    <button class="tab" onclick="switchTab('alliance')">同盟表示</button>
   </div>
 
   <div class="map-container">
