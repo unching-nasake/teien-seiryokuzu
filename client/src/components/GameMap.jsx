@@ -1348,6 +1348,7 @@ function GameMap({
             step = 0.05;
         }
 
+        let newZoom = currentZoom;
         if (e.deltaY > 0) {
             // Zoom Out
             newZoom -= step;
