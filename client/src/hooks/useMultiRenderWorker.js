@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import RenderWorker from "../workers/renderWorker.js?worker";
 
 /**
- * Multi-Threaded Render Worker Hook
- * Manages multiple RenderWorker instances to utilize CPU cores.
+ * Multi-Threaded Render Worker Hook with True Double Buffering
+ * Each worker has TWO canvases (front/back) and alternates between them.
  */
 export const useMultiRenderWorker = (
   tileData,
@@ -13,44 +13,100 @@ export const useMultiRenderWorker = (
   theme,
 ) => {
   const workerRefs = useRef([]); // Array of Worker instances
-  const canvasRefs = useRef([]); // Array of Canvas elements
   const [workerReady, setWorkerReady] = useState(false);
 
+  // [NEW] True Double Buffering: 各ワーカーに2つのキャンバス
+  const frontCanvasesRef = useRef([]); // フロントバッファキャンバス配列
+  const backCanvasesRef = useRef([]); // バックバッファキャンバス配列
+  const containerRef = useRef(null);
+  const pendingRendersRef = useRef(0);
+  const activeBufferRef = useRef(0); // 0 = front visible, 1 = back visible
+  const renderIdRef = useRef(0); // 各レンダリング要求のID
+
   // Determine number of workers
-  // Use hardwareConcurrency, but ensure at least 1
   const concurrency =
     typeof navigator !== "undefined" ? navigator.hardwareConcurrency || 4 : 4;
-  // Cap at reasonable number if needed, but user requested FULL POWER.
-  // However, creating 128 workers for 128 cores might overload browser context limit.
-  // Browsers usually limit contexts. Chrome ~16-32 accel contexts.
-  // We'll trust the user but maybe add a sanity cap of 16 if things crash.
-  // For now, let's use Concurrency directly.
   const WORKER_COUNT = Math.max(1, concurrency);
 
-  // Initialize Workers
+  // [NEW] バッファスワップ関数 - visibility切り替え
+  const swapBuffers = useCallback((renderId) => {
+    // 古いレンダリング要求は無視
+    if (renderId !== renderIdRef.current) return;
+
+    const frontCanvases = frontCanvasesRef.current;
+    const backCanvases = backCanvasesRef.current;
+
+    if (activeBufferRef.current === 0) {
+      // フロントが表示中 -> バックを表示
+      frontCanvases.forEach((c) => (c.style.visibility = "hidden"));
+      backCanvases.forEach((c) => (c.style.visibility = "visible"));
+      activeBufferRef.current = 1;
+    } else {
+      // バックが表示中 -> フロントを表示
+      backCanvases.forEach((c) => (c.style.visibility = "hidden"));
+      frontCanvases.forEach((c) => (c.style.visibility = "visible"));
+      activeBufferRef.current = 0;
+    }
+  }, []);
+
+  // Initialize Workers with dual canvas sets
   const initWorkers = useCallback(
-    (canvases) => {
+    (container) => {
       if (workerRefs.current.length > 0) return; // Already initialized
 
       console.log(
-        `[useMultiRenderWorker] Initializing ${WORKER_COUNT} workers.`,
+        `[useMultiRenderWorker] Initializing ${WORKER_COUNT} workers with true double buffering.`,
       );
 
+      containerRef.current = container;
+      container.innerHTML = "";
+
       const newWorkers = [];
+      const frontCanvases = [];
+      const backCanvases = [];
 
       for (let i = 0; i < WORKER_COUNT; i++) {
         const worker = new RenderWorker();
-        const canvas = canvases[i];
 
-        // Transfer control of canvas
+        // フロントバッファキャンバス
+        const frontCanvas = document.createElement("canvas");
+        frontCanvas.style.position = "absolute";
+        frontCanvas.style.top = "0";
+        frontCanvas.style.left = "0";
+        frontCanvas.style.width = "100%";
+        frontCanvas.style.height = "100%";
+        frontCanvas.style.pointerEvents = "none";
+        frontCanvas.style.visibility = "visible"; // 初期表示
+        frontCanvas.id = `map-layer-front-${i}`;
+        container.appendChild(frontCanvas);
+        frontCanvases.push(frontCanvas);
+
+        // バックバッファキャンバス
+        const backCanvas = document.createElement("canvas");
+        backCanvas.style.position = "absolute";
+        backCanvas.style.top = "0";
+        backCanvas.style.left = "0";
+        backCanvas.style.width = "100%";
+        backCanvas.style.height = "100%";
+        backCanvas.style.pointerEvents = "none";
+        backCanvas.style.visibility = "hidden"; // 初期非表示
+        backCanvas.id = `map-layer-back-${i}`;
+        container.appendChild(backCanvas);
+        backCanvases.push(backCanvas);
+
+        // 両方のキャンバスをOffscreenCanvasに変換してワーカーに送信
         try {
-          const offscreen = canvas.transferControlToOffscreen();
-          worker.postMessage({ type: "INIT", data: { canvas: offscreen } }, [
-            offscreen,
-          ]);
+          const frontOffscreen = frontCanvas.transferControlToOffscreen();
+          const backOffscreen = backCanvas.transferControlToOffscreen();
+          worker.postMessage(
+            {
+              type: "INIT_DUAL",
+              data: { frontCanvas: frontOffscreen, backCanvas: backOffscreen },
+            },
+            [frontOffscreen, backOffscreen],
+          );
         } catch (e) {
           console.error(`[MultiWorker] Failed to transfer canvas ${i}:`, e);
-          // Fallback or error handling
         }
 
         // Setup parallel index
@@ -59,21 +115,29 @@ export const useMultiRenderWorker = (
           data: { workerIndex: i, totalWorkers: WORKER_COUNT },
         });
 
-        // Initial Data Sync
-        // We'll sync data in useEffect, but we can setup listeners here
+        // 描画完了メッセージのリスナー
+        const currentRenderId = renderIdRef.current;
         worker.onmessage = (e) => {
-          const { type, success, error } = e.data;
-          // if (type === "RENDER_COMPLETE") { ... }
+          const { type, error, renderId: workerRenderId } = e.data;
+          if (type === "RENDER_COMPLETE") {
+            pendingRendersRef.current--;
+            if (pendingRendersRef.current <= 0) {
+              pendingRendersRef.current = 0;
+              swapBuffers(workerRenderId || renderIdRef.current);
+            }
+          }
           if (type === "ERROR") console.error(`[Worker ${i}] Error:`, error);
         };
 
         newWorkers.push(worker);
       }
 
+      frontCanvasesRef.current = frontCanvases;
+      backCanvasesRef.current = backCanvases;
       workerRefs.current = newWorkers;
       setWorkerReady(true);
     },
-    [WORKER_COUNT],
+    [WORKER_COUNT, swapBuffers],
   );
 
   // Terminate on unmount
@@ -93,7 +157,6 @@ export const useMultiRenderWorker = (
   useEffect(() => {
     if (!workerReady) return;
 
-    // Update Theme
     broadcast({
       type: "UPDATE_DATA",
       data: { theme },
@@ -118,9 +181,6 @@ export const useMultiRenderWorker = (
     (tiles, replace = false) => {
       if (workerRefs.current.length === 0) return;
 
-      // This is the heavy part. We are SENDING copies of tiles to N workers.
-      // Structure clone overhead is N times.
-      // But render is faster.
       broadcast({
         type: "UPDATE_TILES",
         data: { tiles, replace },
@@ -129,39 +189,48 @@ export const useMultiRenderWorker = (
     [broadcast],
   );
 
-  // Resizer
+  // Resizer - resize both buffers
   const resize = useCallback(
     (width, height) => {
       broadcast({
-        type: "RESIZE",
+        type: "RESIZE_DUAL",
         data: { width, height },
       });
     },
     [broadcast],
   );
 
-  // Render Trigger
+  // Render Trigger - render to inactive buffer
   const render = useCallback(
     (viewport, width, height) => {
-      console.log(
-        `[useMultiRenderWorker] render called: viewport.zoom=${viewport.zoom}, ${width}x${height}, workers=${workerRefs.current.length}`,
-      );
+      renderIdRef.current++;
+      const renderId = renderIdRef.current;
+      pendingRendersRef.current = WORKER_COUNT;
+
+      // 現在表示中でない方のバッファに描画を指示
+      const targetBuffer = activeBufferRef.current === 0 ? "back" : "front";
+
       broadcast({
-        type: "RENDER_TILES",
-        data: { viewport, width, height },
+        type: "RENDER_TILES_DUAL",
+        data: { viewport, width, height, targetBuffer, renderId },
       });
     },
-    [broadcast],
+    [broadcast, WORKER_COUNT],
   );
 
   const renderChunks = useCallback(
     (data) => {
+      renderIdRef.current++;
+      const renderId = renderIdRef.current;
+      pendingRendersRef.current = WORKER_COUNT;
+      const targetBuffer = activeBufferRef.current === 0 ? "back" : "front";
+
       broadcast({
-        type: "RENDER_CHUNKS",
-        data,
+        type: "RENDER_CHUNKS_DUAL",
+        data: { ...data, targetBuffer, renderId },
       });
     },
-    [broadcast],
+    [broadcast, WORKER_COUNT],
   );
 
   return {

@@ -144,37 +144,17 @@ function GameMap({
   );
 
   // Canvas Refs for multi-layer are managed inside container
+  // Double Buffering is handled inside useMultiRenderWorker
 
   // Initialize Canvases and Workers
   useEffect(() => {
       if (!canvasContainerRef.current) return;
       if (workerReady) return;
 
-      console.log(`[GameMap] Initializing ${workerCount} layers`);
+      console.log(`[GameMap] Initializing ${workerCount} layers with true double buffering`);
 
-      // Create N canvas elements
-      const canvases = [];
-      canvasContainerRef.current.innerHTML = ''; // Clean
-
-      for (let i = 0; i < workerCount; i++) {
-          const c = document.createElement('canvas');
-          c.style.position = 'absolute';
-          c.style.top = '0';
-          c.style.left = '0';
-          c.style.width = '100%';
-          c.style.height = '100%';
-          c.style.pointerEvents = 'none'; // Click-through to overlay
-          c.id = `map-layer-${i}`;
-          canvasContainerRef.current.appendChild(c);
-          canvases.push(c);
-      }
-
-      initWorkers(canvases);
-
-      // Assign first canvas to baseCanvasRef for compatibility (if needed by other logic)
-      if (canvases.length > 0) {
-          baseCanvasRef.current = canvases[0];
-      }
+      // initWorkersにコンテナを渡す（キャンバス作成はhook内部で行う）
+      initWorkers(canvasContainerRef.current);
 
   }, [initWorkers, workerCount, workerReady]);
 

@@ -1,6 +1,7 @@
 /**
  * マップ描画用 Web Worker (OffscreenCanvas)
  * ベースキャンバスの描画をオフスレッドで実行
+ * [NEW] True Double Buffering: フロント/バックの2つのキャンバスを持つ
  */
 
 // 定数
@@ -8,9 +9,16 @@ const MAP_SIZE = 500;
 const TILE_SIZE = 16;
 const CHUNK_SIZE = 8;
 
-// OffscreenCanvas参照
+// OffscreenCanvas参照 (単一キャンバスモード用 - 互換性維持)
 let canvas = null;
 let ctx = null;
+
+// [NEW] Dual Canvas Mode (True Double Buffering)
+let frontCanvas = null;
+let frontCtx = null;
+let backCanvas = null;
+let backCtx = null;
+let isDualMode = false;
 
 // [Stateful Worker] データキャッシュ
 let cachedTiles = {}; // 互換性のため維持 (部分更新用)
@@ -34,13 +42,14 @@ let workerIndex = 0;
 let totalWorkers = 1;
 
 /**
- * 初期化: OffscreenCanvasを受け取る
+ * 初期化: OffscreenCanvasを受け取る (単一キャンバスモード)
  */
 function init(offscreenCanvas) {
   canvas = offscreenCanvas;
   ctx = canvas.getContext("2d");
+  isDualMode = false;
   console.log(
-    `[RenderWorker ${workerIndex}/${totalWorkers}] Initialized with canvas:`,
+    `[RenderWorker ${workerIndex}/${totalWorkers}] Initialized (single mode):`,
     canvas.width,
     "x",
     canvas.height,
@@ -48,13 +57,48 @@ function init(offscreenCanvas) {
 }
 
 /**
- * キャンバスサイズを更新
+ * [NEW] 初期化: フロント/バック両方のOffscreenCanvasを受け取る
+ */
+function initDual(front, back) {
+  frontCanvas = front;
+  frontCtx = front.getContext("2d");
+  backCanvas = back;
+  backCtx = back.getContext("2d");
+  isDualMode = true;
+
+  // 互換性のため、デフォルトはフロントキャンバスを使用
+  canvas = frontCanvas;
+  ctx = frontCtx;
+
+  console.log(
+    `[RenderWorker ${workerIndex}/${totalWorkers}] Initialized (dual mode):`,
+    frontCanvas.width,
+    "x",
+    frontCanvas.height,
+  );
+}
+
+/**
+ * キャンバスサイズを更新 (単一モード)
  */
 function resize(width, height) {
   if (canvas) {
     canvas.width = width;
     canvas.height = height;
-    // console.log("[RenderWorker] Resized to:", width, "x", height);
+  }
+}
+
+/**
+ * [NEW] キャンバスサイズを更新 (デュアルモード)
+ */
+function resizeDual(width, height) {
+  if (frontCanvas) {
+    frontCanvas.width = width;
+    frontCanvas.height = height;
+  }
+  if (backCanvas) {
+    backCanvas.width = width;
+    backCanvas.height = height;
   }
 }
 
@@ -179,7 +223,9 @@ function renderTiles(data) {
   const centerY = height / 2;
   const showGrid = viewport.zoom > 2.0;
 
-  // クリア (宇宙色)
+  // [REVERTED] キャンバス全体をクリア＆背景塗りつぶし
+  // 各ワーカーが担当行を描画する前に、全ワーカーが背景色で塗りつぶす
+  // Worker 0 は不透明背景、他は透明にすることで重ねて表示
   ctx.clearRect(0, 0, width, height);
   if (workerIndex === 0) {
     ctx.fillStyle = "#1a1a2e";
@@ -220,9 +266,9 @@ function renderTiles(data) {
       const screenX = centerX + (x - viewport.x) * tileSize;
       const screenY = centerY + (y - viewport.y) * tileSize;
 
-      const drawSize = showGrid
-        ? Math.max(1, tileSize - 1)
-        : Math.ceil(tileSize) + 0.5;
+      // [FIX] タイル間のギャップを防ぐため、少し大きめに描画
+      // グリッド表示時は1px小さく（境界線用）、通常時は0.5px大きく（隣接タイルとの隙間を埋める）
+      const drawSize = showGrid ? Math.max(1, tileSize - 1) : tileSize + 0.5;
       let color = blankTileColor || "#ffffff";
 
       if (tile) {
@@ -356,7 +402,42 @@ function renderTiles(data) {
   }
 }
 
-// メッセージハンドラ
+/**
+ * [NEW] デュアルモード用描画関数 - 指定されたバッファに描画
+ */
+function renderTilesDual(data) {
+  const { targetBuffer, renderId } = data;
+
+  // 描画先のキャンバス/コンテキストを選択
+  let targetCanvas, targetCtx;
+  if (targetBuffer === "back") {
+    targetCanvas = backCanvas;
+    targetCtx = backCtx;
+  } else {
+    targetCanvas = frontCanvas;
+    targetCtx = frontCtx;
+  }
+
+  if (!targetCanvas || !targetCtx) {
+    console.warn("[RenderWorker] Target canvas not available for dual mode");
+    return renderId;
+  }
+
+  // 一時的にctxを差し替えて既存のrenderTiles関数を再利用
+  const origCtx = ctx;
+  const origCanvas = canvas;
+  ctx = targetCtx;
+  canvas = targetCanvas;
+
+  renderTiles(data);
+
+  // 元に戻す
+  ctx = origCtx;
+  canvas = origCanvas;
+
+  return renderId;
+}
+
 // メッセージハンドラ
 self.onmessage = function (e) {
   const { type, data } = e.data;
@@ -369,8 +450,16 @@ self.onmessage = function (e) {
     } else if (type === "INIT") {
       init(data.canvas);
       self.postMessage({ type: "INIT_COMPLETE", success: true });
+    } else if (type === "INIT_DUAL") {
+      // [NEW] デュアルキャンバス初期化
+      initDual(data.frontCanvas, data.backCanvas);
+      self.postMessage({ type: "INIT_COMPLETE", success: true });
     } else if (type === "RESIZE") {
       resize(data.width, data.height);
+      self.postMessage({ type: "RESIZE_COMPLETE", success: true });
+    } else if (type === "RESIZE_DUAL") {
+      // [NEW] デュアルモードリサイズ
+      resizeDual(data.width, data.height);
       self.postMessage({ type: "RESIZE_COMPLETE", success: true });
     } else if (type === "UPDATE_TILES") {
       // [Stateful] タイルデータ更新
@@ -408,6 +497,15 @@ self.onmessage = function (e) {
     } else if (type === "RENDER_TILES") {
       renderTiles(data); // 内部でキャッシュ使用＆描画
       self.postMessage({ type: "RENDER_COMPLETE", success: true });
+    } else if (type === "RENDER_TILES_DUAL") {
+      // [NEW] デュアルモード描画
+      const renderId = renderTilesDual(data);
+      self.postMessage({ type: "RENDER_COMPLETE", success: true, renderId });
+    } else if (type === "RENDER_CHUNKS_DUAL") {
+      // [NEW] デュアルモードチャンク描画 (将来用)
+      // 現時点ではRENDER_TILES_DUALと同様に処理
+      const renderId = renderTilesDual(data);
+      self.postMessage({ type: "RENDER_COMPLETE", success: true, renderId });
     } else {
       console.warn("[RenderWorker] Unknown message type:", type);
     }
