@@ -936,18 +936,40 @@ function App() {
     });
 
     // タイル情報のバッファ更新（Socket.js側でスロットリングされた更新を受信）
+    // [OPTIMIZED] Object.assign を使用してコピーコストを削減
     socket.on('tile:buffered', (updatedTiles) => {
       setMapTiles(prev => {
-        const next = { ...prev };
-        Object.entries(updatedTiles).forEach(([key, t]) => {
-          if (t === null) {
-            delete next[key];
-          } else {
-            if (t.factionId && !t.faction) t.faction = t.factionId;
-            next[key] = t;
+        // 差分更新のみを行う（全体コピーを避ける）
+        const keys = Object.keys(updatedTiles);
+        if (keys.length === 0) return prev;
+
+        // 少量の更新の場合は直接更新
+        if (keys.length <= 50) {
+          const next = Object.assign({}, prev);
+          for (const key of keys) {
+            const t = updatedTiles[key];
+            if (t === null) {
+              delete next[key];
+            } else {
+              if (t.factionId && !t.faction) t.faction = t.factionId;
+              next[key] = t;
+            }
           }
-        });
-        return next;
+          return next;
+        }
+
+        // 大量更新の場合は Object.assign でマージ
+        const merged = Object.assign({}, prev, updatedTiles);
+        // null エントリを削除し、factionId を同期
+        for (const key of keys) {
+          const t = merged[key];
+          if (t === null) {
+            delete merged[key];
+          } else if (t && t.factionId && !t.faction) {
+            t.faction = t.factionId;
+          }
+        }
+        return merged;
       });
     });
 
