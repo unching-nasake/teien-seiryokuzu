@@ -888,7 +888,7 @@ function App() {
                     if (myFid) {
                         const oldWars = warsRef.current;
                         const newWars = data.wars;
-                        Object.keys(newWars).forEach(wid => {
+        Object.keys(newWars).forEach(wid => {
                             if (!oldWars[wid]) {
                                 const war = newWars[wid];
                                 if (war.attackerSide.factions.includes(myFid) || war.defenderSide.factions.includes(myFid)) {
@@ -923,6 +923,24 @@ function App() {
         isMergeEnabled: newSettings.isMergeEnabled,
         isGameStopped: newSettings.isGameStopped,
       }));
+    });
+
+    socket.on('system:notice', (newNotice) => {
+      // 重複処理防止
+      if (processedNoticeIdsRef.current.has(newNotice.id)) return;
+      processedNoticeIdsRef.current.add(newNotice.id);
+
+      setNotices(prev => {
+        if (prev.find(n => n.id === newNotice.id)) return prev;
+        const newList = [newNotice, ...prev].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 1000);
+        return newList;
+      });
+
+      // 支援通知以外ならポップアップを表示
+      if (!newNotice.id.startsWith('notice-support-')) {
+        setActiveNotice(newNotice);
+        setShowNoticePopup(true);
+      }
     });
 
     socket.on('online:count', (count) => {
