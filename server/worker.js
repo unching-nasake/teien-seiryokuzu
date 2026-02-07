@@ -1917,18 +1917,22 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
         );
       }
 
-      // 衝突を回避するための位置調整
+      // 衝突を回避するための位置調整 (より積極的なオフセット)
       function findNonOverlappingPosition(x, y, width, height, placed) {
         const offsets = [
           { dx: 0, dy: 0 },
-          { dx: 0, dy: -height * 1.2 },
-          { dx: 0, dy: height * 1.2 },
-          { dx: width * 0.6, dy: 0 },
-          { dx: -width * 0.6, dy: 0 },
-          { dx: width * 0.5, dy: -height * 0.8 },
-          { dx: -width * 0.5, dy: -height * 0.8 },
-          { dx: width * 0.5, dy: height * 0.8 },
-          { dx: -width * 0.5, dy: height * 0.8 },
+          { dx: 0, dy: -height * 1.5 },
+          { dx: 0, dy: height * 1.5 },
+          { dx: width * 0.8, dy: 0 },
+          { dx: -width * 0.8, dy: 0 },
+          { dx: width * 0.7, dy: -height * 1.0 },
+          { dx: -width * 0.7, dy: -height * 1.0 },
+          { dx: width * 0.7, dy: height * 1.0 },
+          { dx: -width * 0.7, dy: height * 1.0 },
+          { dx: 0, dy: -height * 2.5 },
+          { dx: 0, dy: height * 2.5 },
+          { dx: width * 1.2, dy: 0 },
+          { dx: -width * 1.2, dy: 0 },
         ];
 
         for (const offset of offsets) {
@@ -1957,8 +1961,9 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
       }
 
       // タイル数の多い順にソート（大きな勢力を優先配置）
+      // 最小タイル数を5に引き上げて小さな勢力のラベルを省略
       const sortedFactions = Object.entries(factionCenters)
-        .filter(([fid, center]) => center.count >= 1 && factions[fid])
+        .filter(([fid, center]) => center.count >= 5 && factions[fid])
         .sort((a, b) => b[1].count - a[1].count);
 
       sortedFactions.forEach(([fid, center]) => {
@@ -1969,9 +1974,10 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
         const baseCenterY =
           curPaddingY + (center.sumY / center.count) * TILE_SIZE;
 
+        // フォントサイズを縮小（最大6、最大12）
         const fontSize = Math.min(
-          24,
-          Math.max(8, Math.floor(Math.sqrt(center.count) * 2)),
+          12,
+          Math.max(6, Math.floor(Math.sqrt(center.count) * 1.2)),
         );
         ctx.font = `bold ${fontSize}px NotoSansJP, NotoEmoji, sans-serif`;
 
