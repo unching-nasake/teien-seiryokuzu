@@ -1429,10 +1429,10 @@ function GameMap({
         let newZoom = prev.zoom;
         if (e.deltaY > 0) {
             // Zoom Out
-            newZoom -= 0.5;
+            newZoom -= 0.25;
         } else {
             // Zoom In
-            newZoom += 0.5;
+            newZoom += 0.25;
         }
         return {
             ...prev,
