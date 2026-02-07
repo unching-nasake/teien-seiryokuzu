@@ -13766,6 +13766,7 @@ const FULL_MAP_IMAGE_DIR = path.join(DATA_DIR, "map_images");
 const FULL_MAP_IMAGE_PATHS = {
   faction_full: path.join(FULL_MAP_IMAGE_DIR, "faction_full.png"),
   faction_simple: path.join(FULL_MAP_IMAGE_DIR, "faction_simple.png"),
+  alliance: path.join(FULL_MAP_IMAGE_DIR, "alliance.png"),
 };
 
 // ディレクトリ作成
@@ -14014,6 +14015,7 @@ app.get("/map/image", (req, res) => {
 
   if (fs.existsSync(imagePath)) {
     res.setHeader("Content-Type", "image/png");
+    res.setHeader("Content-Disposition", `inline; filename="${mode}.png"`);
     res.setHeader("Cache-Control", "public, max-age=60"); // 1分キャッシュ
     res.sendFile(imagePath);
   } else {
