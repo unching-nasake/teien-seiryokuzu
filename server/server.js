@@ -2465,7 +2465,9 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
 
   // Debug log for weak faction determination (Can be removed after fix)
   if (fid.includes("faction-")) {
-    // console.log(`[WeakCheck] fid=${fid}, rank=${rank}, active=${activeMemberCount}, allianceId=${f.allianceId}, isWeak=${isWeak}, adminId=${adminId}`);
+    console.log(
+      `[WeakCheck] fid=${fid}, rank=${rank}, active=${activeMemberCount}, isWeak=${isWeak}, cacheSize=${cachedFactionRanks.length}`,
+    );
   }
 
   // [NEW] 共有AP上限の付与
@@ -6201,10 +6203,12 @@ app.post(
 
           if (
             result &&
-            result.tilesToCoreify &&
-            result.tilesToCoreify.length > 0
+            result.success &&
+            result.results &&
+            result.results.tilesToCoreify &&
+            result.results.tilesToCoreify.length > 0
           ) {
-            result.tilesToCoreify.forEach((tKey) => {
+            result.results.tilesToCoreify.forEach((tKey) => {
               const t = mapData.tiles[tKey]; // ここで再度参照 (updateJSON内なので safe)
               if (t && !t.core) {
                 t.core = { factionId: fid, expiresAt: null };
@@ -13124,41 +13128,44 @@ setInterval(async () => {
 
     if (
       result &&
-      result.updatedTiles &&
-      Object.keys(result.updatedTiles).length > 0
+      result.results &&
+      result.results.updatedTiles &&
+      Object.keys(result.results.updatedTiles).length > 0
     ) {
       // updateJSON を使って安全に反映
       await updateJSON(MAP_STATE_PATH, (data) => {
         let changed = false;
-        Object.entries(result.updatedTiles).forEach(([key, tileVal]) => {
-          // 競合チェック: もしメインスレッドで既に削除されていたり別の変更が入っている場合はどうする？
-          // coreの状態変更だけなので上書きして良いケースが大半だが、念のため存在確認
-          if (data.tiles[key]) {
-            // マージ: サーバー上の最新状態に対して、Workerが計算した core プロパティ変更を適用
-            const current = data.tiles[key];
-            // タイル所有者が変わっていない場合のみ適用 (所有者変更＝コア消失等の可能性があるため)
-            const currentFid = current.factionId || current.faction;
-            const workerTileFid = tileVal.factionId || tileVal.faction;
+        Object.entries(result.results.updatedTiles).forEach(
+          ([key, tileVal]) => {
+            // 競合チェック: もしメインスレッドで既に削除されていたり別の変更が入っている場合はどうする？
+            // coreの状態変更だけなので上書きして良いケースが大半だが、念のため存在確認
+            if (data.tiles[key]) {
+              // マージ: サーバー上の最新状態に対して、Workerが計算した core プロパティ変更を適用
+              const current = data.tiles[key];
+              // タイル所有者が変わっていない場合のみ適用 (所有者変更＝コア消失等の可能性があるため)
+              const currentFid = current.factionId || current.faction;
+              const workerTileFid = tileVal.factionId || tileVal.faction;
 
-            if (currentFid === workerTileFid) {
-              // coreプロパティを同期
-              if (tileVal.core) {
-                current.core = tileVal.core;
-                delete current.coreificationUntil;
-                delete current.coreificationFactionId;
-              } else {
-                delete current.core;
+              if (currentFid === workerTileFid) {
+                // coreプロパティを同期
+                if (tileVal.core) {
+                  current.core = tileVal.core;
+                  delete current.coreificationUntil;
+                  delete current.coreificationFactionId;
+                } else {
+                  delete current.core;
+                }
+                changed = true;
               }
-              changed = true;
             }
-          }
-        });
+          },
+        );
 
         if (changed) {
           console.log(
-            `[Maintenance] Applied core updates to ${Object.keys(result.updatedTiles).length} tiles.`,
+            `[Maintenance] Applied core updates to ${Object.keys(result.results.updatedTiles).length} tiles.`,
           );
-          batchEmitTileUpdate(Object.keys(result.updatedTiles));
+          batchEmitTileUpdate(Object.keys(result.results.updatedTiles));
         }
         return changed; // 保存トリガー
       });
@@ -13181,9 +13188,11 @@ async function updateRankingCache() {
         factions: FACTIONS_PATH,
       },
     });
-    if (result && result.ranks) {
-      cachedFactionRanks = result.ranks;
-      // console.log("Ranking cache updated");
+    if (result && result.results && result.results.ranks) {
+      cachedFactionRanks = result.results.ranks;
+      console.log(
+        `[Rank] Ranking cache updated. Count: ${cachedFactionRanks.length}`,
+      );
     }
   } catch (err) {
     console.error("Failed to update ranking cache:", err);
