@@ -15,13 +15,14 @@ export const useMultiRenderWorker = (
   const workerRefs = useRef([]); // Array of Worker instances
   const [workerReady, setWorkerReady] = useState(false);
 
-  // [NEW] True Double Buffering: 各ワーカーに2つのキャンバス
-  const frontCanvasesRef = useRef([]); // フロントバッファキャンバス配列
-  const backCanvasesRef = useRef([]); // バックバッファキャンバス配列
+  // [NEW] Unified Rendering: 共有のフロント/バックキャンバス
+  const frontCanvasRef = useRef(null);
+  const backCanvasRef = useRef(null);
   const containerRef = useRef(null);
-  const pendingRendersRef = useRef(0);
+  const pendingBitmapsRef = useRef([]); // 現在のRenderIdで収集したビットマップ
   const activeBufferRef = useRef(0); // 0 = front visible, 1 = back visible
   const renderIdRef = useRef(0); // 各レンダリング要求のID
+  const currentDimensionsRef = useRef({ width: 0, height: 0 });
 
   // Determine number of workers
   const concurrency =
@@ -30,116 +31,129 @@ export const useMultiRenderWorker = (
 
   // [NEW] バッファスワップ関数 - visibility切り替え
   const swapBuffers = useCallback((renderId) => {
-    // 古いレンダリング要求は無視
     if (renderId !== renderIdRef.current) return;
 
-    const frontCanvases = frontCanvasesRef.current;
-    const backCanvases = backCanvasesRef.current;
-
     if (activeBufferRef.current === 0) {
-      // フロントが表示中 -> バックを表示
-      frontCanvases.forEach((c) => (c.style.visibility = "hidden"));
-      backCanvases.forEach((c) => (c.style.visibility = "visible"));
+      frontCanvasRef.current.style.visibility = "hidden";
+      backCanvasRef.current.style.visibility = "visible";
       activeBufferRef.current = 1;
     } else {
-      // バックが表示中 -> フロントを表示
-      backCanvases.forEach((c) => (c.style.visibility = "hidden"));
-      frontCanvases.forEach((c) => (c.style.visibility = "visible"));
+      backCanvasRef.current.style.visibility = "hidden";
+      frontCanvasRef.current.style.visibility = "visible";
       activeBufferRef.current = 0;
     }
   }, []);
 
-  // Initialize Workers with dual canvas sets
+  // Initialize Workers and Shared Canvases
   const initWorkers = useCallback(
     (container) => {
-      if (workerRefs.current.length > 0) return; // Already initialized
+      if (workerRefs.current.length > 0) return;
 
       console.log(
-        `[useMultiRenderWorker] Initializing ${WORKER_COUNT} workers with true double buffering.`,
+        `[useMultiRenderWorker] Initializing ${WORKER_COUNT} workers with Unified BitMap Rendering.`,
       );
 
       containerRef.current = container;
       container.innerHTML = "";
 
-      const newWorkers = [];
-      const frontCanvases = [];
-      const backCanvases = [];
+      // 共有フロントキャンバス
+      const frontCanvas = document.createElement("canvas");
+      frontCanvas.style.position = "absolute";
+      frontCanvas.style.top = "0";
+      frontCanvas.style.left = "0";
+      frontCanvas.style.width = "100%";
+      frontCanvas.style.height = "100%";
+      frontCanvas.style.pointerEvents = "none";
+      frontCanvas.style.visibility = "visible";
+      container.appendChild(frontCanvas);
+      frontCanvasRef.current = frontCanvas;
 
+      // 共有バックキャンバス
+      const backCanvas = document.createElement("canvas");
+      backCanvas.style.position = "absolute";
+      backCanvas.style.top = "0";
+      backCanvas.style.left = "0";
+      backCanvas.style.width = "100%";
+      backCanvas.style.height = "100%";
+      backCanvas.style.pointerEvents = "none";
+      backCanvas.style.visibility = "hidden";
+      container.appendChild(backCanvas);
+      backCanvasRef.current = backCanvas;
+
+      const newWorkers = [];
       for (let i = 0; i < WORKER_COUNT; i++) {
         const worker = new RenderWorker();
 
-        // フロントバッファキャンバス
-        const frontCanvas = document.createElement("canvas");
-        frontCanvas.style.position = "absolute";
-        frontCanvas.style.top = "0";
-        frontCanvas.style.left = "0";
-        frontCanvas.style.width = "100%";
-        frontCanvas.style.height = "100%";
-        frontCanvas.style.pointerEvents = "none";
-        frontCanvas.style.visibility = "visible"; // 初期表示
-        frontCanvas.id = `map-layer-front-${i}`;
-        container.appendChild(frontCanvas);
-        frontCanvases.push(frontCanvas);
-
-        // バックバッファキャンバス
-        const backCanvas = document.createElement("canvas");
-        backCanvas.style.position = "absolute";
-        backCanvas.style.top = "0";
-        backCanvas.style.left = "0";
-        backCanvas.style.width = "100%";
-        backCanvas.style.height = "100%";
-        backCanvas.style.pointerEvents = "none";
-        backCanvas.style.visibility = "hidden"; // 初期非表示
-        backCanvas.id = `map-layer-back-${i}`;
-        container.appendChild(backCanvas);
-        backCanvases.push(backCanvas);
-
-        // 両方のキャンバスをOffscreenCanvasに変換してワーカーに送信
-        try {
-          const frontOffscreen = frontCanvas.transferControlToOffscreen();
-          const backOffscreen = backCanvas.transferControlToOffscreen();
-          worker.postMessage(
-            {
-              type: "INIT_DUAL",
-              data: { frontCanvas: frontOffscreen, backCanvas: backOffscreen },
-            },
-            [frontOffscreen, backOffscreen],
-          );
-        } catch (e) {
-          console.error(`[MultiWorker] Failed to transfer canvas ${i}:`, e);
-        }
-
-        // Setup parallel index
+        // Setup worker index
         worker.postMessage({
           type: "SETUP_WORKER",
           data: { workerIndex: i, totalWorkers: WORKER_COUNT },
         });
 
         // 描画完了メッセージのリスナー
-        // [FIX] 現在のレンダリングIDと一致する場合のみカウント
         worker.onmessage = (e) => {
-          const { type, error, renderId: workerRenderId } = e.data;
-          if (type === "RENDER_COMPLETE") {
-            // 古いレンダリング要求の完了は無視
+          const {
+            type,
+            renderId: workerRenderId,
+            bitmap,
+            workerIndex,
+          } = e.data;
+
+          if (type === "RENDER_BITMAP_COMPLETE") {
+            // ステイルなリクエストを無視
             if (workerRenderId !== renderIdRef.current) {
-              return; // ステイル（古い）な完了メッセージを無視
+              if (bitmap) bitmap.close(); // 不要なリソースを解放
+              return;
             }
-            pendingRendersRef.current--;
-            if (pendingRendersRef.current <= 0) {
-              pendingRendersRef.current = 0;
-              swapBuffers(workerRenderId);
+
+            // ビットマップを蓄積
+            pendingBitmapsRef.current.push({ bitmap, workerIndex });
+
+            // 全てのワーカーからパーツが揃ったら合成
+            if (pendingBitmapsRef.current.length === WORKER_COUNT) {
+              compositeAndSwap(workerRenderId);
             }
           }
-          if (type === "ERROR") console.error(`[Worker ${i}] Error:`, error);
         };
 
         newWorkers.push(worker);
       }
 
-      frontCanvasesRef.current = frontCanvases;
-      backCanvasesRef.current = backCanvases;
       workerRefs.current = newWorkers;
       setWorkerReady(true);
+    },
+    [WORKER_COUNT],
+  );
+
+  // [NEW] ビットマップを合成して表示を切り替える
+  const compositeAndSwap = useCallback(
+    (renderId) => {
+      const bitmaps = pendingBitmapsRef.current;
+      if (bitmaps.length !== WORKER_COUNT) return;
+
+      // 現在のバックバッファを取得
+      const targetCanvas =
+        activeBufferRef.current === 0
+          ? backCanvasRef.current
+          : frontCanvasRef.current;
+      if (!targetCanvas) return;
+      const ctx = targetCanvas.getContext("2d");
+      const { width, height } = currentDimensionsRef.current;
+
+      // クリア & 背景塗りつぶし (ここで一括で行うことでワーカー間の隙間を防ぐ)
+      ctx.imageSmoothingEnabled = false;
+      ctx.fillStyle = "#1a1a2e";
+      ctx.fillRect(0, 0, width, height);
+
+      // 全パーツを合成 (背景色の描画はワーカー側で行われている前提)
+      // 順序は関係ない（インターリーブされているため）
+      bitmaps.forEach(({ bitmap }) => {
+        ctx.drawImage(bitmap, 0, 0);
+        bitmap.close(); // 合成後に解放
+      });
+
+      pendingBitmapsRef.current = [];
+      swapBuffers(renderId);
     },
     [WORKER_COUNT, swapBuffers],
   );
@@ -193,64 +207,56 @@ export const useMultiRenderWorker = (
     [broadcast],
   );
 
-  // Resizer - resize both buffers
-  const resize = useCallback(
-    (width, height) => {
-      broadcast({
-        type: "RESIZE_DUAL",
-        data: { width, height },
-      });
-    },
-    [broadcast],
-  );
+  // Resizer
+  const resize = useCallback((width, height) => {
+    currentDimensionsRef.current = { width, height };
+    if (frontCanvasRef.current) {
+      frontCanvasRef.current.width = width;
+      frontCanvasRef.current.height = height;
+    }
+    if (backCanvasRef.current) {
+      backCanvasRef.current.width = width;
+      backCanvasRef.current.height = height;
+    }
+    // Workers don't need explicit resize dual anymore if we use initInternal/renderInternal
+  }, []);
 
   // [NEW] スロットリング用 - 最小レンダリング間隔 (ms)
   const MIN_RENDER_INTERVAL = 16; // ~60fps
   const lastRenderTimeRef = useRef(0);
 
-  // Render Trigger - render to inactive buffer with throttling
+  // Render Trigger
   const render = useCallback(
     (viewport, width, height) => {
       const now = performance.now();
       const elapsed = now - lastRenderTimeRef.current;
 
-      // スロットリング: 前回のレンダーから十分な時間が経っていない場合はスキップ
-      // ただし、前回のレンダーがまだ完了していない場合もスキップ
-      if (elapsed < MIN_RENDER_INTERVAL && pendingRendersRef.current > 0) {
-        // スキップするが、最後のリクエストは後で処理するためにスケジュール
+      if (
+        elapsed < MIN_RENDER_INTERVAL &&
+        pendingBitmapsRef.current.length > 0
+      ) {
         return;
       }
 
       lastRenderTimeRef.current = now;
       renderIdRef.current++;
       const renderId = renderIdRef.current;
-      pendingRendersRef.current = WORKER_COUNT;
 
-      // 現在表示中でない方のバッファに描画を指示
-      const targetBuffer = activeBufferRef.current === 0 ? "back" : "front";
-
-      broadcast({
-        type: "RENDER_TILES_DUAL",
-        data: { viewport, width, height, targetBuffer, renderId },
-      });
-    },
-    [broadcast, WORKER_COUNT],
-  );
-
-  const renderChunks = useCallback(
-    (data) => {
-      renderIdRef.current++;
-      const renderId = renderIdRef.current;
-      pendingRendersRef.current = WORKER_COUNT;
-      const targetBuffer = activeBufferRef.current === 0 ? "back" : "front";
+      // 不要な古いビットマップがあれば破棄
+      pendingBitmapsRef.current.forEach(({ bitmap }) => bitmap.close());
+      pendingBitmapsRef.current = [];
 
       broadcast({
-        type: "RENDER_CHUNKS_DUAL",
-        data: { ...data, targetBuffer, renderId },
+        type: "RENDER_IMAGE_BITMAP",
+        data: { viewport, width, height, renderId },
       });
     },
-    [broadcast, WORKER_COUNT],
+    [broadcast],
   );
+
+  const renderChunks = useCallback((data) => {
+    // Not implemented for unified mode yet, but could be similar
+  }, []);
 
   return {
     initWorkers,

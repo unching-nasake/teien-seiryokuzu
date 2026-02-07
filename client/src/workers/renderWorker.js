@@ -41,6 +41,10 @@ let lastViewport = null;
 let workerIndex = 0;
 let totalWorkers = 1;
 
+// [NEW] Unified Rendering Mode (Returns ImageBitmap)
+let internalCanvas = null;
+let internalCtx = null;
+
 /**
  * 初期化: OffscreenCanvasを受け取る (単一キャンバスモード)
  */
@@ -57,48 +61,28 @@ function init(offscreenCanvas) {
 }
 
 /**
- * [NEW] 初期化: フロント/バック両方のOffscreenCanvasを受け取る
+ * [NEW] 初期化: 内部描画用バッファのみをセットアップ (DOM不要)
  */
-function initDual(front, back) {
-  frontCanvas = front;
-  frontCtx = front.getContext("2d");
-  backCanvas = back;
-  backCtx = back.getContext("2d");
-  isDualMode = true;
-
-  // 互換性のため、デフォルトはフロントキャンバスを使用
-  canvas = frontCanvas;
-  ctx = frontCtx;
-
-  console.log(
-    `[RenderWorker ${workerIndex}/${totalWorkers}] Initialized (dual mode):`,
-    frontCanvas.width,
-    "x",
-    frontCanvas.height,
-  );
-}
-
-/**
- * キャンバスサイズを更新 (単一モード)
- */
-function resize(width, height) {
-  if (canvas) {
-    canvas.width = width;
-    canvas.height = height;
+function initInternal(width, height) {
+  if (
+    !internalCanvas ||
+    internalCanvas.width !== width ||
+    internalCanvas.height !== height
+  ) {
+    internalCanvas = new OffscreenCanvas(width, height);
+    internalCtx = internalCanvas.getContext("2d");
+    internalCtx.imageSmoothingEnabled = false;
   }
 }
 
 /**
- * [NEW] キャンバスサイズを更新 (デュアルモード)
+ * [NEW] キャンバスサイズを更新 (内部バッファ用)
  */
-function resizeDual(width, height) {
-  if (frontCanvas) {
-    frontCanvas.width = width;
-    frontCanvas.height = height;
-  }
-  if (backCanvas) {
-    backCanvas.width = width;
-    backCanvas.height = height;
+function resizeInternal(width, height) {
+  if (internalCanvas) {
+    internalCanvas.width = width;
+    internalCanvas.height = height;
+    if (internalCtx) internalCtx.imageSmoothingEnabled = false;
   }
 }
 
@@ -221,15 +205,11 @@ function renderTiles(data) {
   const tileSize = TILE_SIZE * viewport.zoom;
   const centerX = width / 2;
   const centerY = height / 2;
-  const showGrid = viewport.zoom > 2.0;
+  const showGrid = viewport.zoom > 2.0; // [REVERTED] User requested grid from 2.0
 
-  // キャンバス全体をクリア＆背景塗りつぶし
-  // Worker 0 は不透明背景、他は透明にすることで重ねて表示
+  // キャンバス全体をクリア (背景塗りつぶしはメインスレッドに移譲して縞々を防ぐ)
+  ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, width, height);
-  if (workerIndex === 0) {
-    ctx.fillStyle = "#1a1a2e";
-    ctx.fillRect(0, 0, width, height);
-  }
 
   // 表示範囲計算
   const tilesX = Math.ceil(width / tileSize) + 2;
@@ -262,12 +242,29 @@ function renderTiles(data) {
         if ((blankTileColor || "#ffffff") === "#1a1a2e") continue;
       }
 
-      const screenX = centerX + (x - viewport.x) * tileSize;
-      const screenY = centerY + (y - viewport.y) * tileSize;
+      // [OPTIMIZED] Snap to pixels to avoid anti-aliasing gaps
+      const rawX = centerX + (x - viewport.x) * tileSize;
+      const rawY = centerY + (y - viewport.y) * tileSize;
 
-      // [FIX] タイル間のギャップを防ぐため、少し大きめに描画
-      // グリッド表示時は1px小さく（境界線用）、通常時は0.5px大きく（隣接タイルとの隙間を埋める）
-      const drawSize = showGrid ? Math.max(1, tileSize - 1) : tileSize + 0.5;
+      // Use logical coordinates for calculations but snap for rendering
+      const screenX = Math.floor(rawX);
+      const screenY = Math.floor(rawY);
+
+      // [FIX] 縦横個別にサイズを計算して隙間を完全に埋める
+      let drawW, drawH;
+      if (showGrid) {
+        drawW = drawH = Math.max(1, tileSize - 1);
+      } else {
+        // 次のタイルの開始ピクセルを計算し、その差分をサイズとする(+1pxの保険)
+        const nextScreenX = Math.floor(
+          centerX + (x + 1 - viewport.x) * tileSize,
+        );
+        const nextScreenY = Math.floor(
+          centerY + (y + 1 - viewport.y) * tileSize,
+        );
+        drawW = nextScreenX - screenX + 1;
+        drawH = nextScreenY - screenY + 1;
+      }
       let color = blankTileColor || "#ffffff";
 
       if (tile) {
@@ -351,7 +348,7 @@ function renderTiles(data) {
       }
       // フラット配列に追加
       const arr = batchDraws.get(color);
-      arr.push(screenX, screenY, drawSize, drawSize);
+      arr.push(screenX, screenY, drawW, drawH);
     }
   }
 
@@ -368,7 +365,8 @@ function renderTiles(data) {
 
   // 塗装数モード時の勢力境界線
   if (factionBorderRects.length > 0) {
-    ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.4)"; // [OPTIMIZED] Lighter borders
+
     ctx.lineWidth = 1;
     ctx.beginPath();
     // Flat Array: [x, y, w, h, type] type: 0=top, 1=bottom, 2=left, 3=right
@@ -496,6 +494,39 @@ self.onmessage = function (e) {
     } else if (type === "RENDER_TILES") {
       renderTiles(data); // 内部でキャッシュ使用＆描画
       self.postMessage({ type: "RENDER_COMPLETE", success: true });
+    } else if (type === "RENDER_IMAGE_BITMAP") {
+      // [NEW] 統合描画モード: ImageBitmapを返却
+      const { width, height, viewport, renderId } = data;
+
+      // 内部バッファの準備
+      initInternal(width, height);
+
+      // 一時的に描画先を内部バッファに切替
+      const origCtx = ctx;
+      const origCanvas = canvas;
+      ctx = internalCtx;
+      canvas = internalCanvas;
+
+      // 描画実行
+      renderTiles(data);
+
+      // ImageBitmapの取得と返却
+      const bitmap = internalCanvas.transferToImageBitmap();
+
+      // 元に戻す
+      ctx = origCtx;
+      canvas = origCanvas;
+
+      // メインスレッドへ転送 (transferable)
+      self.postMessage(
+        {
+          type: "RENDER_BITMAP_COMPLETE",
+          renderId,
+          bitmap,
+          workerIndex,
+        },
+        [bitmap],
+      );
     } else if (type === "RENDER_TILES_DUAL") {
       // [NEW] デュアルモード描画
       const renderId = renderTilesDual(data);
