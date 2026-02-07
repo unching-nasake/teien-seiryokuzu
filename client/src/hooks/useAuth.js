@@ -27,6 +27,7 @@ const useAuth = (factions, addNotification, triggerApEffect) => {
         gardenRefillCost: data.gardenRefillCost,
         gardenRefillAmount: data.gardenRefillAmount,
         apSettings: data.apSettings,
+        mergerSettings: data.mergerSettings, // [NEW] receive merger settings
       });
 
       if (data.player) {

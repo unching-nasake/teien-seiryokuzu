@@ -1609,66 +1609,100 @@ function Sidebar({
                                         </button>
 
                                         {/* 併合要請 (King Only) */}
-                                        {isKing && isMergeEnabled && (
-                                            <div style={{ marginTop: '8px', padding: '6px', background: 'rgba(255,0,0,0.1)', borderRadius: '4px' }}>
-                                                <div className="panel-subtitle" style={{ fontSize: '0.75rem', marginBottom: '4px', color: '#ffaaaa' }}>他勢力への併合要請 (勢力主のみ)</div>
-                                                <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
-                                                    他の勢力に吸収してもらう要請を送ります。受諾されると自勢力は消滅します。
-                                                </p>
+                                        {/* [NEW] ランク制限チェック */}
+                                        {(() => {
+                                            const prohibitedRank = mergerSettings?.prohibitedRank ?? 5; // default 5
+                                            // 0なら制限なし
+                                            let isRestricted = false;
+                                            if (prohibitedRank > 0 && factions) {
+                                                const allFactions = Object.values(factions);
+                                                allFactions.sort((a, b) => (b.totalPoints || 0) - (a.totalPoints || 0));
+                                                // IDリスト作成
+                                                const topIds = allFactions
+                                                    .slice(0, prohibitedRank)
+                                                    .map(f => f.id)
+                                                    .filter(id => id);
+                                                if (playerData.factionId && topIds.includes(playerData.factionId)) {
+                                                    isRestricted = true;
+                                                }
+                                            }
 
-                                                <select
-                                                    className="input"
-                                                    value={mergeTarget}
-                                                    onChange={(e) => setMergeTarget(e.target.value)}
-                                                    style={{ fontSize: '0.8rem', padding: '4px', width: '100%', marginBottom: '4px' }}
-                                                >
-                                                    <option value="">要請先を選択...</option>
-                                                    {currentFaction.pendingMergeTarget && (
-                                                        <option value="CANCEL_PENDING">【要請中：取り消す】</option>
+                                            if (isRestricted) {
+                                                return (
+                                                    <div style={{ marginTop: '8px', padding: '6px', background: 'rgba(255,0,0,0.1)', borderRadius: '4px' }}>
+                                                        <div className="panel-subtitle" style={{ fontSize: '0.75rem', marginBottom: '4px', color: '#999' }}>併合機能制限中</div>
+                                                        <p style={{ fontSize: '0.7rem', color: '#666', marginBottom: '4px' }}>
+                                                            ランキング上位{prohibitedRank}位以内の勢力は、他の勢力に併合申請（吸収）を行うことはできません。
+                                                        </p>
+                                                    </div>
+                                                );
+                                            }
+
+                                            return (
+                                                <>
+                                                    {isKing && isMergeEnabled && (
+                                                        <div style={{ marginTop: '8px', padding: '6px', background: 'rgba(255,0,0,0.1)', borderRadius: '4px' }}>
+                                                            <div className="panel-subtitle" style={{ fontSize: '0.75rem', marginBottom: '4px', color: '#ffaaaa' }}>他勢力への併合要請 (勢力主のみ)</div>
+                                                            <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                                                                他の勢力に吸収してもらう要請を送ります。受諾されると自勢力は消滅します。
+                                                            </p>
+
+                                                            <select
+                                                                className="input"
+                                                                value={mergeTarget}
+                                                                onChange={(e) => setMergeTarget(e.target.value)}
+                                                                style={{ fontSize: '0.8rem', padding: '4px', width: '100%', marginBottom: '4px' }}
+                                                            >
+                                                                <option value="">要請先を選択...</option>
+                                                                {currentFaction.pendingMergeTarget && (
+                                                                    <option value="CANCEL_PENDING">【要請中：取り消す】</option>
+                                                                )}
+                                                                {/* APIから取得した候補を表示 */}
+                                                                {mergeCandidates.map(f => (
+                                                                    <option key={f.id} value={f.id}>
+                                                                        {f.name} ({f.memberCount || 0}人)
+                                                                    </option>
+                                                                ))}
+                                                                {!currentFaction.pendingMergeTarget && mergeCandidates.length === 0 && (
+                                                                    <option value="" disabled>候補なし (中核隣接勢力のみ)</option>
+                                                                )}
+                                                            </select>
+                                                            <button
+                                                                className="btn"
+                                                                disabled={!mergeTarget}
+                                                                onClick={() => {
+                                                                    if (mergeTarget === 'CANCEL_PENDING') {
+                                                                        if (window.confirm('現在の併合要請を取り消しますか？')) {
+                                                                            onMergeCancel();
+                                                                            setMergeTarget('');
+                                                                        }
+                                                                        return;
+                                                                    }
+                                                                    if (!mergeTarget) return;
+                                                                    const targetName = factions[mergeTarget]?.name;
+                                                                    if (window.confirm(`本当に「${targetName}」への併合要請を送信しますか？`)) {
+                                                                        onMergeRequest(mergeTarget);
+                                                                    }
+                                                                }}
+                                                                style={{
+                                                                    width: '100%',
+                                                                    fontSize: '0.8rem',
+                                                                    backgroundColor: mergeTarget === 'CANCEL_PENDING' ? '#ef4444' : (mergeTarget ? '#06b6d4' : '#555'),
+                                                                    color: 'white',
+                                                                    border: 'none',
+                                                                    cursor: mergeTarget ? 'pointer' : 'not-allowed'
+                                                                }}
+                                                            >
+                                                                {mergeTarget === 'CANCEL_PENDING' ? '❌ 取り消す' : '🤝 要請を送信'}
+                                                            </button>
+                                                        </div>
                                                     )}
-                                                    {/* APIから取得した候補を表示 */}
-                                                    {mergeCandidates.map(f => (
-                                                        <option key={f.id} value={f.id}>
-                                                            {f.name} ({f.memberCount || 0}人)
-                                                        </option>
-                                                    ))}
-                                                    {!currentFaction.pendingMergeTarget && mergeCandidates.length === 0 && (
-                                                        <option value="" disabled>候補なし (中核隣接勢力のみ)</option>
+                                                    {isKing && !isMergeEnabled && (
+                                                        <div style={{ fontSize: '0.7rem', color: '#666', marginTop: '4px' }}>※併合機能は無効</div>
                                                     )}
-                                                </select>
-                                                <button
-                                                    className="btn"
-                                                    disabled={!mergeTarget}
-                                                    onClick={() => {
-                                                       if (mergeTarget === 'CANCEL_PENDING') {
-                                                            if (window.confirm('現在の併合要請を取り消しますか？')) {
-                                                                onMergeCancel();
-                                                                setMergeTarget('');
-                                                            }
-                                                            return;
-                                                        }
-                                                        if (!mergeTarget) return;
-                                                        const targetName = factions[mergeTarget]?.name;
-                                                        if (window.confirm(`本当に「${targetName}」への併合要請を送信しますか？`)) {
-                                                            onMergeRequest(mergeTarget);
-                                                        }
-                                                    }}
-                                                    style={{
-                                                        width: '100%',
-                                                        fontSize: '0.8rem',
-                                                        backgroundColor: mergeTarget === 'CANCEL_PENDING' ? '#ef4444' : (mergeTarget ? '#06b6d4' : '#555'),
-                                                        color: 'white',
-                                                        border: 'none',
-                                                        cursor: mergeTarget ? 'pointer' : 'not-allowed'
-                                                    }}
-                                                >
-                                                    {mergeTarget === 'CANCEL_PENDING' ? '❌ 取り消す' : '🤝 要請を送信'}
-                                                </button>
-                                            </div>
-                                        )}
-                                        {isKing && !isMergeEnabled && (
-                                             <div style={{ fontSize: '0.7rem', color: '#666', marginTop: '4px' }}>※併合機能は無効</div>
-                                        )}
+                                                </>
+                                            );
+                                        })()}
                                      </div>
                                 )}
 

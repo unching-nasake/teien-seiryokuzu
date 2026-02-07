@@ -30,6 +30,26 @@ const ACTIVITY_LOG_PATH = path.join(DATA_DIR, "activity_log.json");
 const SYSTEM_NOTICES_PATH = path.join(DATA_DIR, "system_notices.json");
 const FACTION_NOTICES_PATH = path.join(DATA_DIR, "faction_notices.json");
 const SYSTEM_SETTINGS_PATH = path.join(DATA_DIR, "system_settings.json");
+
+// [NEW] Merger Settings Defaults
+const DEFAULT_MERGER_SETTINGS = {
+  prohibitedRank: 5, // Top N factions cannot merge (be absorbed)
+};
+
+// 設定ロード (with defaults)
+const loadSystemSettings = () => {
+  const settings = loadJSON(SYSTEM_SETTINGS_PATH, {});
+  // Merge defaults
+  if (!settings.mergerSettings)
+    settings.mergerSettings = { ...DEFAULT_MERGER_SETTINGS };
+  // Ensure individual properties exist if settings object exists but is partial
+  settings.mergerSettings = {
+    ...DEFAULT_MERGER_SETTINGS,
+    ...settings.mergerSettings,
+  };
+
+  return settings;
+};
 const ALLIANCES_PATH = path.resolve(DATA_DIR, "alliances.json");
 const TRUCES_PATH = path.resolve(DATA_DIR, "truces.json");
 const WARS_PATH = path.resolve(DATA_DIR, "wars.json");
@@ -195,6 +215,24 @@ function runWorkerTask(type, data) {
       wars: WARS_PATH,
       namedCells: NAMED_CELLS_PATH,
     };
+
+    // [NEW] システム設定を注入 (CoreTile設定などWorkerが必要とするため)
+    // 毎回ロードするのは少しコストだが、設定変更を即時反映させるため
+    try {
+      const settings = loadJSON(SYSTEM_SETTINGS_PATH, { isGameStopped: false });
+      if (settings.coreTileSettings) {
+        injectedData.coreTileSettings = settings.coreTileSettings;
+      }
+      // 必要なら他の設定もここで注入可能
+      if (settings.namedTileSettings) {
+        injectedData.namedTileSettings = settings.namedTileSettings;
+      }
+      if (settings.enclaveSettings) {
+        injectedData.enclaveSettings = settings.enclaveSettings;
+      }
+    } catch (e) {
+      console.error("[WorkerDispatch] Failed to load settings for worker:", e);
+    }
 
     worker.postMessage({
       taskId,
@@ -889,6 +927,10 @@ app.get("/api/admin/settings", requireAdminAuth, (req, res) => {
     namedTileSettings: settings.namedTileSettings || {
       cost: 100,
       intervalHours: 0,
+      fallApBonusMin: 10,
+      fallApBonusMax: 50,
+      zocMultiplier: 2.0,
+      zocReducedMultiplier: 1.3,
     },
     accountSettings: settings.accountSettings || {
       maxAccountsPerIp: 2,
@@ -901,6 +943,11 @@ app.get("/api/admin/settings", requireAdminAuth, (req, res) => {
       enabled: false,
       startTime: "01:00",
       endTime: "06:00",
+    },
+    coreTileSettings: settings.coreTileSettings || {
+      attackCostMultiplier: 1.5,
+      instantCoreThreshold: 400,
+      maxCoreTiles: 2500,
     },
   });
 });
@@ -1045,6 +1092,7 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
   const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
     isGameStopped: false,
     adminPassword: null,
+    mergerSettings: { prohibitedRank: 5 },
   });
 
   if (typeof isGameStopped === "boolean") {
@@ -1092,7 +1140,28 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
     req.body.namedTileSettings &&
     typeof req.body.namedTileSettings === "object"
   ) {
-    settings.namedTileSettings = req.body.namedTileSettings;
+    const nt = { ...req.body.namedTileSettings };
+    // バリデーションとデフォルト値設定
+    if (nt.cost === undefined) nt.cost = 100;
+    if (nt.intervalHours === undefined) nt.intervalHours = 0;
+    if (nt.fallApBonusMin === undefined) nt.fallApBonusMin = 10;
+    if (nt.fallApBonusMax === undefined) nt.fallApBonusMax = 50;
+    if (nt.zocMultiplier === undefined) nt.zocMultiplier = 2.0;
+    if (nt.zocReducedMultiplier === undefined) nt.zocReducedMultiplier = 1.3;
+    settings.namedTileSettings = nt;
+  }
+
+  // [NEW] coreTileSettingsの保存
+  if (
+    req.body.coreTileSettings &&
+    typeof req.body.coreTileSettings === "object"
+  ) {
+    const ct = { ...req.body.coreTileSettings };
+    // バリデーションとデフォルト値
+    if (ct.attackCostMultiplier === undefined) ct.attackCostMultiplier = 1.5;
+    if (ct.instantCoreThreshold === undefined) ct.instantCoreThreshold = 400;
+    if (ct.maxCoreTiles === undefined) ct.maxCoreTiles = 2500;
+    settings.coreTileSettings = ct;
   }
 
   // アカウント設定の保存
@@ -1133,6 +1202,13 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
         }
       }
     }
+  }
+
+  // [NEW] 勢力併合設定の保存
+  if (req.body.mergerSettings && typeof req.body.mergerSettings === "object") {
+    const ms = { ...req.body.mergerSettings };
+    if (ms.prohibitedRank === undefined) ms.prohibitedRank = 5;
+    settings.mergerSettings = ms;
   }
 
   // Admin IDの保存
@@ -1180,9 +1256,15 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
         cost: 100,
         intervalHours: 0,
       },
+      coreTileSettings: settings.coreTileSettings || {
+        attackCostMultiplier: 1.5,
+        instantCoreThreshold: 400,
+        maxCoreTiles: 2500,
+      },
     },
     mapImageSettings: settings.mapImageSettings || { intervalMinutes: 1 },
     scheduledAction: settings.scheduledAction || null,
+    mergerSettings: settings.mergerSettings || { prohibitedRank: 5 },
   });
 
   res.json({
@@ -1198,6 +1280,11 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
       cost: 100,
       intervalHours: 0,
     },
+    coreTileSettings: settings.coreTileSettings || {
+      attackCostMultiplier: 1.5,
+      instantCoreThreshold: 400,
+      maxCoreTiles: 2500,
+    },
     accountSettings: settings.accountSettings || {
       maxAccountsPerIp: 2,
       excludedIps: "",
@@ -1207,12 +1294,16 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
       startTime: "01:00",
       endTime: "06:00",
     },
+    mergerSettings: settings.mergerSettings || { prohibitedRank: 5 },
   });
 });
 
 // [NEW] スケジュール実行チェック機能
 function checkScheduledAction() {
-  const settings = loadJSON(SYSTEM_SETTINGS_PATH, { isGameStopped: false });
+  const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
+    isGameStopped: false,
+    mergerSettings: { prohibitedRank: 5 },
+  });
   if (settings.scheduledAction && settings.scheduledAction.time) {
     const scheduledTime = new Date(settings.scheduledAction.time).getTime();
     if (Date.now() >= scheduledTime) {
@@ -1446,7 +1537,10 @@ async function clampFactionSharedAP(
   const faction = factionsData.factions[factionId];
   if (!faction) return false;
 
-  const settings = loadJSON(SYSTEM_SETTINGS_PATH, { apSettings: {} });
+  const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
+    apSettings: {},
+    mergerSettings: { prohibitedRank: 5 },
+  });
   const players = playersJson || loadJSON(PLAYERS_PATH, { players: {} });
   const gameIds = settings.gardenMode
     ? loadJSON(GAME_IDS_PATH, {}, true)
@@ -1545,7 +1639,10 @@ async function processSecretTriggers(isScheduled = false) {
           const factionRank = ranksMap[factionId] || 999;
 
           // [UPDATED] 統一AP計算ロジックを使用
-          const settings = loadJSON(SYSTEM_SETTINGS_PATH, { apSettings: {} });
+          const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
+            apSettings: {},
+            mergerSettings: { prohibitedRank: 5 },
+          });
           const gameIds = settings.gardenMode
             ? loadJSON(GAME_IDS_PATH, {}, true)
             : null;
@@ -1886,6 +1983,7 @@ async function initializeData() {
       isGameStopped: false,
       adminPassword:
         "$2b$10$vo24P/c5vT0DX6Sl8E8/DOsMsTfhhrrPo9.Hzx8Tyew1G8ESJJXsu", // admin
+      mergerSettings: { prohibitedRank: 5 },
     });
   }
 
@@ -2040,7 +2138,10 @@ function handleApRefill(player, players, playerId, saveToDisk = true) {
   };
 
   // 設定読み込み
-  const settings = loadJSON(SYSTEM_SETTINGS_PATH, { apSettings: {} });
+  const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
+    apSettings: {},
+    mergerSettings: { prohibitedRank: 5 },
+  });
   const apConfig = settings.apSettings || {
     apPerPost: 10,
     maxApFromPosts: 10,
@@ -2472,7 +2573,10 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
 
   // [NEW] 共有AP上限の付与
   // 毎回計算は少し重いが、頻繁に変わる(Active人数ベース)ためここで計算する
-  const settings = loadJSON(SYSTEM_SETTINGS_PATH, { apSettings: {} });
+  const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
+    apSettings: {},
+    mergerSettings: { prohibitedRank: 5 },
+  });
   const gameIds = settings.gardenMode
     ? loadJSON(GAME_IDS_PATH, {}, true)
     : null;
@@ -2787,7 +2891,10 @@ function syncPlayerWithGameIdsInternal(player, currentAuthKey, gameIds) {
 async function syncPlayerWithGameIds(player, req, gameIds = null) {
   if (!player) return;
 
-  const settings = loadJSON(SYSTEM_SETTINGS_PATH, { gardenMode: false });
+  const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
+    gardenMode: false,
+    mergerSettings: { prohibitedRank: 5 },
+  });
   if (!settings.gardenMode) return;
 
   if (!gameIds) {
@@ -3036,6 +3143,7 @@ app.post("/api/admin/change-password", requireAdminAuth, async (req, res) => {
     const { currentPassword, newPassword } = req.body;
     const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
       adminPassword: null,
+      mergerSettings: { prohibitedRank: 5 },
     });
 
     if (!(await verifyAdminPassword(currentPassword, settings))) {
@@ -3077,7 +3185,10 @@ app.post("/api/auth/signup", async (req, res) => {
     }
 
     // 庭園モードチェック (アカウント作成時はスキップし、作成後に認証状を表示する)
-    const settings = loadJSON(SYSTEM_SETTINGS_PATH, { gardenMode: false });
+    const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
+      gardenMode: false,
+      mergerSettings: { prohibitedRank: 5 },
+    });
     /*
     if (settings.gardenMode) {
       const today = getTodayString();
@@ -3252,7 +3363,10 @@ app.post("/api/auth/key", async (req, res) => {
 // 新機能：ステータス取得 (ゲスト対応)
 app.get("/api/auth/status", authenticate, async (req, res) => {
   try {
-    const settings = loadJSON(SYSTEM_SETTINGS_PATH, { gardenMode: false });
+    const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
+      gardenMode: false,
+      mergerSettings: { prohibitedRank: 5 },
+    });
     const isGardenMode = settings.gardenMode || false;
     const today = getTodayString();
     const gameIds = loadJSON(GAME_IDS_PATH, {});
@@ -3271,6 +3385,7 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
         gardenMode: isGardenMode,
         gardenAuthKey: guestKey,
         gardenIsAuthorized: getAuthStatus(guestKey),
+        mergerSettings: settings.mergerSettings || { prohibitedRank: 5 }, // [NEW] send to client
       });
     }
 
@@ -5567,6 +5682,7 @@ app.post(
         player,
         action,
         overpaintCount: req.body.overpaintCount || 1,
+        namedTileSettings: loadJSON(SYSTEM_SETTINGS_PATH, {}).namedTileSettings,
       });
     } catch (e) {
       console.error("[PaintProcessing] Worker Error:", e);
@@ -6051,7 +6167,13 @@ app.post(
                   return nData;
                 });
 
-                const apBonus = Math.floor(Math.random() * 41) + 10;
+                const settings = loadJSON(SYSTEM_SETTINGS_PATH, {});
+                const ntSettings = settings.namedTileSettings || {};
+                const minBonus = ntSettings.fallApBonusMin ?? 10;
+                const maxBonus = ntSettings.fallApBonusMax ?? 50;
+                const bonusRange = Math.max(1, maxBonus - minBonus + 1); // Ensure positive range
+                const apBonus =
+                  Math.floor(Math.random() * bonusRange) + minBonus;
                 player.ap = Math.min(AP_MAX_LIMIT, (player.ap || 0) + apBonus);
 
                 io.to(`user:${req.playerId}`).emit("notification:toast", {
@@ -7326,6 +7448,7 @@ app.post(
         player,
         action,
         overpaintCount: req.body.overpaintCount || 1,
+        namedTileSettings: loadJSON(SYSTEM_SETTINGS_PATH, {}).namedTileSettings,
       });
 
       if (!response.success) {
@@ -11743,8 +11866,8 @@ app.post(
       return res.status(403).json({ error: "外交権限がありません" });
     }
 
-    // 併合機能が有効かチェック
-    const settings = loadJSON(SYSTEM_SETTINGS_PATH, { isMergeEnabled: true });
+    // [NEW] 上位勢力制限: 設定されたランク以内の勢力は「吸収される側」になれない
+    const settings = loadSystemSettings(); // Use helper to ensure defaults
     if (settings.isMergeEnabled === false) {
       return res
         .status(403)
@@ -11760,28 +11883,32 @@ app.post(
     if (!targetFaction)
       return res.status(404).json({ error: "対象の勢力が見つかりません" });
 
-    // [NEW] ポイントバリデーション
+    // ポイントバリデーション
     if ((targetFaction.totalPoints || 0) < (myFaction.totalPoints || 0)) {
       return res.status(400).json({
         error: `自分よりポイントの少ない勢力(${targetFaction.name})には併合要請できません`,
       });
     }
 
-    // [NEW] 上位5勢力制限: 上位5勢力は「吸収される側」になれない
-    // (他勢力に併合申請を出せない)
-    const allFactions = Object.values(factions.factions);
-    allFactions.sort((a, b) => (b.totalPoints || 0) - (a.totalPoints || 0));
-    const top5Ids = allFactions
-      .slice(0, 5)
-      .map((f) => f.id)
-      .filter((id) => id); // 有効なIDのみ
+    // Rank Restriction
+    const prohibitedRank = settings.mergerSettings?.prohibitedRank ?? 5;
 
-    // 自分が上位5勢力に入っている場合、他所への併合申請（＝吸収されること）は不可
-    if (top5Ids.includes(myFactionId)) {
-      return res.status(400).json({
-        error:
-          "ランキング上位5勢力は、他の勢力に併合申請（吸収）を行うことはできません。威厳を保ってください！",
-      });
+    // 0の場合は制限なし
+    if (prohibitedRank > 0) {
+      const allFactions = Object.values(factions.factions);
+      allFactions.sort((a, b) => (b.totalPoints || 0) - (a.totalPoints || 0));
+      // Get top N IDs
+      const topIds = allFactions
+        .slice(0, prohibitedRank)
+        .map((f) => f.id)
+        .filter((id) => id);
+
+      // 自分が上位ランクに入っている場合、他所への併合申請（＝吸収されること）は不可
+      if (topIds.includes(myFactionId)) {
+        return res.status(400).json({
+          error: `ランキング上位${prohibitedRank}勢力は、他の勢力に併合申請（吸収）を行うことはできません。威厳を保ってください！`,
+        });
+      }
     }
 
     // --------------------------------------------------------------------------

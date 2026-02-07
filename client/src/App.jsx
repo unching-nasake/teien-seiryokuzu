@@ -3071,6 +3071,7 @@ function App() {
 
 
         isMergeEnabled={authStatus.isMergeEnabled ?? true}
+        mergerSettings={authStatus.mergerSettings} // [NEW] Pass settings
         apSettings={authStatus.apSettings} // [NEW] 設定渡し
         gardenRefillCost={authStatus.gardenRefillCost || 30}
         gardenRefillAmount={authStatus.gardenRefillAmount || 50}

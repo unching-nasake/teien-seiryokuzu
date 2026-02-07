@@ -200,6 +200,9 @@ function calculatePaintCost(
   wars = {}, // 戦争状態のチェック用
   action = "paint",
   overpaintCount = 1,
+  namedTileSettings = {}, // [NEW] 設定受け取り
+  coreTileSettings = {}, // [NEW] CoreTile設定
+  enclaveSettings = {}, // [NEW] 飛び地制限設定
 ) {
   const factionId = player.factionId;
   const faction = (factions.factions || {})[factionId];
@@ -391,7 +394,7 @@ function calculatePaintCost(
           existing.core.factionId === existingFid
         ) {
           const enemyFaction = factions.factions[existingFid];
-          let coreMultiplier = 1.5;
+          let coreMultiplier = coreTileSettings.attackCostMultiplier ?? 1.5;
           if (enemyFaction) {
             const factionAgeHours =
               (Date.now() - new Date(enemyFaction.createdAt).getTime()) /
@@ -497,12 +500,14 @@ function calculatePaintCost(
           };
         }
 
-        // ZOC内（敵拠点隣接）の場合はコスト2倍 (付近に自陣営の中核がある場合は1.3倍)
+        // ZOC内（敵拠点隣接）の場合はコスト増加 (設定値使用)
         if (t.isZoc) {
           if (t.isZocReduced) {
-            base = Math.round(base * 1.3);
+            const mult = namedTileSettings.zocReducedMultiplier ?? 1.3;
+            base = Math.round(base * mult);
           } else {
-            base *= 2;
+            const mult = namedTileSettings.zocMultiplier ?? 2.0;
+            base = Math.round(base * mult);
           }
         }
 
@@ -537,8 +542,15 @@ function calculatePaintCost(
         };
       }
 
-      if (minDist > 25) {
-        const penalty = Math.ceil((minDist - 25) / 1);
+      const limit = enclaveSettings.distanceLimit ?? 25;
+      const unit = enclaveSettings.penaltyUnit ?? 1;
+
+      if (minDist > limit) {
+        // [MOD] 飛び地ペナルティの計算 (単位あたり1コスト増加)
+        // デフォルト: (距離 - 25) / 1
+        const distOver = minDist - limit;
+        const penalty = Math.ceil(distOver / unit);
+
         if (penalty > 0) {
           totalCost += penalty;
           totalPenalty += penalty;
@@ -646,7 +658,16 @@ parentPort.on("message", async (msg) => {
     }
   } else if (type === "PREPARE_PAINT") {
     try {
-      const { tiles, player, action, overpaintCount, filePaths } = data;
+      const {
+        tiles,
+        player,
+        action,
+        overpaintCount,
+        filePaths,
+        namedTileSettings,
+        coreTileSettings, // [NEW] dataから展開
+        enclaveSettings, // [NEW]
+      } = data;
 
       // データが注入されていない場合はディスクから読み込む
       const mapState =
@@ -833,6 +854,9 @@ parentPort.on("message", async (msg) => {
         wars, // [NEW] Pass wars
         action,
         overpaintCount,
+        overpaintCount,
+        namedTileSettings, // [NEW] Pass settings
+        coreTileSettings, // [NEW] Pass core settings
       );
       if (costResult.error)
         return parentPort.postMessage({
@@ -958,7 +982,7 @@ parentPort.on("message", async (msg) => {
     }
   } else if (type === "PROCESS_COREIFICATION") {
     // 中核化維持・確定処理タスク
-    const { filePaths } = data; // 判定対象の勢力IDリスト（空なら全勢力）
+    const { filePaths, coreTileSettings } = data; // [NEW] 設定受け取り
     try {
       const mapState = loadJSON(filePaths.mapState, { tiles: {} });
       const factionsData = loadJSON(filePaths.factions, { factions: {} });
@@ -1028,8 +1052,10 @@ parentPort.on("message", async (msg) => {
             if (tile.core && tile.core.factionId !== fid) return; // 奪取ロジックは別途あるはずだがここでは触らない
 
             let shouldCore = false;
-            // 小規模(400以下)即時 or 大規模1時間
-            if (count <= 400) {
+            // 小規模(閾値以下)即時 or 大規模1時間
+            const instantThreshold =
+              coreTileSettings?.instantCoreThreshold ?? 400;
+            if (count <= instantThreshold) {
               shouldCore = true;
             } else {
               const pTime = new Date(tile.paintedAt || 0).getTime();
@@ -1157,13 +1183,14 @@ parentPort.on("message", async (msg) => {
     }
   } else if (type === "RECALCULATE_CORES") {
     try {
-      const { filePaths } = data;
+      const { filePaths, coreTileSettings } = data;
       const mapState = loadJSON(filePaths.mapState, { tiles: {} });
       const factions = loadJSON(filePaths.factions, { factions: {} });
 
       const { changed, updatedTiles } = recalculateAllFactionCores(
         mapState,
         factions,
+        coreTileSettings,
       );
 
       if (changed) {
@@ -1182,7 +1209,7 @@ parentPort.on("message", async (msg) => {
     }
   } else if (type === "RECALCULATE_CORES_PARTIAL") {
     try {
-      const { factionIds, startY, endY, filePaths } = data;
+      const { factionIds, startY, endY, filePaths, coreTileSettings } = data;
       // Zero-Copy: ディスクから直接読み込み
       const mapState = loadJSON(filePaths.mapState, { tiles: {} }, true);
       // Factions data is needed for expansion logic
@@ -1225,7 +1252,15 @@ parentPort.on("message", async (msg) => {
       // 2. 拡大チェック (部分勢力リスト)
       if (factionIds && factionIds.length > 0) {
         factionIds.forEach((fid) => {
-          if (expandFactionCores(fid, mapState, nowMs, updatedTiles)) {
+          if (
+            expandFactionCores(
+              fid,
+              mapState,
+              nowMs,
+              updatedTiles,
+              coreTileSettings,
+            )
+          ) {
             changed = true;
           }
         });
@@ -1408,7 +1443,7 @@ parentPort.on("message", async (msg) => {
     }
   } else if (type === "CHECK_INTEGRITY_PARTIAL") {
     try {
-      const { startY, endY, filePaths } = data;
+      const { startY, endY, filePaths, coreTileSettings } = data;
 
       // データが注入されていない場合はディスクからロード
       const mapState =
@@ -1580,7 +1615,8 @@ parentPort.on("message", async (msg) => {
               }
             } else {
               // Timer
-              if (!t.core && totalCores < 2500) {
+              const limit = coreTileSettings?.maxCoreTiles ?? 2500;
+              if (!t.core && totalCores < limit) {
                 if (!t.isCorePending) {
                   t.isCorePending = true;
                   t.coreTime = Date.now();
@@ -2205,7 +2241,13 @@ function getClusters(factionId, mapState) {
   return clusters;
 }
 
-function expandFactionCores(fid, mapState, nowMs, updatedTilesAccumulator) {
+function expandFactionCores(
+  fid,
+  mapState,
+  nowMs,
+  updatedTilesAccumulator,
+  coreTileSettings = {},
+) {
   const clusters = getClusters(fid, mapState);
   if (clusters.length === 0) return false;
 
@@ -2215,7 +2257,8 @@ function expandFactionCores(fid, mapState, nowMs, updatedTilesAccumulator) {
 
   clusters.forEach((cluster) => {
     const size = cluster.length;
-    const requiredHours = Math.floor((size - 1) / 500);
+    const threshold = coreTileSettings.instantCoreThreshold ?? 500; // expandのデフォルトは500だったが400に統一するか？一旦既存維持(500)で
+    const requiredHours = Math.floor((size - 1) / threshold);
     const requiredMs = requiredHours * 60 * 60 * 1000;
 
     cluster.forEach((key) => {
@@ -2359,7 +2402,7 @@ function getFactionClusterInfoWorker(
   return { clusters };
 }
 
-function recalculateAllFactionCores(mapState, factions) {
+function recalculateAllFactionCores(mapState, factions, coreTileSettings = {}) {
   const nowMs = Date.now();
   let changed = false;
   const updatedTiles = {};
@@ -2382,7 +2425,9 @@ function recalculateAllFactionCores(mapState, factions) {
   });
 
   Object.keys(factions.factions).forEach((fid) => {
-    if (expandFactionCores(fid, mapState, nowMs, updatedTiles)) {
+    if (
+      expandFactionCores(fid, mapState, nowMs, updatedTiles, coreTileSettings)
+    ) {
       changed = true;
     }
   });

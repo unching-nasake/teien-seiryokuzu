@@ -126,10 +126,54 @@ function updateUI(data) {
   const ntSettings = data.namedTileSettings || {
     cost: 100,
     intervalHours: 0,
+    fallApBonusMin: 10,
+    fallApBonusMax: 50,
+    zocMultiplier: 2.0,
+    zocReducedMultiplier: 1.3,
   };
   document.getElementById("namedTileCost").value = ntSettings.cost;
   document.getElementById("namedTileIntervalHours").value =
     ntSettings.intervalHours;
+  document.getElementById("fallApBonusMin").value =
+    ntSettings.fallApBonusMin ?? 10;
+  document.getElementById("fallApBonusMax").value =
+    ntSettings.fallApBonusMax ?? 50;
+  ntSettings.zocReducedMultiplier ?? 1.3;
+  document.getElementById("zocMultiplier").value =
+    ntSettings.zocMultiplier ?? 2.0;
+  document.getElementById("zocReducedMultiplier").value =
+    ntSettings.zocReducedMultiplier ?? 1.3;
+
+  // [NEW] Core Tile Settings
+  const ctSettings = data.coreTileSettings || {
+    attackCostMultiplier: 1.5,
+    instantCoreThreshold: 400,
+    maxCoreTiles: 2500,
+  };
+  document.getElementById("coreAttackMultiplier").value =
+    ctSettings.attackCostMultiplier ?? 1.5;
+  document.getElementById("instantCoreThreshold").value =
+    ctSettings.instantCoreThreshold ?? 400;
+  document.getElementById("maxCoreTiles").value =
+    ctSettings.maxCoreTiles ?? 2500;
+
+  document.getElementById("maxCoreTiles").value =
+    ctSettings.maxCoreTiles ?? 2500;
+
+  // [NEW] Enclave Settings
+  const enclaveSettings = data.enclaveSettings || {
+    distanceLimit: 25,
+    penaltyUnit: 1,
+  };
+  document.getElementById("enclaveDistanceLimit").value =
+    enclaveSettings.distanceLimit ?? 25;
+  document.getElementById("enclavePenaltyUnit").value =
+    enclaveSettings.penaltyUnit ?? 1;
+
+  // [NEW] Merger Settings
+  const mergerSettings = data.mergerSettings || { prohibitedRank: 5 };
+  document.getElementById("mergerProhibitedRank").value =
+    mergerSettings.prohibitedRank ?? 5;
 
   document.getElementById("adminId").value = data.adminId || "";
 
@@ -314,6 +358,48 @@ async function updateSettings() {
       cost: parseInt(document.getElementById("namedTileCost").value, 10),
       intervalHours: parseFloat(
         document.getElementById("namedTileIntervalHours").value,
+      ),
+      fallApBonusMin: parseInt(
+        document.getElementById("fallApBonusMin").value,
+        10,
+      ),
+      fallApBonusMax: parseInt(
+        document.getElementById("fallApBonusMax").value,
+        10,
+      ),
+      zocMultiplier: parseFloat(document.getElementById("zocMultiplier").value),
+      zocReducedMultiplier: parseFloat(
+        document.getElementById("zocReducedMultiplier").value,
+      ),
+    },
+    coreTileSettings: {
+      attackCostMultiplier: parseFloat(
+        document.getElementById("coreAttackMultiplier").value,
+      ),
+      instantCoreThreshold: parseInt(
+        document.getElementById("instantCoreThreshold").value,
+        10,
+      ),
+      maxCoreTiles: parseInt(document.getElementById("maxCoreTiles").value, 10),
+    },
+    enclaveSettings: {
+      distanceLimit: parseInt(
+        document.getElementById("enclaveDistanceLimit").value,
+        10,
+      ),
+      penaltyUnit: parseInt(
+        document.getElementById("enclavePenaltyUnit").value,
+        10,
+      ),
+      penaltyUnit: parseInt(
+        document.getElementById("enclavePenaltyUnit").value,
+        10,
+      ),
+    },
+    mergerSettings: {
+      prohibitedRank: parseInt(
+        document.getElementById("mergerProhibitedRank").value,
+        10,
       ),
     },
     mapImageSettings: {
