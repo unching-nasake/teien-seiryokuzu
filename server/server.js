@@ -3575,10 +3575,12 @@ app.post("/api/player/name", authenticate, async (req, res) => {
   const cleanName = (displayName || "").replace(/[\s\u200B-\u200D\uFEFF]/g, "");
 
   if (!displayName || cleanName.length === 0) {
-    return res.status(400).json({ error: "表示名を入力してください" });
+    return res.status(400).json({ error: "ユーザー名を入力してください" });
   }
   if (displayName.length > 20) {
-    return res.status(400).json({ error: "表示名は20文字以内にしてください" });
+    return res
+      .status(400)
+      .json({ error: "ユーザー名は20文字以内にしてください" });
   }
 
   try {
@@ -3966,9 +3968,20 @@ app.post(
       typeof autoConsumeSharedAp !== "boolean" &&
       typeof displayName !== "string"
     ) {
-      return res
-        .status(400)
-        .json({ error: "有効な設定値が指定されていません" });
+      return res.json({ error: "有効な設定値が指定されていません" });
+    }
+
+    // displayName のバリデーション
+    if (typeof displayName === "string") {
+      const cleanName = displayName.replace(/[\s\u200B-\u200D\uFEFF]/g, "");
+      if (!displayName.trim() || cleanName.length === 0) {
+        return res.status(400).json({ error: "ユーザー名を入力してください" });
+      }
+      if (displayName.length > 20) {
+        return res
+          .status(400)
+          .json({ error: "ユーザー名は20文字以内にしてください" });
+      }
     }
 
     try {

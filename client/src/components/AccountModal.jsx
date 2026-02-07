@@ -164,7 +164,7 @@ function AccountModal({ playerData, gardenMode, gardenAuthKey, onClose, onAuthUp
 
           {/* Display Name Section */}
           <div className="input-group">
-            <label className="input-label">ユーザー名</label>
+            <label className="input-label">ユーザー名 (最大20文字)</label>
             <div style={{ display: 'flex', gap: '8px' }}>
               <input
                 type="text"
@@ -172,6 +172,7 @@ function AccountModal({ playerData, gardenMode, gardenAuthKey, onClose, onAuthUp
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
                 placeholder="新しいユーザー名"
+                maxLength={20}
                 style={{ flex: 1, background: 'rgba(0,0,0,0.2)' }}
               />
               <button
