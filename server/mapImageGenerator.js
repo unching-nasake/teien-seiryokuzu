@@ -8,8 +8,9 @@ const fs = require("fs");
 
 // 定数
 const MAP_SIZE = 500; // 500x500タイル
-const IMAGE_SIZE = 1200; // 出力画像サイズ (1200x1200px)
-const TILE_SIZE = IMAGE_SIZE / MAP_SIZE; // 2.4px per tile
+const TILE_SIZE = 2; // 1タイルあたり2px
+const PADDING = 150; // 左右上下の余白 (150px)
+const IMAGE_SIZE = MAP_SIZE * TILE_SIZE + PADDING * 2; // = 1300px
 
 // パス設定
 const DATA_DIR = path.join(__dirname, "data");
@@ -120,8 +121,8 @@ async function generateMapImage(mode = "faction_full") {
     ctx.fillStyle = color;
     coords.forEach(({ x, y }) => {
       ctx.fillRect(
-        x * TILE_SIZE,
-        y * TILE_SIZE,
+        PADDING + x * TILE_SIZE,
+        PADDING + y * TILE_SIZE,
         TILE_SIZE + 0.5,
         TILE_SIZE + 0.5,
       );
@@ -157,8 +158,8 @@ async function generateMapImage(mode = "faction_full") {
       // TILE_SIZEでスケール（0.11相当のズームをシミュレート）
       const fontSize = Math.max(6, sizeBase * TILE_SIZE * 0.5);
 
-      const screenX = center.x * TILE_SIZE;
-      const screenY = center.y * TILE_SIZE;
+      const screenX = PADDING + center.x * TILE_SIZE;
+      const screenY = PADDING + center.y * TILE_SIZE;
 
       // 袋文字 (読みやすくするため)
       ctx.font = `bold ${fontSize}px sans-serif`;
