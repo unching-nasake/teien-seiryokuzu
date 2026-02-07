@@ -66,14 +66,24 @@ export function useMapWorkerPool() {
     (type, data) => {
       return new Promise((resolve, reject) => {
         const attemptSend = (attempts = 0) => {
-          const worker = getNextWorker();
-          if (!worker) {
-            if (attempts < 10) {
-              // Worker初期化待ち: 100ms待機して再試行
+          if (workersRef.current.length === 0) {
+            if (attempts < 20) {
+              // Worker初期化待ち: 100ms待機して再試行 (最大2秒)
               setTimeout(() => attemptSend(attempts + 1), 100);
               return;
             }
-            reject(new Error("No worker available after retries"));
+            reject(new Error("No worker available after retries (Pool empty)"));
+            return;
+          }
+
+          const worker = getNextWorker();
+          if (!worker) {
+            // Should not happen if length > 0, but safety check
+            if (attempts < 5) {
+              setTimeout(() => attemptSend(attempts + 1), 100);
+              return;
+            }
+            reject(new Error("No worker available (Worker undefined)"));
             return;
           }
 

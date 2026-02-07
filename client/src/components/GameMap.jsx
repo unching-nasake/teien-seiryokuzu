@@ -1076,26 +1076,53 @@ function GameMap({
 
   // Additional Data Sync is handled by the hook's internal effects
 
+  // Optimize resize handling
+  const lastDimensionsRef = useRef({ width: 0, height: 0 });
+
   // Resize handler
-  const updateCanvasSize = useCallback(() => {
+  const updateCanvasSize = useCallback((entry) => {
       // Use canvasContainerRef for reliable sizing (it's the parent of worker canvases)
       const container = canvasContainerRef.current;
       if (!container) return;
 
-      const width = container.clientWidth;
-      const height = container.clientHeight;
+      // [OPTIMIZATION] Cap pixel ratio to 2 to prevent excessive rendering load on high-DPI screens
+      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
 
-      console.log(`[GameMap] updateCanvasSize: ${width}x${height}`);
+      const width = container.clientWidth; // Use container.clientWidth for actual CSS size
+      const height = container.clientHeight; // Use container.clientHeight for actual CSS size
 
-      if (overlayCanvasRef.current) {
-          overlayCanvasRef.current.width = width;
-          overlayCanvasRef.current.height = height;
-      }
-      setCanvasDimensions({ width, height });
+      const displayWidth = Math.floor(width * pixelRatio);
+      const displayHeight = Math.floor(height * pixelRatio);
 
-      // Sync size to all workers
-      if (resizeWorker) {
-          resizeWorker(width, height);
+      // Avoid redundant updates
+      // This check is important to prevent unnecessary re-renders and worker resizes
+      // if the effective resolution hasn't changed (e.g., due to minor sub-pixel changes in clientWidth/Height)
+      if (
+        lastDimensionsRef.current.width !== displayWidth ||
+        lastDimensionsRef.current.height !== displayHeight
+      ) {
+         lastDimensionsRef.current = { width: displayWidth, height: displayHeight };
+
+         setCanvasDimensions({ width: displayWidth, height: displayHeight });
+
+         // Update CSS size to match display size (for correct scaling)
+         if (canvasContainerRef.current) {
+             // canvas style is handled by CSS (width: 100%, height: 100%)
+             // but internal resolution is set here.
+         }
+
+         if (overlayCanvasRef.current) {
+            overlayCanvasRef.current.width = displayWidth;
+            overlayCanvasRef.current.height = displayHeight;
+         }
+
+         // Resize workers
+         if (resizeWorker) { // Ensure resizeWorker is available
+             resizeWorker(displayWidth, displayHeight);
+         }
+
+         // Trigger render (throttled) - assuming renderAllWorkers is available in scope
+         // renderAllWorkers(viewport, displayWidth, displayHeight); // This line was not in the original context, assuming it's part of a larger change.
       }
 
   }, [resizeWorker]);
