@@ -322,18 +322,18 @@ async function safeRename(oldPath, newPath, retries = 5, delay = 100) {
 }
 
 // [NEW] 管理者IDの読み込み
-let currentAdminId = null;
+let currentAdminIdGlobal = null;
 function loadAdminId() {
   try {
     if (fs.existsSync(ADMIN_ID_PATH)) {
-      currentAdminId = fs.readFileSync(ADMIN_ID_PATH, "utf-8").trim();
-      console.log(`[Admin] Loaded Admin ID: ${currentAdminId}`);
+      currentAdminIdGlobal = fs.readFileSync(ADMIN_ID_PATH, "utf-8").trim();
+      console.log(`[Admin] Loaded Admin ID: ${currentAdminIdGlobal}`);
     } else {
-      currentAdminId = null;
+      currentAdminIdGlobal = null;
     }
   } catch (e) {
     console.error("[Admin] Failed to load admin-id.txt:", e);
-    currentAdminId = null;
+    currentAdminIdGlobal = null;
   }
 }
 
@@ -949,6 +949,7 @@ app.get("/api/admin/settings", requireAdminAuth, (req, res) => {
       instantCoreThreshold: 400,
       maxCoreTiles: 2500,
     },
+    mergerSettings: settings.mergerSettings || { prohibitedRank: 5 }, // [NEW]
   });
 });
 
@@ -1147,8 +1148,29 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
     if (nt.fallApBonusMin === undefined) nt.fallApBonusMin = 10;
     if (nt.fallApBonusMax === undefined) nt.fallApBonusMax = 50;
     if (nt.zocMultiplier === undefined) nt.zocMultiplier = 2.0;
-    if (nt.zocReducedMultiplier === undefined) nt.zocReducedMultiplier = 1.3;
+
     settings.namedTileSettings = nt;
+  }
+
+  // [NEW] Merger Settingsの保存
+  if (req.body.mergerSettings && typeof req.body.mergerSettings === "object") {
+    settings.mergerSettings = {
+      prohibitedRank: parseInt(req.body.mergerSettings.prohibitedRank) || 5, // Default 5
+    };
+  }
+
+  // [NEW] Account Settingsの保存
+  if (
+    req.body.accountSettings &&
+    typeof req.body.accountSettings === "object"
+  ) {
+    if (req.body.accountSettings.maxAccountsPerIp !== undefined) {
+      const val = parseInt(req.body.accountSettings.maxAccountsPerIp, 10);
+      if (!isNaN(val) && val >= 1) {
+        if (!settings.accountSettings) settings.accountSettings = {};
+        settings.accountSettings.maxAccountsPerIp = val;
+      }
+    }
   }
 
   // [NEW] coreTileSettingsの保存
@@ -1212,10 +1234,10 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
   }
 
   // Admin IDの保存
-  let currentAdminId = "";
+  let currentAdminIdLocal = "";
   try {
     if (fs.existsSync(ADMIN_ID_PATH)) {
-      currentAdminId = fs.readFileSync(ADMIN_ID_PATH, "utf-8").trim();
+      currentAdminIdLocal = fs.readFileSync(ADMIN_ID_PATH, "utf-8").trim();
     }
     // eslint-disable-next-line no-unused-vars
   } catch (_e) {
@@ -1223,8 +1245,8 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
   }
 
   if (typeof req.body.adminId === "string") {
-    currentAdminId = req.body.adminId.trim();
-    fs.writeFileSync(ADMIN_ID_PATH, currentAdminId, "utf-8");
+    currentAdminIdLocal = req.body.adminId.trim();
+    fs.writeFileSync(ADMIN_ID_PATH, currentAdminIdLocal, "utf-8");
   }
 
   // スケジュール設定の保存
@@ -1274,7 +1296,7 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
     gardenMode: settings.gardenMode || false,
     apSettings: settings.apSettings || {},
     mapImageSettings: settings.mapImageSettings || { intervalMinutes: 1 },
-    adminId: currentAdminId,
+    adminId: currentAdminIdLocal,
     scheduledAction: settings.scheduledAction || null,
     namedTileSettings: settings.namedTileSettings || {
       cost: 100,
@@ -2532,7 +2554,16 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
 
   // 弱小勢力判定
   let isWeak = false;
-  let adminId = currentAdminId || "";
+  // [NEW] 管理者が所属している勢力は弱小勢力扱いしない（ボーナス無効）
+  // adminId.txt に記載されたIDと一致するプレイヤーがメンバーにいるか確認
+  let hasAdmin = false;
+  if (
+    currentAdminIdGlobal &&
+    f.members &&
+    f.members.includes(currentAdminIdGlobal)
+  ) {
+    hasAdmin = true;
+  }
 
   // 統計情報がある場合はそれからランクを取得、なければメモリ内のキャッシュから取得
   const rankData = preCalcStats?.ranks
@@ -2552,16 +2583,20 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
     );
   }
 
-  // 総人数ではなくアクティブ人数で判定 (preCalcStats の有無に関わらず実行)
-  const isWeakResult = isWeakFactionUnified(
-    rank,
-    activeMemberCount,
-    fid,
-    f.allianceId,
-    top3Alliances,
-  );
-  if (isWeakResult) {
-    isWeak = true;
+  if (hasAdmin) {
+    isWeak = false;
+  } else {
+    // 総人数ではなくアクティブ人数で判定 (preCalcStats の有無に関わらず実行)
+    const isWeakResult = isWeakFactionUnified(
+      rank,
+      activeMemberCount,
+      fid,
+      f.allianceId,
+      top3Alliances,
+    );
+    if (isWeakResult) {
+      isWeak = true;
+    }
   }
 
   // Debug log for weak faction determination (Can be removed after fix)
@@ -2599,7 +2634,7 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
     members: memberInfo,
     activeMemberCount, // 追加
     isWeak,
-    adminId,
+    adminId: currentAdminIdGlobal,
     sharedAPLimit: sharedLimit, // [NEW] クライアント側で表示に使用
   };
 }

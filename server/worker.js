@@ -857,6 +857,7 @@ parentPort.on("message", async (msg) => {
         overpaintCount,
         namedTileSettings, // [NEW] Pass settings
         coreTileSettings, // [NEW] Pass core settings
+        enclaveSettings, // [NEW] Pass enclave settings
       );
       if (costResult.error)
         return parentPort.postMessage({

@@ -170,192 +170,104 @@
         </div>
 
         <div class="section">
-          <!-- ネームドマス設定 -->
-          <div class="card mb-4">
-            <div class="card-header bg-warning text-dark">
-              <i class="bi bi-star-fill me-2"></i>ネームドマス設定 (Named Cell)
+          <h3>⭐ ネームドマス設定 (Named Cell)</h3>
+          <div class="setting-group">
+            <div class="setting-item">
+              <label>作成コスト (AP)</label>
+              <input type="number" id="namedTileCost" />
+              <div class="help-text">ネームドマス作成に必要なAP</div>
             </div>
-            <div class="card-body">
-              <div class="mb-3">
-                <label for="namedTileCost" class="form-label"
-                  >作成コスト (AP)</label
-                >
-                <input type="number" class="form-control" id="namedTileCost" />
-                <div class="form-text">ネームドマス作成に必要なAP</div>
+            <div class="setting-item">
+              <label>作成間隔 (時間)</label>
+              <input type="number" id="namedTileIntervalHours" />
+              <div class="help-text">
+                同じユーザーが次に作成できるまでの待機時間 (0で制限なし)
               </div>
-              <div class="mb-3">
-                <label for="namedTileInterval" class="form-label"
-                  >作成間隔 (時間)</label
-                >
-                <input
-                  type="number"
-                  class="form-control"
-                  id="namedTileInterval"
-                />
-                <div class="form-text">
-                  同じユーザーが次に作成できるまでの待機時間 (0で制限なし)
-                </div>
+            </div>
+            <div class="setting-item">
+              <label>陥落時APボーナス (最小)</label>
+              <input type="number" id="fallApBonusMin" />
+            </div>
+            <div class="setting-item">
+              <label>陥落時APボーナス (最大)</label>
+              <input type="number" id="fallApBonusMax" />
+            </div>
+            <div class="setting-item">
+              <label>ZOC攻撃コスト倍率 (通常)</label>
+              <input type="number" id="zocMultiplier" step="0.1" />
+              <div class="help-text">
+                ZOC下での攻撃コスト倍率 (デフォルト: 2.0)
               </div>
-              <div class="row">
-                <div class="col-md-6 mb-3">
-                  <label for="namedTileFallApMin" class="form-label"
-                    >陥落時APボーナス (最小)</label
-                  >
-                  <input
-                    type="number"
-                    class="form-control"
-                    id="namedTileFallApMin"
-                  />
-                </div>
-                <div class="col-md-6 mb-3">
-                  <label for="namedTileFallApMax" class="form-label"
-                    >陥落時APボーナス (最大)</label
-                  >
-                  <input
-                    type="number"
-                    class="form-control"
-                    id="namedTileFallApMax"
-                  />
-                </div>
-              </div>
-              <div class="row">
-                <div class="col-md-6 mb-3">
-                  <label for="zocMultiplier" class="form-label"
-                    >ZOC攻撃コスト倍率 (通常)</label
-                  >
-                  <input
-                    type="number"
-                    class="form-control"
-                    id="zocMultiplier"
-                    step="0.1"
-                  />
-                  <div class="form-text">
-                    ZOC下での攻撃コスト倍率 (デフォルト: 2.0)
-                  </div>
-                </div>
-                <div class="col-md-6 mb-3">
-                  <label for="zocReducedMultiplier" class="form-label"
-                    >ZOC攻撃コスト倍率 (軽減)</label
-                  >
-                  <input
-                    type="number"
-                    class="form-control"
-                    id="zocReducedMultiplier"
-                    step="0.1"
-                  />
-                  <div class="form-text">
-                    ZOC軽減スキル所持時の倍率 (デフォルト: 1.3)
-                  </div>
-                </div>
+            </div>
+            <div class="setting-item">
+              <label>ZOC攻撃コスト倍率 (軽減)</label>
+              <input type="number" id="zocReducedMultiplier" step="0.1" />
+              <div class="help-text">
+                ZOC軽減スキル所持時の倍率 (デフォルト: 1.3)
               </div>
             </div>
           </div>
+        </div>
 
           <!-- [NEW] 中核マス設定 -->
-          <div class="card mb-4">
-            <div class="card-header bg-danger text-white">
-              <i class="bi bi-shield-lock-fill me-2"></i>中核マス設定 (Core
-              Tile)
-            </div>
-            <div class="card-body">
-              <div class="mb-3">
-                <label for="coreAttackMultiplier" class="form-label"
-                  >攻撃コスト倍率</label
-                >
-                <input
-                  type="number"
-                  class="form-control"
-                  id="coreAttackMultiplier"
-                  step="0.1"
-                />
-                <div class="form-text">
+          <div class="section">
+            <h3>🛡️ 中核マス設定 (Core Tile)</h3>
+            <div class="setting-group">
+              <div class="setting-item">
+                <label>攻撃コスト倍率</label>
+                <input type="number" id="coreAttackMultiplier" step="0.1" />
+                <div class="help-text">
                   中核マスへの攻撃コスト倍率 (デフォルト: 1.5)
                 </div>
               </div>
-              <div class="mb-3">
-                <label for="instantCoreThreshold" class="form-label"
-                  >即時中核化 閾値 (タイル数)</label
-                >
-                <input
-                  type="number"
-                  class="form-control"
-                  id="instantCoreThreshold"
-                />
-                <div class="form-text">
+              <div class="setting-item">
+                <label>即時中核化 閾値 (タイル数)</label>
+                <input type="number" id="instantCoreThreshold" />
+                <div class="help-text">
                   このタイル数以下の勢力は待ち時間なしで即時中核化されます
                   (デフォルト: 400)
                 </div>
               </div>
-              <div class="mb-3">
-                <label for="maxCoreTiles" class="form-label"
-                  >中核マス保有上限 (タイル数)</label
-                >
-                <input type="number" class="form-control" id="maxCoreTiles" />
-                <div class="form-text">
+              <div class="setting-item">
+                <label>中核マス保有上限 (タイル数)</label>
+                <input type="number" id="maxCoreTiles" />
+                <div class="help-text">
                   1勢力が保有できる中核マスの最大数 (デフォルト: 2500)
                 </div>
               </div>
             </div>
           </div>
+
           <!-- [NEW] 飛び地制限設定 -->
-          <div class="card mb-4">
-            <div class="card-header bg-info text-white">
-              <i class="bi bi-diagram-3-fill me-2"></i>飛び地制限設定 (Enclave
-              Restrictions)
-            </div>
-            <div class="card-body">
-              <div class="mb-3">
-                <label for="enclaveDistanceLimit" class="form-label"
-                  >飛び地制限距離 (マスの距離)</label
-                >
-                <input
-                  type="number"
-                  class="form-control"
-                  id="enclaveDistanceLimit"
-                  min="0"
-                />
-                <div class="form-text">
+          <div class="section">
+            <h3>🏝️ 飛び地制限設定 (Enclave Restrictions)</h3>
+            <div class="setting-group">
+              <div class="setting-item">
+                <label>飛び地制限距離 (マスの距離)</label>
+                <input type="number" id="enclaveDistanceLimit" min="0" />
+                <div class="help-text">
                   この距離を超える飛び地作成にはペナルティが発生します
                   (デフォルト: 25)
                 </div>
               </div>
-              <div class="mb-3">
-                <label for="enclavePenaltyUnit" class="form-label"
-                  >ペナルティ発生単位 (マス数)</label
-                >
-                <input
-                  type="number"
-                  class="form-control"
-                  id="enclavePenaltyUnit"
-                  min="1"
-                />
-                <div class="form-text">
+              <div class="setting-item">
+                <label>ペナルティ発生単位 (マス数)</label>
+                <input type="number" id="enclavePenaltyUnit" min="1" />
+                <div class="help-text">
                   制限距離を超えた場合、この単位ごとにコストが+1されます
                   (デフォルト: 1)
                 </div>
               </div>
             </div>
           </div>
-          </div>
 
-          <!-- [NEW] 併合制限設定 -->
-          <div class="card mb-4">
-            <div class="card-header bg-danger text-white">
-              <i class="bi bi-person-x-fill me-2"></i>併合制限設定 (Merger
-              Restrictions)
-            </div>
-            <div class="card-body">
-              <div class="mb-3">
-                <label for="mergerProhibitedRank" class="form-label"
-                  >併合禁止ランク (上位何位まで)</label
-                >
-                <input
-                  type="number"
-                  class="form-control"
-                  id="mergerProhibitedRank"
-                  min="0"
-                />
-                <div class="form-text">
+          <div class="section">
+            <h3>🚫 併合制限設定</h3>
+            <div class="setting-group">
+              <div class="setting-item">
+                <label>併合禁止ランク (上位何位まで)</label>
+                <input type="number" id="mergerProhibitedRank" min="0" />
+                <div class="help-text">
                   指定された順位以内の勢力は、他の勢力に併合申請（吸収されること）を行えません。
                   0の場合は制限なし (デフォルト: 5)
                 </div>

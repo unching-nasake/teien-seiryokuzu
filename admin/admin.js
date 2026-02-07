@@ -172,8 +172,10 @@ function updateUI(data) {
 
   // [NEW] Merger Settings
   const mergerSettings = data.mergerSettings || { prohibitedRank: 5 };
-  document.getElementById("mergerProhibitedRank").value =
-    mergerSettings.prohibitedRank ?? 5;
+  const mergerRankEl = document.getElementById("mergerProhibitedRank");
+  if (mergerRankEl) {
+    mergerRankEl.value = mergerSettings.prohibitedRank ?? 5;
+  }
 
   document.getElementById("adminId").value = data.adminId || "";
 
