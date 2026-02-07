@@ -102,8 +102,31 @@ let allianceMembersCache = null;
 // 構造: { version, data: Map<factionId, number> }
 let factionPointsCache = null;
 
+// [OPTIMIZATION] 勢力別タイルインデックス (factionId -> Set<tileKey>)
+// 構造: { version, data: Map<factionId, Set<tileKey>> }
+let factionTileIndex = null;
+
 // キャッシュバージョン (mapState変更時にインクリメント)
 let cacheVersion = 0;
+
+/**
+ * 勢力別タイルインデックスを構築
+ */
+function buildFactionTileIndex(mapState) {
+  const index = new Map();
+  if (!mapState || !mapState.tiles) return index;
+
+  for (const [key, tile] of Object.entries(mapState.tiles)) {
+    const fid = tile.factionId || tile.faction;
+    if (fid) {
+      if (!index.has(fid)) {
+        index.set(fid, new Set());
+      }
+      index.get(fid).add(key);
+    }
+  }
+  return index;
+}
 
 /**
  * 同盟メンバーSetを取得（キャッシュ利用）
@@ -258,6 +281,14 @@ function ensureCachesValid(mapState, namedCells, factions, alliances) {
   // 勢力ポイントキャッシュのバージョンチェック
   if (factionPointsCache && factionPointsCache.version !== currentVersion) {
     factionPointsCache = null; // バージョン変更で無効化
+  }
+
+  // 勢力タイルインデックスの更新
+  if (!factionTileIndex || factionTileIndex.version !== currentVersion) {
+    factionTileIndex = {
+      version: currentVersion,
+      data: buildFactionTileIndex(mapState),
+    };
   }
 }
 
@@ -873,6 +904,42 @@ parentPort.on("message", async (msg) => {
       const factionsToCalc = new Set(affectedFactionIds);
       factionsToCalc.forEach((fid) => {
         if (factions.factions[fid]) {
+          // Define a local calculateFactionPoints function that uses the index if available
+          const calculateFactionPoints = (
+            factionId,
+            mapState,
+            namedCells = null,
+          ) => {
+            // [OPTIMIZATION] インデックスがあればそれを使用
+            if (
+              factionTileIndex &&
+              factionTileIndex.data &&
+              factionTileIndex.data.has(factionId)
+            ) {
+              let points = 0;
+              const tiles = factionTileIndex.data.get(factionId);
+              for (const key of tiles) {
+                const tile = mapState.tiles[key];
+                // インデックス作成後に変更されている可能性があるので念のためIDチェック
+                if (
+                  tile &&
+                  (tile.factionId === factionId || tile.faction === factionId)
+                ) {
+                  const [x, y] = key.split("_").map(Number);
+                  points += getTilePoints(x, y, namedCells); // Assuming getTilePoints is available in this scope
+                }
+              }
+              return points;
+            }
+
+            // フォールバック: 全探索
+            // Assuming shared.calculateFactionPoints is available or imported
+            return shared.calculateFactionPoints(
+              factionId,
+              mapState,
+              namedCells,
+            );
+          };
           pointUpdates[fid] = calculateFactionPoints(fid, mapState, namedCells);
         }
       });

@@ -95,6 +95,9 @@ cleanupTempFiles(DATA_DIR);
 const app = express();
 const server = http.createServer(app);
 
+// [OPTIMIZATION] HTTP Compression
+app.use(compression());
+
 // [NEW] SharedArrayBuffer有効化のためのCross-Origin-Isolation (COOP/COEP) ヘッダー
 // メインスレッドとWebWorker間でSharedArrayBufferを使用するために必要
 app.use((req, res, next) => {
