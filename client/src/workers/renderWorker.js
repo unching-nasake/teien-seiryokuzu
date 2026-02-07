@@ -116,10 +116,10 @@ function renderTiles(data) {
   const tileSize = TILE_SIZE * viewport.zoom;
   const centerX = width / 2;
   const centerY = height / 2;
-  const showGrid = viewport.zoom > 1.0;
+  const showGrid = viewport.zoom > 2.0;
 
-  // クリア
-  ctx.fillStyle = blankTileColor || "#ffffff";
+  // クリア (宇宙色)
+  ctx.fillStyle = "#1a1a2e";
   ctx.fillRect(0, 0, width, height);
 
   // 表示範囲計算

@@ -193,7 +193,7 @@ function GameMap({
   const labelRegionsRef = useRef([]); // ラベル領域保存用Ref
 
   // [NEW] OffscreenCanvas Worker
-  const { initCanvas, resize: resizeWorker, renderChunks, renderTiles, isReady: workerReady, isSupported } = useRenderWorker();
+  const { initCanvas, resize: resizeWorker, renderChunks, renderTiles, isReady: workerReady, isSupported, canvasTransferred } = useRenderWorker();
   const [useOffscreenCanvas, setUseOffscreenCanvas] = useState(false);
   const offscreenInitializedRef = useRef(false);
 
@@ -485,6 +485,9 @@ function GameMap({
     // --- 以下、メインスレッド描画フォールバック (OffscreenCanvas非対応環境用) ---
 
     // 2Dコンテキスト取得 (OffscreenCanvas転送済みならここでエラーになる可能性があるが、useOffscreenCanvasフラグでガードしている)
+    // [FIX] InvalidStateError防止: 転送済みフラグもチェック
+    if (offscreenInitializedRef.current || canvasTransferred) return;
+
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
@@ -1040,9 +1043,15 @@ function GameMap({
     if (!parent) return;
 
     const resize = () => {
-        if (baseCanvasRef.current) {
-            baseCanvasRef.current.width = parent.clientWidth;
-            baseCanvasRef.current.height = parent.clientHeight;
+        // [FIX] OffscreenCanvasモード時はwidth/heightを直接変更できないためスキップ
+        // 代わりにsetCanvasDimensions経由でWorkerに通知される
+        if (baseCanvasRef.current && !useOffscreenCanvas) {
+            try {
+                baseCanvasRef.current.width = parent.clientWidth;
+                baseCanvasRef.current.height = parent.clientHeight;
+            } catch (e) {
+                // OffscreenCanvas転送済みの場合はエラーになるため無視
+            }
         }
         if (overlayCanvasRef.current) {
             overlayCanvasRef.current.width = parent.clientWidth;
@@ -1063,7 +1072,7 @@ function GameMap({
     return () => {
         observer.disconnect();
     };
-  }, []);
+  }, [useOffscreenCanvas]); // 依存配列にuseOffscreenCanvasを追加
 
   // スクリーン座標からタイル座標へ変換
   const screenToTile = useCallback((screenX, screenY) => {
