@@ -1340,13 +1340,20 @@ function GameMap({
     const minZoom = 0.1;
     // const delta = e.deltaY > 0 ? 0.9 : 1.1;
     setViewport(prev => {
-        let newZoom = prev.zoom;
+        const currentZoom = prev.zoom;
+        let step = 0.25;
+        if (currentZoom < 0.2) {
+            step = 0.01;
+        } else if (currentZoom < 1.0) {
+            step = 0.05;
+        }
+
         if (e.deltaY > 0) {
             // Zoom Out
-            newZoom -= 0.02;
+            newZoom -= step;
         } else {
             // Zoom In
-            newZoom += 0.02;
+            newZoom += step;
         }
         return {
             ...prev,
