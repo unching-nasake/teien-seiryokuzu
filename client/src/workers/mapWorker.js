@@ -384,28 +384,71 @@ self.onmessage = function (e) {
 
       case "CALCULATE_CLUSTERS":
         {
-          // [OPTIMIZED] キャッシュチェック
-          const tilesHash = hashTiles(data.tiles);
-          if (cache.clusters.hash === tilesHash && cache.clusters.result) {
+          // [OPTIMIZED] キャッシュチェック (Versionベース)
+          // mapVersionが渡されていなければハッシュ計算 (互換性)
+          const version = data.mapVersion;
+          let useCache = false;
+
+          if (version !== undefined) {
+            if (cache.clusters.version === version && cache.clusters.result) {
+              useCache = true;
+            }
+          } else {
+            // Fallback to hash
+            const tilesHash = hashTiles(data.tiles);
+            if (cache.clusters.hash === tilesHash && cache.clusters.result) {
+              useCache = true;
+            }
+            // Store hash for next comparison if version not used
+            if (!useCache) cache.clusters.hash = tilesHash;
+          }
+
+          if (useCache) {
             result = cache.clusters.result;
           } else {
             result = calculateClusters(data.tiles);
-            cache.clusters = { hash: tilesHash, result };
+            cache.clusters.result = result;
+            if (version !== undefined) cache.clusters.version = version;
           }
         }
         break;
 
       case "CALCULATE_EDGES":
         {
-          // [OPTIMIZED] 勢力ごとのキャッシュ
-          const tilesHash = hashTiles(data.tiles);
+          // [OPTIMIZED] 勢力ごとのキャッシュ (Versionベース)
+          const version = data.mapVersion;
           const cacheKey = data.factionId;
           const cached = cache.edges.get(cacheKey);
-          if (cached && cached.hash === tilesHash) {
+          let useCache = false;
+
+          // Re-implementing for scope clarity
+          let tilesHash = null;
+          if (version === undefined) {
+            tilesHash = hashTiles(data.tiles);
+            if (cached && cached.hash === tilesHash) {
+              useCache = true;
+            }
+          } else {
+            if (cached && cached.version === version) {
+              useCache = true;
+            }
+          }
+
+          if (useCache && cached) {
             result = cached.result;
           } else {
             result = calculateFactionEdges(data.tiles, data.factionId);
-            cache.edges.set(cacheKey, { hash: tilesHash, result });
+
+            // Update Cache
+            const newCache = { result };
+            if (version !== undefined) {
+              newCache.version = version;
+            } else {
+              newCache.hash = tilesHash;
+            }
+
+            cache.edges.set(cacheKey, newCache);
+
             // キャッシュサイズ制限 (最大50勢力)
             if (cache.edges.size > 50) {
               const firstKey = cache.edges.keys().next().value;

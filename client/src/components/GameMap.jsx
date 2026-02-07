@@ -114,6 +114,10 @@ function GameMap({
   });
   const [canvasDimensions, setCanvasDimensions] = useState({ width: 0, height: 0 });
 
+  // [NEW] Map Version for Worker Cache Optimization
+  // Hash calculation in worker is O(N), so we use a version number O(1)
+  const [mapVersion, setMapVersion] = useState(0);
+
   // [NEW] Multi-Threaded Render Worker Hook
   // Debounce tile updates to avoid excessive transfers
   const [debouncedTileData, setDebouncedTileData] = useState(tiles);
@@ -122,6 +126,7 @@ function GameMap({
      // For 250k tiles, deep compare or copy is expensive.
      // Just pass reference update.
      setDebouncedTileData(tiles);
+     setMapVersion(v => v + 1); // Increment version on update
   }, [tiles]);
 
   const {
@@ -139,7 +144,8 @@ function GameMap({
       {
           blankTileColor,
           highlightCoreOnly,
-          mapColorMode
+          mapColorMode,
+          mapVersion // Pass version to worker
       }
   );
 
@@ -301,7 +307,8 @@ function GameMap({
     // 依存配列は [tiles] のみ
     if (typeof calculateClustersRef.current !== 'function') return;
 
-    calculateClustersRef.current(tiles)
+    // [OPTIMIZED] Pass mapVersion to avoid hashing in worker
+    calculateClustersRef.current(tiles, mapVersion)
       .then(clusterMap => {
         if (!isMounted) return;
 
@@ -368,7 +375,8 @@ function GameMap({
 
     let isMounted = true;
 
-    calculateEdges(tiles, activeFactionId)
+    // [OPTIMIZED] Pass mapVersion
+    calculateEdges(tiles, activeFactionId, mapVersion)
       .then(edges => {
         if (isMounted) {
           setActiveFactionEdges(edges);

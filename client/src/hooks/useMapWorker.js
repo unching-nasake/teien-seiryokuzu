@@ -92,15 +92,17 @@ export function useMapWorker() {
   );
 
   const calculateClusters = useCallback(
-    (tiles) => {
-      return runTask("CALCULATE_CLUSTERS", { tiles });
+    (tiles, mapVersion) => {
+      // [OPTIMIZED] Pass mapVersion
+      return runTask("CALCULATE_CLUSTERS", { tiles, mapVersion });
     },
     [runTask],
   );
 
   const calculateEdges = useCallback(
-    (tiles, factionId) => {
-      return runTask("CALCULATE_EDGES", { tiles, factionId });
+    (tiles, factionId, mapVersion) => {
+      // [OPTIMIZED] Pass mapVersion
+      return runTask("CALCULATE_EDGES", { tiles, factionId, mapVersion });
     },
     [runTask],
   );
