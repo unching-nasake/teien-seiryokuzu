@@ -65,15 +65,23 @@ export function useMapWorkerPool() {
   const sendTask = useCallback(
     (type, data) => {
       return new Promise((resolve, reject) => {
-        const worker = getNextWorker();
-        if (!worker) {
-          reject(new Error("No worker available"));
-          return;
-        }
+        const attemptSend = (attempts = 0) => {
+          const worker = getNextWorker();
+          if (!worker) {
+            if (attempts < 10) {
+              // Worker初期化待ち: 100ms待機して再試行
+              setTimeout(() => attemptSend(attempts + 1), 100);
+              return;
+            }
+            reject(new Error("No worker available after retries"));
+            return;
+          }
 
-        const id = idCounterRef.current++;
-        callbacksRef.current.set(id, { resolve, reject });
-        worker.postMessage({ type, data, id });
+          const id = idCounterRef.current++;
+          callbacksRef.current.set(id, { resolve, reject });
+          worker.postMessage({ type, data, id });
+        };
+        attemptSend();
       });
     },
     [getNextWorker],

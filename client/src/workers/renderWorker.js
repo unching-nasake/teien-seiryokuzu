@@ -12,6 +12,19 @@ const CHUNK_SIZE = 8;
 let canvas = null;
 let ctx = null;
 
+// [Stateful Worker] データキャッシュ
+let cachedTiles = {};
+let cachedFactions = {};
+let cachedAlliances = {};
+let cachedPlayerColors = {};
+let cachedTheme = {
+  blankTileColor: "#ffffff",
+  highlightCoreOnly: false,
+  mapColorMode: "faction",
+};
+// 最後に描画したViewport (不要な再描画防止用)
+let lastViewport = null;
+
 /**
  * 初期化: OffscreenCanvasを受け取る
  */
@@ -98,18 +111,33 @@ function renderChunks(data) {
  * タイル単位で描画 (通常モード)
  */
 function renderTiles(data) {
-  const {
-    viewport,
-    tiles,
-    factions,
-    alliances,
-    mapColorMode,
-    blankTileColor,
-    playerColors,
-    highlightCoreOnly,
-    width,
-    height,
-  } = data;
+  // [Stateful] データが渡されなければキャッシュを使用
+  // RENDER_TILES メッセージでは viewport は必須
+  const viewport = data.viewport || lastViewport;
+  if (!viewport) return; // 表示範囲がなければ描画できない
+  lastViewport = viewport;
+
+  const width = data.width || canvas.width;
+  const height = data.height || canvas.height;
+
+  // データ更新（もし渡されていればキャッシュも更新）
+  if (data.tiles) cachedTiles = data.tiles;
+  if (data.factions) cachedFactions = data.factions;
+  if (data.alliances) cachedAlliances = data.alliances;
+  if (data.playerColors) cachedPlayerColors = data.playerColors;
+
+  // テーマ設定更新
+  if (data.blankTileColor) cachedTheme.blankTileColor = data.blankTileColor;
+  if (data.highlightCoreOnly !== undefined)
+    cachedTheme.highlightCoreOnly = data.highlightCoreOnly;
+  if (data.mapColorMode) cachedTheme.mapColorMode = data.mapColorMode;
+
+  // 描画に使用するデータ
+  const tiles = cachedTiles;
+  const factions = cachedFactions;
+  const alliances = cachedAlliances;
+  const playerColors = cachedPlayerColors;
+  const { blankTileColor, highlightCoreOnly, mapColorMode } = cachedTheme;
 
   if (!ctx || !canvas) return;
 
@@ -252,33 +280,40 @@ function renderTiles(data) {
 }
 
 // メッセージハンドラ
+// メッセージハンドラ
 self.onmessage = function (e) {
   const { type, data } = e.data;
 
   try {
-    switch (type) {
-      case "INIT":
-        init(data.canvas);
-        self.postMessage({ type: "INIT_COMPLETE", success: true });
-        break;
-
-      case "RESIZE":
-        resize(data.width, data.height);
-        self.postMessage({ type: "RESIZE_COMPLETE", success: true });
-        break;
-
-      case "RENDER_CHUNKS":
-        renderChunks(data);
-        self.postMessage({ type: "RENDER_COMPLETE", success: true });
-        break;
-
-      case "RENDER_TILES":
-        renderTiles(data);
-        self.postMessage({ type: "RENDER_COMPLETE", success: true });
-        break;
-
-      default:
-        console.warn("[RenderWorker] Unknown message type:", type);
+    if (type === "INIT") {
+      init(data.canvas);
+      self.postMessage({ type: "INIT_COMPLETE", success: true });
+    } else if (type === "RESIZE") {
+      resize(data.width, data.height);
+      self.postMessage({ type: "RESIZE_COMPLETE", success: true });
+    } else if (type === "UPDATE_TILES") {
+      // [Stateful] タイルデータ更新
+      const { tiles, replace } = data;
+      if (replace) {
+        cachedTiles = tiles || {};
+      } else if (tiles) {
+        Object.assign(cachedTiles, tiles);
+      }
+    } else if (type === "UPDATE_DATA") {
+      // [Stateful] その他データ更新
+      const d = data;
+      if (d.factions) cachedFactions = d.factions;
+      if (d.alliances) cachedAlliances = d.alliances;
+      if (d.playerColors) cachedPlayerColors = d.playerColors;
+      if (d.theme) Object.assign(cachedTheme, d.theme);
+    } else if (type === "RENDER_CHUNKS") {
+      renderChunks(data);
+      self.postMessage({ type: "RENDER_COMPLETE", success: true });
+    } else if (type === "RENDER_TILES") {
+      renderTiles(data); // 内部でキャッシュ使用＆描画
+      self.postMessage({ type: "RENDER_COMPLETE", success: true });
+    } else {
+      console.warn("[RenderWorker] Unknown message type:", type);
     }
   } catch (error) {
     console.error("[RenderWorker] Error:", error);

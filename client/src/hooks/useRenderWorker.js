@@ -102,11 +102,43 @@ export function useRenderWorker() {
   );
 
   /**
+   * タイルデータを更新 (描画はしない)
+   */
+  const updateTiles = useCallback(
+    (tiles, replace = false) => {
+      if (!workerRef.current) return;
+      const msg = { type: "UPDATE_TILES", data: { tiles, replace } };
+      if (isReady) workerRef.current.postMessage(msg);
+      else pendingMessagesRef.current.push(msg);
+    },
+    [isReady],
+  );
+
+  /**
+   * その他データを更新 (描画はしない)
+   */
+  const updateData = useCallback(
+    (data) => {
+      if (!workerRef.current) return;
+      const msg = { type: "UPDATE_DATA", data };
+      if (isReady) workerRef.current.postMessage(msg);
+      else pendingMessagesRef.current.push(msg);
+    },
+    [isReady],
+  );
+
+  /**
    * タイル描画をリクエスト (通常モード)
+   * データはキャッシュ済みのものを使用
    */
   const renderTiles = useCallback(
     (data) => {
       if (!workerRef.current) return;
+
+      // dataにtilesなどが含まれていれば分離して送るべきだが、
+      // ここでは純粋な描画リクエストとして扱う。
+      // ただし、GameMap側で分離しきれていない場合のために、
+      // dataに含まれる情報をそのまま送るとWorker側で処理される(renderWorker改修済み)
 
       const msg = { type: "RENDER_TILES", data };
 
@@ -133,6 +165,8 @@ export function useRenderWorker() {
   return {
     initCanvas,
     resize,
+    updateTiles, // [New]
+    updateData, // [New]
     renderChunks,
     renderTiles,
     isReady,

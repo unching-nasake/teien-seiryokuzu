@@ -193,7 +193,7 @@ function GameMap({
   const labelRegionsRef = useRef([]); // ラベル領域保存用Ref
 
   // [NEW] OffscreenCanvas Worker
-  const { initCanvas, resize: resizeWorker, renderChunks, renderTiles, isReady: workerReady, isSupported, canvasTransferred } = useRenderWorker();
+  const { initCanvas, resize: resizeWorker, updateTiles, updateData, renderChunks, renderTiles, isReady: workerReady, isSupported, canvasTransferred } = useRenderWorker();
   const [useOffscreenCanvas, setUseOffscreenCanvas] = useState(false);
   const offscreenInitializedRef = useRef(false);
 
@@ -219,6 +219,31 @@ function GameMap({
           resizeWorker(canvasDimensions.width, canvasDimensions.height);
       }
   }, [canvasDimensions, useOffscreenCanvas, workerReady, resizeWorker]);
+
+  // [Stateful Worker] データ同期 (Tiles)
+  useEffect(() => {
+      if (useOffscreenCanvas && workerReady) {
+          // タイルデータ更新（全置換: 差分検知はApp側で行うのが理想だが、ここではprop変更を検知して送信）
+          // 移動中はtilesが変わらないので送信されない -> 高速化！
+          updateTiles(tiles, true);
+      }
+  }, [tiles, useOffscreenCanvas, workerReady, updateTiles]);
+
+  // [Stateful Worker] データ同期 (その他)
+  useEffect(() => {
+      if (useOffscreenCanvas && workerReady) {
+          updateData({
+              factions,
+              alliances,
+              playerColors,
+              theme: {
+                  blankTileColor: blankTileColor || '#1a1a2e', // デフォルト宇宙色
+                  highlightCoreOnly,
+                  mapColorMode
+              }
+          });
+      }
+  }, [factions, alliances, playerColors, blankTileColor, highlightCoreOnly, mapColorMode, useOffscreenCanvas, workerReady, updateData]);
 
   // [NEW] 描画スロットリング用
   const lastRenderTimeRef = useRef(0);
@@ -467,15 +492,10 @@ function GameMap({
     if (useOffscreenCanvas) {
         if (!workerReady) return; // Worker準備中
 
+        // Stateful Worker化: 描画リクエストにはデータを含めない (Viewportのみ)
+        // データは別途 useEffect で同期済み
         renderTiles({
             viewport,
-            tiles,
-            factions,
-            alliances,
-            mapColorMode,
-            blankTileColor,
-            playerColors, // Memoized
-            highlightCoreOnly,
             width,
             height
         });
@@ -1045,7 +1065,8 @@ function GameMap({
     const resize = () => {
         // [FIX] OffscreenCanvasモード時はwidth/heightを直接変更できないためスキップ
         // 代わりにsetCanvasDimensions経由でWorkerに通知される
-        if (baseCanvasRef.current && !useOffscreenCanvas) {
+        // canvasTransferred もチェックして転送済みならスキップ
+        if (baseCanvasRef.current && !useOffscreenCanvas && !canvasTransferred) {
             try {
                 baseCanvasRef.current.width = parent.clientWidth;
                 baseCanvasRef.current.height = parent.clientHeight;
