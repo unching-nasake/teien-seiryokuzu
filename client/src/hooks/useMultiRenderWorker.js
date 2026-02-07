@@ -116,14 +116,18 @@ export const useMultiRenderWorker = (
         });
 
         // 描画完了メッセージのリスナー
-        const currentRenderId = renderIdRef.current;
+        // [FIX] 現在のレンダリングIDと一致する場合のみカウント
         worker.onmessage = (e) => {
           const { type, error, renderId: workerRenderId } = e.data;
           if (type === "RENDER_COMPLETE") {
+            // 古いレンダリング要求の完了は無視
+            if (workerRenderId !== renderIdRef.current) {
+              return; // ステイル（古い）な完了メッセージを無視
+            }
             pendingRendersRef.current--;
             if (pendingRendersRef.current <= 0) {
               pendingRendersRef.current = 0;
-              swapBuffers(workerRenderId || renderIdRef.current);
+              swapBuffers(workerRenderId);
             }
           }
           if (type === "ERROR") console.error(`[Worker ${i}] Error:`, error);
