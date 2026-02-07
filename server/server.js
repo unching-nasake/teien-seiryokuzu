@@ -3953,32 +3953,50 @@ app.get("/api/map/history/:filename", authenticate, (req, res) => {
   }
 });
 
-// プレイヤー設定変更
+// プレイヤー設定変更（autoConsumeSharedAp または displayName）
 app.post(
   "/api/player/settings",
   authenticate,
   requireAuth,
   async (req, res) => {
-    const { autoConsumeSharedAp } = req.body;
+    const { autoConsumeSharedAp, displayName } = req.body;
 
-    if (typeof autoConsumeSharedAp !== "boolean") {
-      return res.status(400).json({ error: "Invalid value" });
+    // 両方とも指定されていない場合はエラー
+    if (
+      typeof autoConsumeSharedAp !== "boolean" &&
+      typeof displayName !== "string"
+    ) {
+      return res
+        .status(400)
+        .json({ error: "有効な設定値が指定されていません" });
     }
 
     try {
+      let updatedPlayer = null;
       await updateJSON(PLAYERS_PATH, (data) => {
         const p = data.players[req.playerId];
         if (!p) throw new Error("Player not found");
-        p.autoConsumeSharedAp = autoConsumeSharedAp;
+
+        // autoConsumeSharedAp の更新
+        if (typeof autoConsumeSharedAp === "boolean") {
+          p.autoConsumeSharedAp = autoConsumeSharedAp;
+        }
+
+        // displayName の更新
+        if (typeof displayName === "string" && displayName.trim()) {
+          p.displayName = displayName.trim();
+        }
+
+        updatedPlayer = { ...p };
         return data;
       });
 
-      // updateJSON returns result of callback return? No, it usually returns success boolean or processed logic.
-      // Based on usage above, we don't need return value, updateJSON handles save.
-
-      // 明示的に更新されたプレイヤーを取得して返すのは、updateJSONを信頼するなら冗長だが、
-      // とりあえず成功を返す。
-      res.json({ success: true, autoConsumeSharedAp });
+      res.json({
+        success: true,
+        autoConsumeSharedAp: updatedPlayer?.autoConsumeSharedAp,
+        displayName: updatedPlayer?.displayName,
+        player: updatedPlayer,
+      });
     } catch (e) {
       console.error("Error updating player settings:", e);
       res.status(500).json({ error: "設定の更新に失敗しました" });

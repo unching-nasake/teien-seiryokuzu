@@ -22,7 +22,7 @@ function AccountModal({ playerData, gardenMode, gardenAuthKey, onClose, onAuthUp
       });
       const data = await res.json();
       if (res.ok && data.success) {
-        setSuccess('表示名を更新しました');
+        setSuccess('ユーザー名を更新しました');
         onAuthUpdate(); // Refresh state in App.jsx
       } else {
         setError(data.error || '更新に失敗しました');
@@ -164,14 +164,14 @@ function AccountModal({ playerData, gardenMode, gardenAuthKey, onClose, onAuthUp
 
           {/* Display Name Section */}
           <div className="input-group">
-            <label className="input-label">表示名</label>
+            <label className="input-label">ユーザー名</label>
             <div style={{ display: 'flex', gap: '8px' }}>
               <input
                 type="text"
                 className="input"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
-                placeholder="新しい表示名"
+                placeholder="新しいユーザー名"
                 style={{ flex: 1, background: 'rgba(0,0,0,0.2)' }}
               />
               <button
