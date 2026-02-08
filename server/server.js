@@ -3284,8 +3284,11 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
     totalPoints: factionTotalPoints,
     playerTileCounts,
     playerTilePoints,
+    joinPolicy: f.joinPolicy || "anyone", // Default to anyone
+    activeMemberCount,
+    sharedLimit,
+    hasAdmin,
     members: memberInfo,
-    activeMemberCount, // 追加
     isWeak,
     adminId: currentAdminIdGlobal,
     sharedAPLimit: sharedLimit, // [NEW] クライアント側で表示に使用
@@ -5298,6 +5301,7 @@ app.post(
       sharedAP: 0,
       alliances: [],
       allianceRequests: [],
+      joinPolicy: "anyone", // Default join policy for new factions
     };
 
     // 3. アトミックなDB更新
@@ -12085,7 +12089,7 @@ app.get("/api/factions/:id/join-policy", (req, res) => {
 
   res.json({
     success: true,
-    joinPolicy: faction.joinPolicy || "approval", // デフォルトは承認制
+    joinPolicy: faction.joinPolicy || "anyone", // デフォルトは自由参加
   });
 });
 

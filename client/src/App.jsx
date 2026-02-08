@@ -1608,6 +1608,10 @@ function App() {
     const targetTile = getTile(x, y);
     console.log(`Debug: handleTileClick at (${x},${y})`, targetTile, "MyFaction:", playerData.factionId);
 
+    if (!targetTile) {
+        console.log("Debug: No targetTile found at", x, y);
+    }
+
     // [MOD] forceSelect=true の場合は、参加確認や無所属チェックをスキップして選択処理へ
     if (!forceSelect && targetTile && (targetTile.factionId || targetTile.faction)) {
         const tfid = targetTile.factionId || targetTile.faction;
@@ -2205,6 +2209,8 @@ function App() {
 
         if (data.applied) {
           addNotification(data.message || '加入申請を送信しました', '申請完了');
+        } else {
+          addNotification('勢力に加入しました！', '加入完了', 'success');
         }
       } else {
         alert(data.error || '参加に失敗しました');

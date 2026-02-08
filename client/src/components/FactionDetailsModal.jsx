@@ -396,7 +396,7 @@ const FactionDetailsModal = ({
                      <button className="btn btn-secondary" disabled style={{ width: '100%', opacity: 0.6 }}>募集停止中</button>
                 ) : (
                      <button className="btn btn-primary" style={{ width: '100%' }} onClick={() => onJoinFaction(factionId)}>
-                         {'加入申請を送る'}
+                 {faction.joinPolicy === 'approval' ? '加入申請を送る' : '参加する'}
                      </button>
                 )}
             </div>
