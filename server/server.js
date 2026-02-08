@@ -14766,16 +14766,21 @@ server.listen(PORT, "0.0.0.0", async () => {
       filePaths: {
         mapState: MAP_STATE_PATH,
         factions: FACTIONS_PATH,
+        namedCells: NAMED_CELLS_PATH,
       },
     });
     if (result.success) {
       if (result.results.changed) {
         console.log(
-          `[Init] Consistency check completed. Removed ${result.results.removedCount} invalid tiles.`,
+          `[Init] Consistency check completed. Reset ${result.results.resetCount} tiles, Changed: ${result.results.changed}`,
         );
         if (result.results.mapState) {
           // Workerから受け取った修正済みデータを保存
           await saveJSON(MAP_STATE_PATH, result.results.mapState);
+        }
+        if (result.results.namedCells) {
+          // ネームドマスのクリーンアップ結果を保存
+          await saveJSON(NAMED_CELLS_PATH, result.results.namedCells);
         }
       } else {
         console.log("[Init] Consistency check passed (No issues found).");

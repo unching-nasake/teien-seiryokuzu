@@ -1198,7 +1198,7 @@ parentPort.on("message", async (msg) => {
       if (workerFactionStatsView) {
         // [NEW] Use FactionStatsSAB (O(F)) - Ultra fast
         // Iterate all potential faction indices
-        for (let i = 1; i < MAX_FACTIONS_LIMIT; i++) {
+        for (let i = 0; i < MAX_FACTIONS_LIMIT; i++) {
           const fid = workerIndexToFactionId[i];
           if (!fid) continue;
           const idx = i * STATS_INTS_PER_FACTION;
@@ -1492,7 +1492,7 @@ parentPort.on("message", async (msg) => {
         if (hasSAB) {
           if (workerFactionStatsView) {
             // [NEW] Use FactionStatsSAB (O(F))
-            for (let i = 1; i < MAX_FACTIONS_LIMIT; i++) {
+            for (let i = 0; i < MAX_FACTIONS_LIMIT; i++) {
               const fid = workerIndexToFactionId[i];
               if (!fid || !factionsData.factions[fid]) continue;
 
@@ -3148,47 +3148,63 @@ parentPort.on("message", async (msg) => {
     try {
       const factionsData = loadJSON(filePaths.factions, { factions: {} });
       const validFactionIds = new Set(Object.keys(factionsData.factions));
-      let changed = false;
-      let removedCount = 0;
+      const namedCellsData = filePaths.namedCells
+        ? loadJSON(filePaths.namedCells, {})
+        : null;
 
-      // [NEW] CHECK_CONSISTENCY で mapState.tiles に直接アクセスしているため
-      // これは JSON メンテナンス用タスクとしてそのまま残すが、
-      // 巨大すぎてメモリ制限にかかる場合は SAB スキャンで ID チェックのみ行う形に将来的に移行可能。
-      // 現状はデータのクリーンアップ(削除/移行)を行う唯一の場所なので JSON をロードする。
+      let changed = false;
+      let namedChanged = false;
+      let removedCount = 0;
+      let resetCount = 0;
+
       const mapState = loadJSON(filePaths.mapState, { tiles: {} });
 
+      // 1. マップタイルの整合性チェック
       Object.entries(mapState.tiles).forEach(([key, tile]) => {
-        // 1. 不正な勢力IDチェック
-        const fid = tile.factionId || tile.faction;
-        if (fid && !validFactionIds.has(fid)) {
-          // ゴースト勢力タイル削除
-          delete mapState.tiles[key];
-          removedCount++;
+        // [COMPAT] 勢力IDのプロパティ名を正規化 (faction -> factionId)
+        if (tile.faction && !tile.factionId) {
+          tile.factionId = tile.faction;
+          delete tile.faction;
           changed = true;
         }
 
-        // 2. 自動マイグレーション (faction -> factionId)
-        if (tile.faction) {
-          if (!tile.factionId) {
-            tile.factionId = tile.faction;
+        const fid = tile.factionId;
+        if (fid && !validFactionIds.has(fid)) {
+          // 不明・存在しない勢力の場合：中核マス設定以外をリセット
+          // 削除ではなくリセットすることで、中核マスとしての場所情報を維持する
+          const newTile = { x: tile.x, y: tile.y };
+          if (tile.core) {
+            newTile.core = tile.core;
+            // 中核マスの有効期限などが切れていればここで消すことも可能だが、
+            // ここではデータの整合性（勢力の存在）のみをチェックする
           }
-          delete tile.faction;
+
+          mapState.tiles[key] = newTile;
+          resetCount++;
           changed = true;
         }
       });
 
-      // 変更があった場合のみマップデータを返却 (Server側で保存してもらう)
-      // データ量が大きいため、mapStateそのものを返すか、差分を返すか。
-      // ここではServer側で上書き保存する前提で mapState を返す。
-      // もし変更がなければ null を返す。
+      // 2. ネームドマスの整合性チェック
+      if (namedCellsData) {
+        Object.entries(namedCellsData).forEach(([key, nCell]) => {
+          if (nCell.factionId && !validFactionIds.has(nCell.factionId)) {
+            // 所有勢力が存在しないエントリを削除
+            delete namedCellsData[key];
+            namedChanged = true;
+          }
+        });
+      }
 
       parentPort.postMessage({
         success: true,
         taskId,
         results: {
           mapState: changed ? mapState : null,
-          removedCount,
-          changed,
+          namedCells: namedChanged ? namedCellsData : null,
+          removedCount, // 旧称維持
+          resetCount,
+          changed: changed || namedChanged,
         },
         workerId,
       });
@@ -4514,9 +4530,20 @@ async function checkAllIntegrity(filePaths) {
         // どちらも無効 -> 削除
         diffs.namedCells.deletes.push(key);
         namedUpdated = true;
-        if (tile.namedData) {
-          // delete tile.namedData;
-          const newTile = { ...tile };
+
+        // 勢力自体が存在しない場合、タイル情報をリセット（中核設定は維持）
+        const ownerFid = tile.factionId || tile.faction;
+        const validFactionIds = new Set(Object.keys(factionsData.factions));
+        if (ownerFid && !validFactionIds.has(ownerFid)) {
+          const newTile = { x: tile.x, y: tile.y };
+          if (tile.core) newTile.core = tile.core;
+          diffs.mapState.updates[key] = newTile;
+          mapUpdated = true;
+          log.push(
+            `Reset ghost faction tile ${key} (maintained core) during named cell scan`,
+          );
+        } else if (tile.namedData) {
+          const newTile = diffs.mapState.updates[key] || { ...tile };
           delete newTile.namedData;
           diffs.mapState.updates[key] = newTile;
           mapUpdated = true;
@@ -4559,7 +4586,24 @@ async function checkAllIntegrity(filePaths) {
     }
   }
 
-  // 3. マップの整合性チェック (範囲外タイルの削除)
+  // 3. 全タイルの勢力整合性チェック (JSONロード時のみ詳細チェック)
+  if (!workerMapView) {
+    const validFactionIds = new Set(Object.keys(factionsData.factions));
+    for (const [key, tile] of Object.entries(mapState.tiles)) {
+      const fid = tile.factionId || tile.faction;
+      if (fid && !validFactionIds.has(fid)) {
+        if (!diffs.mapState.updates[key]) {
+          const newTile = { x: tile.x, y: tile.y };
+          if (tile.core) newTile.core = tile.core;
+          diffs.mapState.updates[key] = newTile;
+          mapUpdated = true;
+          log.push(`Reset ghost faction tile ${key} (maintained core)`);
+        }
+      }
+    }
+  }
+
+  // 4. マップの整合性チェック (範囲外タイルの削除)
   Object.keys(mapState.tiles).forEach((key) => {
     const [x, y] = key.split("_").map(Number);
     if (x >= MAP_SIZE || y >= MAP_SIZE) {
