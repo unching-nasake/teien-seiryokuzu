@@ -921,7 +921,7 @@ let pendingActivityLogs = [];
 let activityLogSaveTimer = null;
 const PLAYER_SAVE_INTERVAL = 30 * 1000; // 30 seconds
 const FACTION_SAVE_INTERVAL = 30 * 1000; // 30 seconds
-const LOG_SAVE_INTERVAL = 10 * 1000; // 10 seconds
+const LOG_SAVE_INTERVAL = 30 * 1000; // 30 seconds
 const LOG_BUFFER_THRESHOLD = 50;
 
 // プレイヤーデータの遅延保存
@@ -1508,8 +1508,8 @@ function queueMapUpdateInternal() {
 const pendingChanges = new Map();
 let lastMapSaveTime = Date.now();
 let mapSaveTimer = null;
-const MAP_SAVE_INTERVAL = 60 * 1000; // 1分 (定期フル保存) - 負荷対策しつつ、データロストを最小限に
-const MAP_SAVE_THRESHOLD = 100; // 変更件数閾値 (これを超えたら即保存)
+const MAP_SAVE_INTERVAL = 20 * 1000; // 20秒 (定期フル保存) - 負荷対策しつつ、データロストを最小限に。30秒指定だが余裕を持って20秒。
+const MAP_SAVE_THRESHOLD = 50; // 変更件数閾値 (これを超えたら即保存)
 
 function checkSaveCondition() {
   const now = Date.now();
@@ -6446,11 +6446,7 @@ app.post(
       console.log(`[PaintError] Player ${req.playerId} has no faction`);
       return res.status(400).json({ error: "勢力に所属していません" });
     }
-    const faction =
-      factions.factions[player.factionId] ||
-      loadJSON(FACTIONS_PATH, { factions: {} }, true).factions[
-        player.factionId
-      ];
+    const faction = factions.factions[player.factionId];
 
     // [DEBUG] AP Trace Start
     console.log(
@@ -14680,7 +14676,9 @@ async function gracefulShutdown(signal) {
 
   try {
     // [FIX] Wait for all saves to complete
+    console.log(`[Shutdown] Waiting for ${promises.length} save operations...`);
     await Promise.all(promises);
+    console.log("[Shutdown] All persistence promises resolved.");
   } catch (err) {
     console.error("[Shutdown] Error saving pending data:", err);
   }
