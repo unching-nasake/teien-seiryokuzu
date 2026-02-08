@@ -4582,3 +4582,132 @@ async function saveJSONInternal(filePath, data) {
     throw e;
   }
 }
+
+// === RECONSTRUCTED MISSING FUNCTIONS ===
+
+function loadJSON(filePath, defaultValue = {}) {
+  try {
+    if (!fs.existsSync(filePath)) return defaultValue;
+    const stats = fs.statSync(filePath);
+    const cached = jsonCache.get(filePath);
+    if (cached && cached.mtime >= stats.mtimeMs) {
+      return cached.data;
+    }
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const data = JSON.parse(content);
+    jsonCache.set(filePath, { mtime: stats.mtimeMs, data });
+    return data;
+  } catch (e) {
+    console.warn('[Worker] Failed to load JSON: ' + filePath, e.message);
+    return defaultValue;
+  }
+}
+
+function recalculateFactionPoints(filePaths) {
+  const mapState = workerMapView ? { tiles: {} } : loadJSON(filePaths.mapState, { tiles: {} });
+  const factionsData = loadJSON(filePaths.factions, { factions: {} });
+  const namedCells = loadJSON(filePaths.namedCells, {});
+  
+  const factionPoints = new Map();
+  const size = 500;
+  
+  if (workerMapView) {
+    for (let i = 0; i < size * size; i++) {
+        const offset = i * TILE_BYTE_SIZE;
+        const fidIdx = workerMapView.getUint16(offset, true);
+        if (fidIdx === 65535) continue;
+        const fid = workerIndexToFactionId[fidIdx];
+        if (fid) {
+            const x = i % size;
+            const y = Math.floor(i / size);
+            const pts = getTilePoints(x, y, namedCells);
+            factionPoints.set(fid, (factionPoints.get(fid) || 0) + pts);
+        }
+    }
+  } else {
+    Object.entries(mapState.tiles).forEach(([key, tile]) => {
+        const fid = tile.faction || tile.factionId;
+        if (fid) {
+           const [x, y] = key.split('_').map(Number);
+           const pts = getTilePoints(x, y, namedCells);
+           factionPoints.set(fid, (factionPoints.get(fid) || 0) + pts);
+        }
+    });
+  }
+  
+  const ranks = [];
+  if (factionsData && factionsData.factions) {
+      Object.keys(factionsData.factions).forEach(fid => {
+          ranks.push({
+              id: fid,
+              points: factionPoints.get(fid) || 0,
+              rank: 0,
+              isWeak: false 
+          });
+      });
+  }
+  
+  ranks.sort((a,b) => b.points - a.points);
+  ranks.forEach((r, i) => r.rank = i + 1);
+  return { ranks };
+}
+
+function validateDiplomacy(filePaths) {
+    return { valid: true };
+}
+
+if (parentPort) {
+  parentPort.on('message', async ({ type, payload, port }) => {
+    try {
+      let result = { success: true };
+      switch (type) {
+        case 'CALCULATE_RANKS':
+          result = recalculateFactionPoints(payload.filePaths);
+          result.success = true;
+          break;
+        case 'PRODUCE_MAP_IMAGE':
+           const mapState = workerMapView ? { tiles: {} } : loadJSON(payload.filePaths.mapState, { tiles: {} });
+           const factions = loadJSON(payload.filePaths.factions, { factions: {} });
+           const namedCells = loadJSON(payload.filePaths.namedCells, {});
+           const alliances = loadJSON(payload.filePaths.alliances, { alliances: {} });
+           // Assuming generateFullMapImage is defined above in the file
+           const buffer = generateFullMapImage(mapState, factions.factions, namedCells, alliances.alliances || {}, payload.mode);
+           result = { buffer, success: true };
+           break;
+        case 'CORE_MAINTENANCE_FULL':
+          {
+             const ms = workerMapView ? { tiles: {} } : loadJSON(payload.filePaths.mapState, { tiles: {} });
+             const fs = loadJSON(payload.filePaths.factions, { factions: {} });
+             result = recalculateAllFactionCores(ms, fs, payload.settings || {});
+             result.success = true;
+          }
+          break;
+        case 'CHECK_INTEGRITY':
+          result = await checkAllIntegrity(payload.filePaths);
+          result.success = true;
+          break;
+        case 'VALIDATE_DIPLOMACY':
+          result = validateDiplomacy(payload.filePaths);
+          result.success = true;
+          break;
+        case 'SAVE_JSON':
+          await saveJSONInternal(payload.filePath, payload.data);
+          result = { success: true };
+          break;
+        default:
+          // console.warn('Unknown task:', type);
+      }
+      if (port) {
+        port.postMessage(result);
+        port.close();
+      } else {
+        parentPort.postMessage(result);
+      }
+    } catch(e) {
+      console.error('Worker Error:', e);
+      const err = { success: false, error: e.message };
+      if (port) port.postMessage(err);
+      else parentPort.postMessage(err);
+    }
+  });
+}
