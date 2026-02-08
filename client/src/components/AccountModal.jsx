@@ -163,7 +163,13 @@ function AccountModal({ playerData, gardenMode, gardenAuthKey, onClose, onAuthUp
           )}
 
           {/* Display Name Section */}
-          <div className="input-group">
+          <form
+            className="input-group"
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleUpdateDisplayName();
+            }}
+          >
             <label className="input-label">ユーザー名 (最大20文字)</label>
             <div style={{ display: 'flex', gap: '8px' }}>
               <input
@@ -176,38 +182,47 @@ function AccountModal({ playerData, gardenMode, gardenAuthKey, onClose, onAuthUp
                 style={{ flex: 1, background: 'rgba(0,0,0,0.2)' }}
               />
               <button
+                type="submit"
                 className="btn btn-primary"
-                onClick={handleUpdateDisplayName}
                 disabled={loading || !displayName.trim() || displayName === playerData?.displayName}
                 style={{ padding: '0 16px', fontSize: '0.9rem' }}
               >
                 変更
               </button>
             </div>
-          </div>
+          </form>
 
           {/* Password Section */}
-          <div className="input-group">
+          <form
+            className="input-group"
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleUpdatePassword();
+            }}
+          >
             <label className="input-label">パスワード変更</label>
             <div style={{ display: 'flex', gap: '8px' }}>
               <input
                 type="password"
                 className="input"
+                name="new-password"
+                id="account-new-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="4文字以上"
+                autoComplete="new-password"
                 style={{ flex: 1, background: 'rgba(0,0,0,0.2)' }}
               />
               <button
+                type="submit"
                 className="btn btn-warning"
-                onClick={handleUpdatePassword}
                 disabled={loading || password.length < 4}
                 style={{ padding: '0 16px', fontSize: '0.9rem' }}
               >
                 更新
               </button>
             </div>
-          </div>
+          </form>
 
           <div style={{
             marginTop: '8px',

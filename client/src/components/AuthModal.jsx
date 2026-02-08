@@ -151,6 +151,7 @@ function AuthModal({ onClose, onAuth }) {
             <label className="input-label">パスワード</label>
             <input
               type="password"
+              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
               className="input"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
