@@ -6650,6 +6650,7 @@ app.post(
 
       const stolenCounts = new Map(); // fid -> count
       const updatedTiles = {};
+      let successfulPaintCount = 0; // [NEW] 実際に塗ることに成功したマス数
 
       // Apply Changes
       // 適用処理
@@ -7033,11 +7034,22 @@ app.post(
                 y: t.y,
               });
 
+              // [NEW] 抵抗された場合、強奪カウントから差し引く
+              if (oldFactionId && oldFactionId !== player.factionId) {
+                const cur = stolenCounts.get(oldFactionId) || 0;
+                if (cur > 1) {
+                  stolenCounts.set(oldFactionId, cur - 1);
+                } else {
+                  stolenCounts.delete(oldFactionId);
+                }
+              }
+
               continue; // 陥落しなかった場合は以降の所有権更新をスキップ
             }
           }
 
           // 所有権変更の適用 (標準)
+          successfulPaintCount++; // [NEW] 成功カウントアップ
           let tileToUpdate = oldTile;
           if (!tileToUpdate) {
             tileToUpdate = { x: t.x, y: t.y };
@@ -7148,6 +7160,8 @@ app.post(
             ...tileToUpdate,
             paintedByName: playerDisplayName,
           };
+          // 重ね塗りのパスは冒頭の `if (action === "overpaint")` で処理されているため、
+          // successfulPaintCount はここで通常塗装/所有権変更時のみ加算される
         }
 
         // --- [NEW] 接続済み飛び地の即時中核化スイープ (Worker分散版) ---
@@ -7489,21 +7503,23 @@ app.post(
         );
       }
 
-      // 2. 攻撃ログ (勢力ごと)
-      logActivity("tiles_painted", {
-        playerId: req.playerId,
-        playerShortId: toShortId(req.playerId),
-        playerName: playerDisplayName,
-        roleName: roleName,
-        factionId: player.factionId,
-        factionName: faction.name,
-        painterName: playerDisplayName,
-        count: tiles.length,
-        destruction: destructionInvolved,
-        x: tiles[0].x,
-        y: tiles[0].y,
-        action: action, // [NEW] paint or overpaint
-      });
+      // 2. 攻撃ログ (全体拡張) - 成功したマスがある場合のみ
+      if (successfulPaintCount > 0) {
+        logActivity("tiles_painted", {
+          playerId: req.playerId,
+          playerShortId: toShortId(req.playerId),
+          playerName: playerDisplayName,
+          roleName: roleName,
+          factionId: player.factionId,
+          factionName: faction.name,
+          painterName: playerDisplayName,
+          count: successfulPaintCount,
+          destruction: destructionInvolved,
+          x: tiles[0].x,
+          y: tiles[0].y,
+          action: action, // [NEW] paint or overpaint
+        });
+      }
 
       // --- [REMOVED] 旧ジャイアントキリング報酬ロジック ---
       // 仕様変更に伴い削除: AP消費前の確率コスト0化に移行済み。
