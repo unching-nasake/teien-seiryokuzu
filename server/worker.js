@@ -3703,7 +3703,7 @@ parentPort.on("message", async (msg) => {
 });
 
 // 全体マップ画像生成関数 (3パターンモード対応)
-// mode: "faction_full" (勢力名+ネームドマス), "faction_simple" (なし), "alliance" (同盟名)
+// mode: "faction_full" (勢力名のみ), "faction_simple" (なし), "alliance" (同盟名)
 function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
   const TILE_SIZE = 2; // 500x500タイルの場合、2pxで1000px
   const isSimple = mode === "faction_simple";
@@ -3999,7 +3999,7 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
     }
   }
 
-  // ネームドセルのラベルを描画（faction_fullモードのみ）
+  // ネームセルのラベル(★)を描画（faction_fullモードのみ）
   if (mode === "faction_full") {
     ctx.font = "bold 10px NotoSansJP, NotoEmoji, sans-serif";
     Object.values(namedCells).forEach((cell) => {
@@ -4009,16 +4009,6 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
       // ★マーカー
       ctx.fillStyle = "#FFD700";
       ctx.fillText("★", screenX, screenY - 8);
-
-      // 名前ラベル（小さめ + 縁取り）
-      if (cell.name) {
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = "#000000";
-        ctx.strokeText(cell.name, screenX, screenY + 8);
-
-        ctx.fillStyle = "#ffffff";
-        ctx.fillText(cell.name, screenX, screenY + 8);
-      }
     });
   }
 
