@@ -5878,7 +5878,7 @@ app.post(
   },
 );
 
-// [NEW] 他勢力へのメッセージ送信 (ポイント通知) - 5AP消費
+// [NEW] 他勢力へのメッセージ送信 (外交メッセージ) - 5AP消費
 app.post(
   "/api/factions/:factionId/message",
   authenticate,
@@ -5962,7 +5962,7 @@ app.post(
       }
 
       // 通知の作成
-      const noticeTitle = "ポイント通知 (メッセージ)";
+      const noticeTitle = "外交メッセージ";
       const noticeContent = `【差出人】${senderFactionName}：${senderName}\n\n${message}`;
 
       await addFactionNotice(

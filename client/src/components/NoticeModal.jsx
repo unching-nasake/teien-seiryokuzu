@@ -18,11 +18,13 @@ function NoticeModal({ notices, readNoticeIds, onClose, onMarkAllRead, onShowDet
         ) return 'other';
 
         // 「外交」：戦争、同盟、併合、割譲、停戦、滅亡など
-        if (n.type === 'diplomacy' ||
+        if (n.type === 'diplomacy' || n.type === 'message' ||
             title.includes("開戦") || title.includes("宣戦布告") || title.includes("戦争勝利") || title.includes("戦況変化") || title.includes("戦争終結") ||
             title.includes("同盟") || title.includes("停戦") || title.includes("併合") ||
             title.includes("割譲") || title.includes("領土割譲") ||
             title.includes("滅亡") || title.includes("滅亡のお知らせ") ||
+            title.includes("外交メッセージ") ||
+            title.includes("ポイント通知") ||
             text.includes("戦争") || text.includes("同盟") || text.includes("併合")
         ) return 'diplomacy';
 
