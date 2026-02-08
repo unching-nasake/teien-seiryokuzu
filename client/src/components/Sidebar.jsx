@@ -376,7 +376,7 @@ function Sidebar({
       } finally {
         setIsEstimating(false);
       }
-    }, 1500); // 1.5秒のデバウンス - サーバー最適化により短縮
+    }, 1000); // 1秒のデバウンス
 
     return () => clearTimeout(timer);
   }, [selectedTiles, overpaintTargetCount]);

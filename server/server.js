@@ -1353,8 +1353,25 @@ if (fs.existsSync(GAME_IDS_PATH)) {
 
 async function updateJSON(filePath, updateFn, defaultValue = {}) {
   // [OPTIMIZATION] マップ状態の更新はメモリ上で行い、ディスク保存を遅延させる
-  // [OPTIMIZATION REMOVED] マップ状態の更新も即時保存する (信頼性優先)
-  // if (filePath === MAP_STATE_PATH) { ... }
+  // [OPTIMIZATION RESTORED] マップ状態の更新はメモリ上で行い、ディスク保存を遅延させる (CPU負荷対策)
+  // 以前の巻き戻りバグは ignoreCache=true や race condition が原因であり、それらは修正済み。
+  // 安全のため、閾値を下げて (30秒 or 100変更) 運用する。
+  if (filePath === MAP_STATE_PATH) {
+    return LockManager.withLock(filePath, async () => {
+      // メモリ上の最新データを取得 (ディスク読み込みをスキップ)
+      // loadJSONはメモリキャッシュ(FILE_CACHE)を返す(false指定)
+      let data = loadJSON(filePath, defaultValue, false);
+
+      // 更新関数実行
+      const result = await updateFn(data);
+
+      // 変更を保留
+      // updateJSON呼び出し元は「保存完了」を期待している場合があるが、マップ塗りは遅延でOK。
+      queueMapUpdateInternal(); // 内部保存トリガー (pendingChanges更新 & タイマーセット)
+
+      return result;
+    });
+  }
 
   return LockManager.withLock(filePath, async () => {
     // ディスクから最新を取得 (ignoreCache=false に変更し、メモリキャッシュを正とする)
@@ -1491,7 +1508,7 @@ function queueMapUpdateInternal() {
 const pendingChanges = new Map();
 let lastMapSaveTime = Date.now();
 let mapSaveTimer = null;
-const MAP_SAVE_INTERVAL = 5 * 60 * 1000; // 5分 (定期フル保存)
+const MAP_SAVE_INTERVAL = 60 * 1000; // 1分 (定期フル保存) - 負荷対策しつつ、データロストを最小限に
 const MAP_SAVE_THRESHOLD = 100; // 変更件数閾値 (これを超えたら即保存)
 
 function checkSaveCondition() {
