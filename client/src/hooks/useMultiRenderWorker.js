@@ -27,8 +27,8 @@ export const useMultiRenderWorker = (
   // Determine number of workers
   const concurrency =
     typeof navigator !== "undefined" ? navigator.hardwareConcurrency || 4 : 4;
-  // [OPTIMIZED] Leave one core for the main thread (UI and compositing)
-  const WORKER_COUNT = concurrency >= 2 ? concurrency - 1 : 1;
+  // [OPTIMIZED] vCPU数が4未満の場合は全コア、4以上の場合はUIスレッド用に1コア空ける
+  const WORKER_COUNT = concurrency < 4 ? concurrency : concurrency - 1;
 
   // [NEW] バッファスワップ関数 - visibility切り替え
   const swapBuffers = useCallback((renderId) => {

@@ -652,8 +652,8 @@ app.use((req, res, next) => {
 // ワーカープールの初期化
 const { Worker } = require("worker_threads");
 const numCPUs = require("os").cpus().length;
-// [OPTIMIZATION] APIレスポンスとSocket.ioの安定性のために、論理コア数 - 1 のWorkerを使用
-const numWorkers = numCPUs >= 2 ? numCPUs - 1 : 1;
+// [OPTIMIZATION] vCPU数が4未満の場合は全コアを使用、4以上の場合は安定性のため1コア空ける
+const numWorkers = numCPUs < 4 ? numCPUs : numCPUs - 1;
 const isPM2 = process.env.NODE_APP_INSTANCE !== undefined;
 
 const workers = [];
