@@ -3827,18 +3827,42 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
 
   // 勢力の中心点を計算
   const factionCenters = {};
-  Object.entries(mapState.tiles).forEach(([key, tile]) => {
-    const fid = tile.faction || tile.factionId;
-    if (!fid) return;
 
-    const [x, y] = key.split("_").map(Number);
-    if (!factionCenters[fid]) {
-      factionCenters[fid] = { sumX: 0, sumY: 0, count: 0 };
+  if (workerMapView) {
+    // [NEW] SAB対応: mapState.tiles が空でもSABから重心を計算可能
+    const size = 500;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const offset = (y * size + x) * TILE_BYTE_SIZE;
+        const fidIdx = workerMapView.getUint16(offset, true);
+        if (fidIdx === 65535) continue;
+
+        const fid = workerIndexToFactionId[fidIdx];
+        if (!fid) continue;
+
+        if (!factionCenters[fid]) {
+          factionCenters[fid] = { sumX: 0, sumY: 0, count: 0 };
+        }
+        factionCenters[fid].sumX += x;
+        factionCenters[fid].sumY += y;
+        factionCenters[fid].count++;
+      }
     }
-    factionCenters[fid].sumX += x;
-    factionCenters[fid].sumY += y;
-    factionCenters[fid].count++;
-  });
+  } else {
+    // Fallback: Legacy JSON Scan
+    Object.entries(mapState.tiles).forEach(([key, tile]) => {
+      const fid = tile.faction || tile.factionId;
+      if (!fid) return;
+
+      const [x, y] = key.split("_").map(Number);
+      if (!factionCenters[fid]) {
+        factionCenters[fid] = { sumX: 0, sumY: 0, count: 0 };
+      }
+      factionCenters[fid].sumX += x;
+      factionCenters[fid].sumY += y;
+      factionCenters[fid].count++;
+    });
+  }
 
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
@@ -4001,14 +4025,14 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
 
   // ネームセルのラベル(★)を描画（faction_fullモードのみ）
   if (mode === "faction_full") {
-    ctx.font = "bold 10px NotoSansJP, NotoEmoji, sans-serif";
+    ctx.font = "bold 7px NotoSansJP, NotoEmoji, sans-serif";
     Object.values(namedCells).forEach((cell) => {
       const screenX = curPaddingX + cell.x * TILE_SIZE + TILE_SIZE / 2;
       const screenY = curPaddingY + cell.y * TILE_SIZE + TILE_SIZE / 2;
 
       // ★マーカー
       ctx.fillStyle = "#FFD700";
-      ctx.fillText("★", screenX, screenY - 8);
+      ctx.fillText("★", screenX, screenY - 4);
     });
   }
 
