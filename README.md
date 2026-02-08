@@ -76,9 +76,15 @@ pm2 start ecosystem.config.js
 ### Webサーバー設定例 (Apache)
 
 Apache を使用して外部に公開する場合は、リバースプロキシ設定を行います。
-`mod_proxy`, `mod_proxy_http` 等を有効にし、設定ファイルに以下のようなプロキシ設定を追加してください。
+`mod_proxy`, `mod_proxy_http` 等を有効にし、サイト設定ファイルに以下のようなプロキシ設定を追加してください。
 
 ```apache
+# Socket.IOのWebSocket転送設定 (RewriteEngine)
+RewriteEngine On
+RewriteCond %{REQUEST_URI}  ^/socket.io            [NC]
+RewriteCond %{QUERY_STRING} transport=websocket    [NC]
+RewriteRule /(.*)           ws://localhost:3001/$1 [P,L]
+# 通常のHTTPリクエストの転送設定
 ProxyPass / http://localhost:3001/
 ProxyPassReverse / http://localhost:3001/
 ```
