@@ -7345,24 +7345,8 @@ app.post(
                   },
                 );
 
-                // [NEW] 通知履歴にも保存
-                addFactionNotice(
-                  `user:${memberId}`,
-                  "勢力滅亡",
-                  `${destroyedFaction.name} は ${faction.name} によって滅ぼされました。`,
-                  null,
-                  {
-                    destroyedBy: faction.name,
-                    destroyedFaction: destroyedFaction.name,
-                  },
-                  null,
-                  "system",
-                ).catch((err) =>
-                  console.error(
-                    `[DestructionNoticeError] Failed for ${memberId}:`,
-                    err,
-                  ),
-                );
+                // [FIX] 以前ここにあった addFactionNotice (勢力滅亡) は、
+                // 下部の「所属勢力の滅亡」に統合されたため削除
               });
             }
 
@@ -7473,26 +7457,32 @@ app.post(
           io.emit("faction:updated", { factionId: fId, faction: null });
         });
 
-        // [Fix 1] 滅亡した勢力のメンバーに通知を保存
-        const noticesData = loadJSON(FACTION_NOTICES_PATH, {});
+        // [Fix 1] 滅亡した勢力のメンバーに通知を保存 (addFactionNoticeを使うように統一)
         destroyedFactions.forEach(
           ({ name: destroyedFactionName, members: oldMembers }) => {
             if (oldMembers && Array.isArray(oldMembers)) {
               oldMembers.forEach((mid) => {
-                const personalKey = `user:${mid}`;
-                if (!noticesData[personalKey]) noticesData[personalKey] = [];
-                noticesData[personalKey].push({
-                  id: `notice-destroy-${Date.now()}-${mid}`,
-                  title: "所属勢力の滅亡",
-                  content: `${faction.name} との戦争により、所属していた勢力 ${destroyedFactionName} は滅亡しました。`,
-                  date: new Date().toISOString(),
-                  type: "system",
-                });
+                addFactionNotice(
+                  `user:${mid}`,
+                  "所属勢力の滅亡",
+                  `${faction.name} との戦争により、所属していた勢力 ${destroyedFactionName} は滅亡しました。`,
+                  null,
+                  {
+                    destroyedBy: faction.name,
+                    destroyedFaction: destroyedFactionName,
+                  },
+                  null,
+                  "system",
+                ).catch((err) =>
+                  console.error(
+                    `[DestructionNoticeError2] Failed for ${mid}:`,
+                    err,
+                  ),
+                );
               });
             }
           },
         );
-        saveJSON(FACTION_NOTICES_PATH, noticesData);
       }
 
       // 2. 攻撃ログ (勢力ごと)

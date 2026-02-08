@@ -997,10 +997,11 @@ function App() {
     });
 
     socket.on('faction:destroyed', ({ factionId }) => {
-      // 自分の勢力が滅亡した場合のみアラートを表示
+      // 自分の勢力が滅亡した場合のクリーンアップのみ行う
+      // 通知は 'faction:destroyed_notification' が大きなポップアップを出すため、ここでは出さない
       setPlayerData(prev => {
         if (prev && prev.factionId === factionId) {
-          addNotification('所属していた勢力が滅亡しました。\n新たな勢力を作成するか、他の勢力参加してください。', '勢力滅亡');
+          // addNotification('所属していた勢力が滅亡しました。\n新たな勢力を作成するか、他の勢力参加してください。', '勢力滅亡');
           document.cookie = "game2_factionId=; max-age=0; path=/";
           return { ...prev, factionId: null };
         }
