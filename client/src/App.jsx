@@ -37,6 +37,28 @@ const NotificationStack = React.memo(({ notifications, onRemove }) => {
   );
 });
 
+const getCookieName = (baseName) => {
+  const host = window.location.hostname;
+  const isIP = /^(\d+\.){3}\d+$/.test(host);
+  if (isIP) return baseName;
+
+  const parts = host.split('.');
+  let subdomain = null;
+
+  if (host === 'localhost') {
+    // no subdomain
+  } else if (host.endsWith('localhost')) {
+     if (parts.length >= 2) subdomain = parts[0];
+  } else {
+     // e.g. game2.teien.com -> parts.length 3
+     if (parts.length >= 3) subdomain = parts[0];
+  }
+
+  if (subdomain) return `${subdomain}_${baseName}`;
+  return baseName;
+};
+
+
 const getTodayStr = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -687,6 +709,7 @@ function App() {
 
 
   useEffect(() => {
+    console.log("[SocketDebug] Setting up socket listeners. Cookies:", document.cookie.substring(0, 50) + "...");
     socket.on('connect', () => {
         setConnected(true);
 
@@ -1003,7 +1026,7 @@ function App() {
       setPlayerData(prev => {
         if (prev && prev.factionId === factionId) {
           // addNotification('所属していた勢力が滅亡しました。\n新たな勢力を作成するか、他の勢力参加してください。', '勢力滅亡');
-          document.cookie = "game2_factionId=; max-age=0; path=/";
+          document.cookie = `${getCookieName("factionId")}=; max-age=0; path=/`;
           return { ...prev, factionId: null };
         }
         return prev;
@@ -1321,15 +1344,22 @@ function App() {
 
     // お知らせのリアルタイム更新
     socket.on('faction:notice', (data) => {
+        console.log("[NoticeDebug] Received faction:notice:", data);
+        addNotificationRef.current("[Debug] Notice Event received! FID: " + data.factionId, "System Debug");
         const currentP = playerDataRef.current;
-        // data は { factionId, notice } の形式
-        if (currentP && data.factionId === currentP.factionId) {
-            console.log("Real-time notice received!", data.notice);
+        if (!currentP) {
+            console.log("[NoticeDebug] Blocked: No current player data");
+            return;
+        }
+        if (data.factionId !== currentP.factionId) {
+            console.log(`[NoticeDebug] Blocked: Faction mismatch. Target: ${data.factionId}, Current: ${currentP.factionId}`);
+            return;
+        }
 
-            // 権限チェック
-            const myFaction = factionsRef.current[currentP.factionId];
-            if (myFaction && data.notice.requiredPermission) {
-                const isKing = myFaction.kingId === currentP.id;
+        // 権限チェック
+        const myFaction = factionsRef.current[currentP.factionId];
+        if (myFaction && data.notice.requiredPermission) {
+            const isKing = myFaction.kingId === currentP.id;
                 let myPermissions = {};
                 if (myFaction.memberRoles && myFaction.memberRoles[currentP.id]) {
                     const roleId = myFaction.memberRoles[currentP.id];
@@ -1364,7 +1394,6 @@ function App() {
 
             // トースト通知も出す (視認性向上)
             addNotificationRef.current(data.notice.content, data.notice.title || "お知らせ");
-        }
     });
 
     // [NEW] グローバルお知らせのリアルタイム更新 (運営通知など)
@@ -1423,7 +1452,7 @@ function App() {
                 factionId: data.newFactionId,
             }));
             // Cookie更新
-            document.cookie = `game2_factionId=${data.newFactionId}; path=/; max-age=604800`;
+            document.cookie = `${getCookieName("factionId")}=${data.newFactionId}; path=/; max-age=604800`;
             addNotification(`新しい所属勢力：${data.newFactionName}`, '勢力併合');
         }
     });
@@ -2176,7 +2205,7 @@ function App() {
     setShowCreateFaction(false);
     setPendingOrigin(null);
     // Cookieに保存
-    document.cookie = `game2_factionId=${faction.id}; max-age=${60*60*24*30}; path=/`;
+    document.cookie = `${getCookieName("factionId")}=${faction.id}; max-age=${60*60*24*30}; path=/`;
 
     // プレイヤー情報再取得
     fetch('/api/player', { credentials: 'include' })
@@ -2200,7 +2229,7 @@ function App() {
 
       if (data.success) {
         // Cookieに保存
-        document.cookie = `game2_factionId=${factionId}; max-age=${60 * 60 * 24 * 30}; path=/`;
+        document.cookie = `${getCookieName("factionId")}=${factionId}; max-age=${60 * 60 * 24 * 30}; path=/`;
 
         fetch('/api/player', { credentials: 'include' })
           .then(res => res.json())
@@ -2240,7 +2269,7 @@ function App() {
 
       if (data.success) {
         // Cookie削除
-        document.cookie = "game2_factionId=; max-age=0; path=/";
+        document.cookie = `${getCookieName("factionId")}=; max-age=0; path=/`;
         // プレイヤー情報再取得
         fetch('/api/player', { credentials: 'include' })
           .then(res => res.json())

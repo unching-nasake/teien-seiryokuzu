@@ -857,6 +857,9 @@ const getCookieName = (req, baseName) => {
   if (!req || !req.headers || !req.headers.host) return baseName;
 
   const host = req.headers.host.split(":")[0]; // remove port
+  const isIP = /^(\d+\.){3}\d+$/.test(host);
+  if (isIP) return baseName;
+
   const parts = host.split(".");
 
   // localhost (parts=1) or example.com (parts=2) -> no prefix
@@ -3349,33 +3352,25 @@ async function addFactionNotice(
   console.log(`[Notice] Added to ${factionId}: ${title} (ID: ${notice.id})`);
 
   // リアルタイム通知
-  if (requiredPermission) {
-    // 権限が必要な場合は個別に送信
-    const roomName = `faction:${factionId}`;
-    const sockets = await io.in(roomName).fetchSockets();
-    const factions = loadJSON(FACTIONS_PATH, { factions: {} });
-    const faction = factions.factions[factionId];
+  const roomName = `faction:${factionId}`;
+  const room = io.sockets.adapter.rooms.get(roomName);
+  const occupantCount = room ? room.size : 0;
+  console.log(
+    `[NoticeDebug] Emitting to ${roomName}. Occupants: ${occupantCount}`,
+  );
 
-    for (const socket of sockets) {
-      // socket.playerId は接続ハンドラで設定される（実装されていれば）
-      // または見つける必要がある。カスタマイズされた接続ハンドラが socket.playerId を設定する。
-      if (
-        socket.playerId &&
-        hasPermission(faction, socket.playerId, requiredPermission)
-      ) {
-        socket.emit("faction:notice", {
-          factionId,
-          notice,
-        });
-      }
-    }
-  } else {
-    // 制限なしなら一斉送信
-    io.to(`faction:${factionId}`).emit("faction:notice", {
-      factionId,
-      notice,
-    });
-  }
+  // [Diagnostic] List all active faction rooms
+  const activeFactionRooms = Array.from(io.sockets.adapter.rooms.keys()).filter(
+    (r) => r.startsWith("faction:"),
+  );
+  console.log(
+    `[NoticeDebug] Active faction rooms: ${activeFactionRooms.join(", ") || "NONE"}`,
+  );
+
+  io.to(roomName).emit("faction:notice", {
+    factionId,
+    notice,
+  });
 
   return notice;
 }
@@ -13854,20 +13849,41 @@ app.post(
 // イベント駆動で実装:
 io.on("connection", (socket) => {
   let playerId = null;
+  const handshakeCookies = socket.handshake.headers.cookie;
+  const host = socket.handshake.headers.host;
+
+  console.log(
+    `[SocketDebug] New connection: ${socket.id}, Host: ${host}, CookieHeader: ${handshakeCookies ? handshakeCookies.substring(0, 30) + "..." : "MISSING"}`,
+  );
+
   try {
     // cookie-parserは使えないので手動パース
     const cookies = socket.handshake.headers.cookie;
     if (cookies) {
-      const cookieName = getCookieName(socket.handshake, "persistentId");
-      const match = cookies.match(new RegExp(`${cookieName}=([^;]+)`));
-      if (match) playerId = match[1];
+      // 1. ダイナミックな名前 (game2_persistentId 等) をトライ
+      let cookieName = getCookieName(socket.handshake, "persistentId");
+      let match = cookies.match(new RegExp(`${cookieName}=([^;]+)`));
+
+      // 2. なければプレフィックスなし (persistentId) をトライ (localhost等での不一致対策)
+      if (!match) {
+        match = cookies.match(/persistentId=([^;]+)/);
+      }
+
+      if (match) {
+        playerId = match[1];
+        console.log(`  - Identified PlayerID from cookie: ${playerId}`);
+      } else {
+        console.log(`  - No player ID cookie found`);
+      }
     }
-  } catch {
-    // Ignore integrity errors in background
+  } catch (err) {
+    console.log(`  - Error parsing cookies: ${err.message}`);
   }
 
   if (playerId) {
     socket.playerId = playerId;
+    socket.data = socket.data || {};
+    socket.data.playerId = playerId;
     socket.join(`user:${playerId}`);
 
     // playerSocketMap に登録
@@ -13876,14 +13892,23 @@ io.on("connection", (socket) => {
     }
     playerSocketMap.get(playerId).add(socket);
 
-    const players = loadJSON(PLAYERS_PATH, { players: {} });
+    // [FIX] ignoreCache=true を指定して、最新のプレイヤーデータを取得する
+    const players = loadJSON(PLAYERS_PATH, { players: {} }, true);
     const p = players.players[playerId];
+
     if (p && p.factionId) {
-      socket.join(`faction:${p.factionId}`);
+      const room = `faction:${p.factionId}`;
+      console.log(`  - Joining faction room: ${room}`);
+      socket.join(room);
+    } else {
+      console.log(
+        `  - Faction not found for player: p=${!!p}, fid=${p?.factionId}`,
+      );
     }
 
     throttledUpdateOnlineCount();
   } else {
+    console.log(`  - Anonymous connection: ${socket.id}`);
     throttledUpdateOnlineCount();
   }
 
