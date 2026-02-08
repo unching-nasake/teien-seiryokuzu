@@ -21,9 +21,17 @@ const TILE_COUNT = MAP_SIZE * MAP_SIZE;
 const TILE_BYTE_SIZE = 24;
 const TOTAL_SIZE = TILE_COUNT * TILE_BYTE_SIZE;
 
+// [NEW] ZOC & Stats Constants
+const ZOC_SIZE = TILE_COUNT * 2; // Uint16
+const MAX_FACTIONS = 2000;
+const STATS_INTS = 16;
+const STATS_SIZE = MAX_FACTIONS * STATS_INTS * 4; // Int32 = 4 bytes
+
 export function useWorldState() {
   // SharedArrayBufferの初期化 (一回のみ)
   const sabRef = useRef(new SharedArrayBuffer(TOTAL_SIZE));
+  const zocSabRef = useRef(new SharedArrayBuffer(ZOC_SIZE));
+  const statsSabRef = useRef(new SharedArrayBuffer(STATS_SIZE));
   const [version, setVersion] = useState(0);
 
   // マッピング用キャッシュ (ID -> Index)
@@ -144,21 +152,51 @@ export function useWorldState() {
   );
 
   // 外部からのマッピング同期 (初期ロード時など)
-  const importMappings = useCallback((data) => {
-    if (!data) return;
-    const { factionsList, playerNames } = data;
+  const importMappings = useCallback(
+    ({ factionsList, playerList, playerNames }) => {
+      if (factionsList) {
+        factionListRef.current = [...factionsList];
+        factionMapRef.current = new Map(factionsList.map((id, i) => [id, i]));
+      }
+      // [MOD] playerList(Array) を優先的に使用。なければ playerNames の key を使用(互換性)
+      const pIds =
+        playerList || (playerNames ? Object.keys(playerNames) : null);
+      if (pIds) {
+        playerListRef.current = [...pIds];
+        playerMapRef.current = new Map(pIds.map((id, i) => [id, i + 1]));
+      }
+      setVersion((v) => v + 1);
+    },
+    [],
+  );
 
-    if (factionsList) {
-      factionListRef.current = [...factionsList];
-      factionMapRef.current = new Map(factionsList.map((id, i) => [id, i]));
-    }
-    if (playerNames) {
-      const pIds = Object.keys(playerNames);
-      playerListRef.current = pIds;
-      playerMapRef.current = new Map(pIds.map((id, i) => [id, i + 1]));
-    }
-    setVersion((v) => v + 1);
-  }, []);
+  // [NEW] Helper to update Faction Stats SAB directly from JSON
+  const updateFactionStats = useCallback(
+    (factionData) => {
+      if (!factionData || !factionData.id) return;
+
+      // Stats SAB Layout (matches server/server.js)
+      // Offset 0: Tiles (Int32)
+      // Offset 1: Cores (Int32)
+      // Offset 4: Points (Int32)
+      // Stride: 16 Int32s (64 bytes)
+
+      const idx = getFactionIndex(factionData.id);
+      if (idx === 65535) return; // Unknown faction
+
+      const intIdx = idx * STATS_INTS;
+      const i32View = new Int32Array(statsSabRef.current);
+
+      // Atomics.store is safer for concurrent reads by workers
+      if (typeof factionData.tiles === "number")
+        Atomics.store(i32View, intIdx + 0, factionData.tiles);
+      if (typeof factionData.cores === "number")
+        Atomics.store(i32View, intIdx + 1, factionData.cores);
+      if (typeof factionData.points === "number")
+        Atomics.store(i32View, intIdx + 4, factionData.points);
+    },
+    [getFactionIndex],
+  );
 
   const getTile = useCallback((x, y) => {
     if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) return null;
@@ -170,8 +208,19 @@ export function useWorldState() {
     const paintedByIdx = dv.getUint32(offset + 6, true);
     const overpaint = dv.getUint8(offset + 10);
     const flags = dv.getUint8(offset + 11);
-    const exp = dv.getFloat64(offset + 16, true); // Alignment fixed
+    const exp = dv.getFloat64(offset + 12, true); // [FIX] Offset 12
     const pAtSec = dv.getUint32(offset + 20, true);
+
+    const safeISOString = (ms) => {
+      if (!ms || typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0)
+        return null;
+      try {
+        const d = new Date(ms);
+        return isNaN(d.getTime()) ? null : d.toISOString();
+      } catch (e) {
+        return null;
+      }
+    };
 
     const factionId = fidIdx === 65535 ? null : factionListRef.current[fidIdx];
     const color = factionId
@@ -179,7 +228,7 @@ export function useWorldState() {
       : "#ffffff";
     const paintedBy =
       paintedByIdx === 0 ? null : playerListRef.current[paintedByIdx - 1];
-    const paintedAt = pAtSec ? new Date(pAtSec * 1000).toISOString() : null;
+    const paintedAt = safeISOString(pAtSec ? pAtSec * 1000 : 0);
 
     const tile = {
       x,
@@ -197,11 +246,11 @@ export function useWorldState() {
     if (flags & 1) {
       tile.core = {
         factionId,
-        expiresAt: exp > 0 ? new Date(exp).toISOString() : null,
+        expiresAt: safeISOString(exp),
       };
     }
     if (flags & 2) {
-      tile.coreificationUntil = new Date(exp).toISOString();
+      tile.coreificationUntil = safeISOString(exp);
       tile.coreificationFactionId = factionId;
     }
 
@@ -228,5 +277,10 @@ export function useWorldState() {
     // ID逆引き用
     factionsList: factionListRef.current,
     playersList: playerListRef.current,
+    // [NEW] Expose SABs
+    sab: sabRef.current,
+    zocSab: zocSabRef.current,
+    statsSab: statsSabRef.current,
+    updateFactionStats,
   };
 }

@@ -119,20 +119,34 @@ function GameMap({
   const mapVersion = version;
 
   // [NEW] SharedArrayBufferからタイル情報を読み取るヘルパー
-  const getTile = useCallback((x, y) => {
-    if (!tileData || !tileData.sab) return null;
-    if (x < 0 || x >= 500 || y < 0 || y >= 500) return null;
+  // DataViewをキャッシュしてGCを抑制
+  const sabView = useMemo(() => {
+      if (tileData && tileData.sab) return new DataView(tileData.sab);
+      return null;
+  }, [tileData]);
 
-    const sabView = new DataView(tileData.sab);
-    const offset = (y * 500 + x) * 24; // TILE_BYTE_SIZE = 24
+  // 高速なFactionID取得 (オブジェクト生成なし)
+  const getFactionIdRaw = useCallback((x, y) => {
+    if (!sabView) return null;
+    if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) return null; // MAP_SIZE constant
+    const offset = (y * MAP_SIZE + x) * 24;
+    const fidIdx = sabView.getUint16(offset + 0, true);
+    return fidIdx === 65535 ? null : (tileData.factionsList ? tileData.factionsList[fidIdx] : null);
+  }, [sabView, tileData]);
+
+  const getTile = useCallback((x, y) => {
+    if (!sabView) return null;
+    if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) return null;
+
+    const offset = (y * MAP_SIZE + x) * 24; // TILE_BYTE_SIZE = 24
 
     const fidIdx = sabView.getUint16(offset + 0, true);
     const colorInt = sabView.getUint32(offset + 2, true);
     const paintedByIdx = sabView.getUint32(offset + 6, true);
     const overpaint = sabView.getUint8(offset + 10);
     const flags = sabView.getUint8(offset + 11);
-    // offset 12-15 padding
-    const exp = sabView.getFloat64(offset + 16, true); // Alignment fixed
+    // offset 12-19 float64
+    const exp = sabView.getFloat64(offset + 12, true); // [FIX] Offset 12
     const pAtSec = sabView.getUint32(offset + 20, true);
 
     const factionId = fidIdx === 65535 ? null : (tileData.factionsList ? tileData.factionsList[fidIdx] : null);
@@ -161,7 +175,7 @@ function GameMap({
     }
 
     return tile;
-  }, [tileData]);
+  }, [sabView, tileData, blankTileColor]);
 
   // [NEW] Multi-Threaded Render Worker Hook
   // Debounce tile updates to avoid excessive transfers
@@ -708,11 +722,11 @@ function GameMap({
 
         if (viewport.zoom > 0.3) {
             ctx.fillStyle = `rgba(255, 255, 255, ${alpha * 0.2})`;
-            // 画面内ループ (SABから一致チェック)
+            // 画面内ループ (SABから直接読み取り、オブジェクト生成なし)
             for (let x = Math.max(0, startX); x <= Math.min(MAP_SIZE - 1, endX); x++) {
                 for (let y = Math.max(0, startY); y <= Math.min(MAP_SIZE - 1, endY); y++) {
-                    const t = getTile(x, y);
-                    if (t && (t.faction || t.factionId) === activeFactionId) {
+                    const fid = getFactionIdRaw(x, y);
+                    if (fid === activeFactionId) {
                         const screenX = centerX + (x - viewport.x) * tileSize;
                         const screenY = centerY + (y - viewport.y) * tileSize;
                         ctx.fillRect(screenX, screenY, tileSize, tileSize);
@@ -1089,16 +1103,17 @@ function GameMap({
                               screenY: e.clientY
                           };
                       }
-                      return {
-                        x: hoverTile.x,
-                        y: hoverTile.y,
-                        screenX: e.clientX,
-                        screenY: e.clientY,
-                        factionName: fName,
-                        factionId: tData?.factionId,
-                        painterName: pName,
-                        core: coreData
-                      };
+                        return {
+                          x: hoverTile.x,
+                          y: hoverTile.y,
+                          screenX: e.clientX,
+                          screenY: e.clientY,
+                          factionName: fName,
+                          factionId: tData?.factionId,
+                          paintedBy: tData?.paintedBy, // [FIX] IDを保存
+                          painterName: pName,
+                          core: coreData
+                        };
                     });
                     // タップ位置のハイライトセット
                     setTapHighlight({ x: hoverTile.x, y: hoverTile.y });
@@ -1392,6 +1407,7 @@ function GameMap({
                                    screenY: touch.clientY,
                                    factionName: fName,
                                    painterName: pName,
+                                   paintedBy: tData?.paintedBy, // [FIX] IDを保存
                                    factionId: tData?.faction || tData?.factionId,
                                    core: coreData
                                };
@@ -1522,7 +1538,7 @@ function GameMap({
             <div>座標: ({hoverTile.x}, {hoverTile.y})</div>
             <div>ポイント: {getTilePoints(hoverTile.x, hoverTile.y, namedCells)}pt</div>
             {factionName && <div>勢力: {factionName}</div>}
-            {painterName && <div>塗った人: {painterName}</div>}
+            {painterName && painterName !== 'Unknown' && <div>塗った人: {painterName}</div>}
            </div>
         );
       })()}
@@ -1579,11 +1595,15 @@ function GameMap({
                   勢力: {tilePopup.factionName}
                 </div>
               )}
-              {tilePopup.paintedBy && (
-                <div className="popup-detail">
-                  塗: {playerNames[tilePopup.paintedBy] || tilePopup.paintedBy}
-                </div>
-              )}
+              {(() => {
+                const pName = tilePopup.painterName || (playerNames[tilePopup.paintedBy] || tilePopup.paintedBy);
+                if (!pName || pName === 'Unknown') return null;
+                return (
+                  <div className="popup-detail">
+                    塗った人: {pName}
+                  </div>
+                );
+              })()}
 
               {/* Overpaint & Named Tile Info */}
               {(() => {
@@ -1676,7 +1696,7 @@ function GameMap({
             <button
               className="popup-action-btn"
               onClick={() => {
-                onTileClick(tilePopup.x, tilePopup.y);
+                onTileClick(tilePopup.x, tilePopup.y, true);
                 setTilePopup(null);
               }}
             >

@@ -129,7 +129,7 @@ function updateUI(data) {
     fallApBonusMin: 10,
     fallApBonusMax: 50,
     zocMultiplier: 2.0,
-    zocReducedMultiplier: 1.3,
+    zocReducedMultiplier: 1.5,
   };
   document.getElementById("namedTileCost").value = ntSettings.cost;
   document.getElementById("namedTileIntervalHours").value =
@@ -138,13 +138,14 @@ function updateUI(data) {
     ntSettings.fallApBonusMin ?? 10;
   document.getElementById("fallApBonusMax").value =
     ntSettings.fallApBonusMax ?? 50;
-  ntSettings.zocReducedMultiplier ?? 1.3;
   document.getElementById("zocMultiplier").value =
     ntSettings.zocMultiplier ?? 2.0;
   document.getElementById("zocReducedMultiplier").value =
-    ntSettings.zocReducedMultiplier ?? 1.3;
+    ntSettings.zocReducedMultiplier ?? 1.5;
+  document.getElementById("maxNamedTiles").value =
+    ntSettings.maxNamedTiles ?? 50;
 
-  // [NEW] Core Tile Settings
+  // Core Tile Settings
   const ctSettings = data.coreTileSettings || {
     attackCostMultiplier: 1.5,
     instantCoreThreshold: 400,
@@ -160,7 +161,7 @@ function updateUI(data) {
   document.getElementById("maxCoreTiles").value =
     ctSettings.maxCoreTiles ?? 2500;
 
-  // [NEW] Enclave Settings
+  // Enclave Settings
   const enclaveSettings = data.enclaveSettings || {
     distanceLimit: 25,
     penaltyUnit: 1,
@@ -170,11 +171,11 @@ function updateUI(data) {
   document.getElementById("enclavePenaltyUnit").value =
     enclaveSettings.penaltyUnit ?? 1;
 
-  // [NEW] Merger Settings
-  const mergerSettings = data.mergerSettings || { prohibitedRank: 5 };
+  // Merger Settings
+  const mergerSettings = data.mergerSettings || { prohibitedRank: 0 };
   const mergerRankEl = document.getElementById("mergerProhibitedRank");
   if (mergerRankEl) {
-    mergerRankEl.value = mergerSettings.prohibitedRank ?? 5;
+    mergerRankEl.value = mergerSettings.prohibitedRank ?? 0;
   }
 
   document.getElementById("adminId").value = data.adminId || "";
@@ -195,7 +196,7 @@ function updateUI(data) {
     breakTime.startTime || "01:00";
   document.getElementById("breakEndTime").value = breakTime.endTime || "06:00";
 
-  // [NEW] スケジュールUIの更新
+  // スケジュールUIの更新
   updateScheduleUI(data.scheduledAction);
 
   toggleApPostSettings();
@@ -372,6 +373,10 @@ async function updateSettings() {
       zocMultiplier: parseFloat(document.getElementById("zocMultiplier").value),
       zocReducedMultiplier: parseFloat(
         document.getElementById("zocReducedMultiplier").value,
+      ),
+      maxNamedTiles: parseInt(
+        document.getElementById("maxNamedTiles").value,
+        10,
       ),
     },
     coreTileSettings: {

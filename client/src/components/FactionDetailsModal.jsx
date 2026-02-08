@@ -101,6 +101,20 @@ const FactionDetailsModal = ({
       );
   };
 
+  const checkWarWith = (fid1, fid2) => {
+    if (!wars) return false;
+    const f1 = String(fid1);
+    const f2 = String(fid2);
+    return Object.values(wars).some(w => {
+      const attackers = w.attackerSide?.factions || [];
+      const defenders = w.defenderSide?.factions || [];
+      return (
+        (attackers.includes(f1) && defenders.includes(f2)) ||
+        (defenders.includes(f1) && attackers.includes(f2))
+      );
+    });
+  };
+
   return createPortal(
     <div className="modal-overlay faction-details-overlay" onClick={onClose}>
       {/* Mobile-friendly container */}
@@ -300,7 +314,7 @@ const FactionDetailsModal = ({
                     {/* Actions (If not self) */}
                     {playerData?.factionId && playerData.factionId !== factionId && (
                         <div style={{ marginTop: '10px', display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                            {playerData.permissions?.canManageAlliance && contentHelpers.playerIsAllianceLeader && !faction.allianceId && (
+                            {playerData.permissions?.canManageAlliance && contentHelpers.playerIsAllianceLeader && !faction.allianceId && !checkWarWith(playerData.factionId, factionId) && (
                                 <button
                                     className="btn btn-primary" style={{ flex: 1, background: '#ec4899', borderColor: '#ec4899' }}
                                     onClick={() => onAllianceInvite(factionId)}

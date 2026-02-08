@@ -7,9 +7,16 @@ const MAP_SIZE = 500;
 const TILE_BYTE_SIZE = 24;
 
 // キャッシュ
+let sabView = null;
+let zocSabView = null; // [NEW]
+let statsSabView = null; // [NEW]
+let factionsList = [];
+let namedCells = {}; // [NEW]
+
+// Cache for reuse
 const cache = {
-  clusters: { version: null, result: null },
-  edges: new Map(), // factionId -> { version, result }
+  clusters: { version: -1, result: null },
+  edges: new Map(), // Map<factionId, { version, result }>
 };
 
 // --- ヘルパー: SABからの値読み取り ---
@@ -294,7 +301,34 @@ self.onmessage = async function (e) {
   try {
     let result;
 
+    // [NEW] Extract sab/zocSab directly from event data for INIT
+    const {
+      sab,
+      zocSab,
+      statsSab,
+      factions,
+      factionsList: fList,
+      namedCells: nc,
+    } = e.data;
+
     switch (type) {
+      case "INIT":
+        if (sab) sabView = new DataView(sab);
+        if (zocSab) zocSabView = new Uint16Array(zocSab);
+        if (statsSab) statsSabView = new Int32Array(statsSab);
+        if (factions) factionsList = Object.keys(factions);
+        break;
+
+      case "UPDATE_FACTIONS":
+        if (fList) factionsList = fList;
+        if (nc) namedCells = nc;
+        break;
+
+      case "RECALC_ZOC":
+        recalculateZocLocal();
+        self.postMessage({ type: "ZOC_UPDATED" });
+        break;
+
       case "LOAD_MAP_DATA_BINARY":
         {
           const response = await fetch(data.url);
@@ -362,7 +396,13 @@ self.onmessage = async function (e) {
           const targetArray = new Uint8Array(data.sab);
           targetArray.set(sourceArray);
 
-          result = { version: mapVersion, playerNames, factionsList };
+          // [MOD] 互換性のために playerNames も残すが、マッピング管理用に playerList 配列を返すようにする
+          result = {
+            version: mapVersion,
+            playerNames,
+            playerList: playerIds,
+            factionsList,
+          };
         }
         break;
 
@@ -432,3 +472,44 @@ self.onmessage = async function (e) {
     self.postMessage({ id, success: false, error: error.message });
   }
 };
+
+// --- ZOC Calculation (Local) ---
+function recalculateZocLocal() {
+  if (!zocSabView || !sabView || !namedCells) return;
+
+  // Clear ZOC
+  zocSabView.fill(0);
+
+  const size = MAP_SIZE;
+  const ZOC_RADIUS = 5;
+  const MULTI_IDX = 65534;
+
+  Object.values(namedCells).forEach((cell) => {
+    const fid = cell.factionId;
+    if (!fid) return;
+
+    // Find faction index
+    const idx = factionsList.indexOf(fid);
+    if (idx === -1) return;
+
+    // cell.key "x_y" -> x, y
+    const [cx, cy] = cell.key.split("_").map(Number);
+
+    for (let dy = -ZOC_RADIUS; dy <= ZOC_RADIUS; dy++) {
+      for (let dx = -ZOC_RADIUS; dx <= ZOC_RADIUS; dx++) {
+        const nx = cx + dx;
+        const ny = cy + dy;
+        if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
+
+        const offset = ny * size + nx;
+        const current = zocSabView[offset];
+
+        if (current === 0) {
+          zocSabView[offset] = idx;
+        } else if (current !== idx && current !== MULTI_IDX) {
+          zocSabView[offset] = MULTI_IDX; // Conflict
+        }
+      }
+    }
+  });
+}

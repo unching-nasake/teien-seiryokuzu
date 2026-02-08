@@ -61,7 +61,28 @@ for (let i = 0; i < MAP_SIZE * MAP_SIZE; i++) {
 
 // IDマッピングテーブル (Memory-only, for converting strings to indexes in SAB)
 const factionIdToIndex = new Map(); // factionId (string) -> index (number)
-const indexToFactionId = [];
+const indexToFactionId = [""]; // 0 is reserved/empty
+
+// [NEW] ZOC Map SAB (500x500 Uint16) - Stores factionIndex
+const sharedZocMapSAB = new SharedArrayBuffer(
+  MAP_SIZE * MAP_SIZE * 2, // 2 bytes per tile (Uiunt16)
+);
+const sharedZocMapView = new Uint16Array(sharedZocMapSAB);
+
+// [NEW] Faction Stats SAB
+// Structure: [tileCount, coreCount, apLimit, currentAp, ..., ..., ...] per faction
+// each faction gets 16 integers (64 bytes) reserved space
+const MAX_FACTIONS_LIMIT = 2000;
+const STATS_INTS_PER_FACTION = 16;
+const factionStatsSAB = new SharedArrayBuffer(
+  MAX_FACTIONS_LIMIT * STATS_INTS_PER_FACTION * 4,
+);
+const factionStatsView = new Int32Array(factionStatsSAB);
+// Stats Offsets:
+// 0: tileCount
+// 1: coreCount
+// 2: apLimit
+// 3: currentAp (not fully realtime yet, but reserved)
 
 // [NEW] Player ID Mapping
 const playerIds = []; // index -> id (1-based, 0 is null)
@@ -103,6 +124,11 @@ function getFactionIdx(fid) {
   return idx;
 }
 
+function getFactionIdFromIdx(idx) {
+  if (idx === 65535) return null;
+  return indexToFactionId[idx] || null;
+}
+
 function getPlayerIdx(pid) {
   if (!pid) return 0;
   if (playerIdsMap.has(pid)) return playerIdsMap.get(pid);
@@ -112,13 +138,31 @@ function getPlayerIdx(pid) {
   return idx;
 }
 
+// [NEW] 勢力間の戦争状態を判定するヘルパー (Helper to check if two factions are at war)
+function isAtWarWith(fid1, fid2, warsData) {
+  if (!warsData || !warsData.wars) return false;
+  const f1 = String(fid1);
+  const f2 = String(fid2);
+  return Object.values(warsData.wars).some((w) => {
+    if (!w.attackerSide || !w.defenderSide) return false;
+    const attackers = w.attackerSide.factions.map(String);
+    const defenders = w.defenderSide.factions.map(String);
+    return (
+      (attackers.includes(f1) && defenders.includes(f2)) ||
+      (defenders.includes(f1) && attackers.includes(f2))
+    );
+  });
+}
+
 // [NEW] SharedArrayBuffer と JSONマップの同期
 function syncSABWithJSON(mapState) {
   if (!mapState || !mapState.tiles) return;
 
   const size = 500;
 
-  // [IMPORTANT] 一旦SABを全クリアする (65535 = 無し, 0xffffff = 白)
+  // [NEW] Clear new SABs
+  sharedZocMapView.fill(0); // 0 = no ZOC (or index 0 which is empty)
+  // factionStatsView is processed below
   // 不正な0データによる占領を防ぐ
   for (let i = 0; i < size * size; i++) {
     const offset = i * TILE_BYTE_SIZE;
@@ -127,8 +171,10 @@ function syncSABWithJSON(mapState) {
     sharedMapView.setUint32(offset + 6, 0, true); // paintedByIndex (0 = none)
     sharedMapView.setUint8(offset + 10, 0); // overpaint
     sharedMapView.setUint8(offset + 11, 0); // flags
-    // offset 12-15 padding
-    sharedMapView.setFloat64(offset + 16, 0, true); // expiry (8-byte aligned)
+    // offset 12-19 expiry
+    sharedMapView.setFloat64(offset + 12, 0, true);
+    // offset 20-23 paintedAt
+    sharedMapView.setUint32(offset + 20, 0, true);
   }
 
   for (const key in mapState.tiles) {
@@ -172,7 +218,8 @@ function syncSABWithJSON(mapState) {
 
       sharedMapView.setUint8(offset + 11, flags);
       // offset 12-15 padding
-      sharedMapView.setFloat64(offset + 16, exp, true); // Alignment fix
+      // offset 12-19 expiry
+      sharedMapView.setFloat64(offset + 12, exp, true);
 
       // [NEW] paintedAt (seconds) - offset 20 (4 bytes)
       const pAt = tile.paintedAt
@@ -181,6 +228,77 @@ function syncSABWithJSON(mapState) {
       sharedMapView.setUint32(offset + 20, pAt, true);
     }
   }
+
+  // [NEW] Rebuild Faction Stats & ZOC
+  factionStatsView.fill(0);
+  // sharedZocMapView.fill(0); // Already cleared at start
+
+  // Load named cells for point calculation
+  const namedCells = loadJSON(NAMED_CELLS_PATH, {});
+
+  for (let i = 0; i < size * size; i++) {
+    const offset = i * TILE_BYTE_SIZE;
+    const fidIdx = sharedMapView.getUint16(offset, true);
+    if (fidIdx !== 65535 && fidIdx < MAX_FACTIONS_LIMIT) {
+      const parsedIdx = fidIdx * STATS_INTS_PER_FACTION;
+      Atomics.add(factionStatsView, parsedIdx + 0, 1); // tileCount
+
+      // Points
+      const x = i % size;
+      const y = Math.floor(i / size);
+      const points = getTilePoints(x, y, namedCells);
+      Atomics.add(factionStatsView, parsedIdx + 4, points); // totalPoints (Offset 4)
+
+      const flags = sharedMapView.getUint8(offset + 11);
+      if (flags & 1) {
+        const exp = sharedMapView.getFloat64(offset + 12, true);
+        if (exp === 0 || exp > Date.now()) {
+          Atomics.add(factionStatsView, parsedIdx + 1, 1); // coreCount
+        }
+      }
+    }
+  }
+
+  // [NEW] Recalculate ZOC SAB
+  const factionsData = loadJSON(FACTIONS_PATH, { factions: {} });
+  recalculateZocSAB(namedCells, factionsData);
+}
+
+// [NEW] ZOC SAB Recalculation
+const ZOC_RADIUS = 5;
+function recalculateZocSAB(namedCells, factionsData) {
+  sharedZocMapView.fill(0); // 0 = no ZOC owner
+
+  if (!namedCells) return;
+  const size = 500;
+  const multiIdx = 65534; // Conflict
+
+  Object.values(namedCells).forEach((cell) => {
+    const fid = cell.factionId;
+    if (!fid || !factionsData.factions[fid]) return;
+    const idx = getFactionIdx(fid);
+    if (!idx) return;
+
+    if (!cell || !cell.key) return; // [FIX] Add safety check
+    const [cx, cy] = cell.key.split("_").map(Number);
+    // Chebyshev Distance 5
+    for (let dy = -ZOC_RADIUS; dy <= ZOC_RADIUS; dy++) {
+      for (let dx = -ZOC_RADIUS; dx <= ZOC_RADIUS; dx++) {
+        const nx = cx + dx;
+        const ny = cy + dy;
+        if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
+
+        const offset = ny * size + nx;
+        const current = sharedZocMapView[offset];
+
+        if (current === 0) {
+          sharedZocMapView[offset] = idx;
+        } else if (current !== idx && current !== multiIdx) {
+          sharedZocMapView[offset] = multiIdx;
+        }
+      }
+    }
+  });
 }
 const FILE_CACHE = new Map(); // filePath -> { data, mtimeMs, lastStatTime }
 const writeQueue = new Map(); // filePath -> { pendingData: any, isWriting: boolean }
@@ -226,6 +344,10 @@ async function saveJSON(filePath, data, options = {}) {
   if (filePath === MAP_STATE_PATH && data && data.tiles) {
     syncSABWithJSON(data);
     saveMapBinary(); // 引数は不要（内部でグローバル SAB を使用）
+  } else if (filePath === NAMED_CELLS_PATH && data) {
+    // [NEW] Recalculate ZOC when named cells change
+    const factions = loadJSON(FACTIONS_PATH, { factions: {} });
+    recalculateZocSAB(data, factions);
   }
 
   // 2. 書き込みキューの管理
@@ -293,6 +415,21 @@ async function processWriteQueue(filePath) {
         });
       }
     }
+
+    // [FIX] Update cache mtime after successful write to prevent reload
+    if (dataToSave !== null) {
+      try {
+        const stats = await fs.promises.stat(filePath);
+        const cached = FILE_CACHE.get(filePath);
+        if (cached) {
+          cached.mtimeMs = stats.mtimeMs;
+          cached.lastStatTime = Date.now();
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     currentWaiters.forEach((resolve) => resolve());
   } catch (err) {
     console.error(`[processWriteQueue] Error saving ${filePath}:`, err);
@@ -329,10 +466,12 @@ function loadJSON(filePath, defaultValue = {}, ignoreCache = false) {
       lastStatTime: now,
     });
 
+    /* [FIX] Redundant Sync moved to explicit initialization
     if (filePath === MAP_STATE_PATH) {
-      console.log("[Init] Syncing SAB with JSON map data...");
-      syncSABWithJSON(data);
+      // console.log("[Init] Syncing SAB with JSON map data...");
+      // syncSABWithJSON(data);
     }
+    */
 
     return data;
   } catch (e) {
@@ -356,51 +495,12 @@ async function saveMapBinary() {
   console.log(`[BinaryMap] Persisted binary map to ${MAP_STATE_BIN_PATH}`);
 }
 
-// [NEW] バイナリマップのロード
-function loadMapBinary() {
-  if (!fs.existsSync(MAP_STATE_BIN_PATH)) return false;
-  try {
-    const buffer = fs.readFileSync(MAP_STATE_BIN_PATH);
-    if (buffer.length !== sharedMapSAB.byteLength) {
-      console.warn("[BinaryMap] Buffer size mismatch. Fallback to JSON.");
-      return false;
-    }
-    const target = new Uint8Array(sharedMapSAB);
-    target.set(new Uint8Array(buffer));
-
-    // [REPAIR] ロードしたデータが古い構造（空白が0）の場合の修復
-    for (let i = 0; i < MAP_SIZE * MAP_SIZE; i++) {
-      const offset = i * TILE_BYTE_SIZE;
-      const fidIdx = sharedMapView.getUint16(offset, true);
-      const colorInt = sharedMapView.getUint32(offset + 2, true);
-
-      // 勢力IDが0かつカラーが0（黒）の場合、それは不正な空白マスの可能性が高い
-      // 勢力0が存在する場合でも、通常はカラーが設定されているはず
-      if (fidIdx === 0 && colorInt === 0) {
-        sharedMapView.setUint16(offset, 65535, true);
-        sharedMapView.setUint32(offset + 2, 0xffffff, true); // 白で埋める
-      }
-
-      // [REPAIR] Expiry NaN Fix
-      const exp = sharedMapView.getFloat64(offset + 16, true);
-      if (Number.isNaN(exp)) {
-        sharedMapView.setFloat64(offset + 16, 0, true);
-      }
-    }
-
-    console.log(
-      `[BinaryMap] Loaded and repaired binary map from ${MAP_STATE_BIN_PATH}`,
-    );
-    return true;
-  } catch (e) {
-    console.error("[BinaryMap] Load error:", e.message);
-    return false;
-  }
-}
+// [NEW] バイナリマップのロード (Unused, removed to fix lint)
+// function loadMapBinary() { ... }
 
 // [NEW] Merger Settings Defaults
 const DEFAULT_MERGER_SETTINGS = {
-  prohibitedRank: 5, // Top N factions cannot merge (be absorbed)
+  prohibitedRank: 0, // Top N factions cannot merge (be absorbed)
 };
 
 // 設定ロード (with defaults)
@@ -568,6 +668,13 @@ console.log(
 
 for (let i = 0; i < numWorkers; i++) {
   const worker = new Worker(path.join(__dirname, "worker.js"), {
+    workerData: {
+      sharedMapSAB,
+      sharedZocMapSAB,
+      factionStatsSAB,
+      MAX_FACTIONS_LIMIT,
+      STATS_INTS_PER_FACTION,
+    },
     resourceLimits: {
       maxOldGenerationSizeMb: 512, // 個別のWorkerをより厳しく制限
     },
@@ -833,7 +940,18 @@ async function persistPlayerState() {
   const playersEntry = FILE_CACHE.get(PLAYERS_PATH);
   if (playersEntry && playersEntry.data) {
     await saveJSON(PLAYERS_PATH, playersEntry.data);
-    console.log("[IO] Persisted players.json (Throttled)");
+    // [DEBUG] Log saved AP for debugging
+    const pIds = Object.keys(playersEntry.data.players || {});
+    if (pIds.length > 0) {
+      const samplePid = pIds[0];
+      console.log(
+        `[IO] Persisted players.json. Sample ${samplePid} AP: ${playersEntry.data.players[samplePid].ap}`,
+      );
+    } else {
+      console.log(`[IO] Persisted players.json (0 players)`);
+    }
+  } else {
+    console.warn("[IO] persistPlayerState called but no data in cache");
   }
 }
 
@@ -897,6 +1015,58 @@ function batchEmitTileUpdate(updates) {
     batchTimer = setTimeout(async () => {
       const keys = Object.keys(tileUpdateBuffer);
       if (keys.length > 0) {
+        // [Phase 7] Ensure SAB is up-to-date before serialization (Worker or Main)
+        if (sharedMapView) {
+          keys.forEach((key) => {
+            const tile = tileUpdateBuffer[key];
+            if (!tile) return; // Should not happen
+            const [x, y] = key.split("_").map(Number);
+            const tileOffset = (y * MAP_SIZE + x) * TILE_BYTE_SIZE;
+
+            // Map strings to indices
+            const fidIdx = getFactionIdx(tile.factionId || tile.faction);
+            const pIdx = getPlayerIdx(tile.paintedBy);
+
+            // Color
+            const colorStr = tile.customColor || tile.color || "#ffffff";
+            const colorInt =
+              parseInt(colorStr.replace("#", ""), 16) || 0xffffff;
+
+            // Flags/Expiry
+            let flags = 0;
+            let exp = 0;
+            if (tile.core) {
+              flags |= 1;
+              exp = new Date(tile.core.expiresAt || 0).getTime();
+            }
+            if (tile.coreificationUntil) {
+              flags |= 2;
+              exp = new Date(tile.coreificationUntil).getTime();
+            }
+
+            // paintedAt
+            const pAtVal = tile.paintedAt
+              ? Math.floor(new Date(tile.paintedAt).getTime() / 1000)
+              : 0;
+
+            // Write to SAB (24 bytes)
+            // 0-1: fidIdx
+            sharedMapView.setUint16(tileOffset + 0, fidIdx, true);
+            // 2-5: color
+            sharedMapView.setUint32(tileOffset + 2, colorInt, true);
+            // 6-9: pidIdx
+            sharedMapView.setUint32(tileOffset + 6, pIdx, true);
+            // 10: overpaint
+            sharedMapView.setUint8(tileOffset + 10, tile.overpaint || 0);
+            // 11: flags
+            sharedMapView.setUint8(tileOffset + 11, flags);
+            // 12-19: expiry (unaligned but safe - fixes overlap with paintedAt)
+            sharedMapView.setFloat64(tileOffset + 12, exp, true);
+            // 20-23: paintedAt
+            sharedMapView.setUint32(tileOffset + 20, pAtVal, true);
+          });
+        }
+
         // [OPTIMIZATION] 大規模な更新（500枚以上）の場合は Worker へシリアライズをオフロード
         if (keys.length >= 500 && numWorkers > 0) {
           try {
@@ -1140,6 +1310,9 @@ rebuildStableMappings(factions, players);
 syncSABWithJSON(mapState);
 saveMapBinary(); // JSON の内容でバイナリファイルを即座に更新
 
+// [FIX] Initialize Ranking Cache Immediately
+updateRankingCache();
+
 const syncCount = Object.keys(mapState.tiles || {}).length;
 console.log(
   `[Init] Map data initialized and synced from JSON. Total tiles: ${syncCount}, TILE_BYTE_SIZE: ${TILE_BYTE_SIZE}`,
@@ -1180,39 +1353,13 @@ if (fs.existsSync(GAME_IDS_PATH)) {
 
 async function updateJSON(filePath, updateFn, defaultValue = {}) {
   // [OPTIMIZATION] マップ状態の更新はメモリ上で行い、ディスク保存を遅延させる
-  if (filePath === MAP_STATE_PATH) {
-    return LockManager.withLock(filePath, async () => {
-      // メモリ上の最新データを取得 (ディスク読み込みをスキップ)
-      // ※ server.js 内で mapState グローバル変数が維持されている前提
-      // もし loadJSON がキャッシュを使っているならそれを利用
-      let data = loadJSON(filePath, defaultValue, false);
-
-      // 更新関数実行
-      const result = await updateFn(data);
-
-      // 変更を保留 (メモリ反映は参照渡しで完了している)
-      // pendingChanges にキーを追加して、後で部分保存(今回はフル保存のみ実装するためダーティフラグ的な役割)
-      // ここでは簡略化のため、saveMapState (queueMapUpdate) を呼び出す代わりに
-      // checkSaveCondition をトリガーするか、単にメモリ更新のみとする。
-      // ただし、updateJSONの呼び出し元は「保存完了」を期待している場合があるため、
-      // 重要なトランザクション(課金など)の場合は即時保存すべきだが、マップ塗りは遅延でOK。
-
-      // pendingChangesへの登録は、updateFn内で個別に行うのが理想だが、
-      // 既存コードを変えずにやるなら、ここで「マップ全体がダーティ」としてマークする。
-      // 今回は既存の queueMapUpdate ロジック (個別タイル更新) との兼ね合いがあるため、
-      // updateJSON呼び出し元が queueMapUpdate を使っていない場合 (例: 中核化など) に備え
-      // 変更があったとみなして保存条件をチェックする。
-
-      // 簡易実装: メモリ更新は参照渡しで完了している。保存は遅延。
-      queueMapUpdateInternal(); // 内部保存トリガー
-
-      return result;
-    });
-  }
+  // [OPTIMIZATION REMOVED] マップ状態の更新も即時保存する (信頼性優先)
+  // if (filePath === MAP_STATE_PATH) { ... }
 
   return LockManager.withLock(filePath, async () => {
-    // ディスクから最新を取得 (ignoreCache=true で強制的に最新を読むが、Lock中なので安全)
-    const data = loadJSON(filePath, defaultValue, true);
+    // ディスクから最新を取得 (ignoreCache=false に変更し、メモリキャッシュを正とする)
+    // メモリ上の変更(paintなど)がディスクに未保存の場合、ディスクから読み直すと巻き戻ってしまうため
+    const data = loadJSON(filePath, defaultValue, false);
 
     // 更新関数実行
     const result = await updateFn(data);
@@ -1223,6 +1370,71 @@ async function updateJSON(filePath, updateFn, defaultValue = {}) {
 
     return result;
   });
+}
+
+// [NEW] Single Tile SAB Update Helper
+function updateTileSAB(x, y, tile, namedCells) {
+  if (!sharedMapView) return;
+  const size = 500;
+  if (x < 0 || x >= size || y < 0 || y >= size) return;
+
+  const offset = (y * size + x) * TILE_BYTE_SIZE;
+
+  let fid = tile.factionId || tile.faction;
+  if (fid && !factionIdToIndex.has(fid)) fid = null;
+
+  const fidIdx = getFactionIdx(fid);
+  const oldFidIdx = sharedMapView.getUint16(offset, true);
+
+  // Stats Update (Incremental)
+  if (oldFidIdx !== fidIdx) {
+    // Decrement old
+    if (oldFidIdx !== 65535 && oldFidIdx < MAX_FACTIONS_LIMIT) {
+      const oldIdx = oldFidIdx * STATS_INTS_PER_FACTION;
+      Atomics.sub(factionStatsView, oldIdx + 0, 1);
+      const points = getTilePoints(x, y, namedCells);
+      Atomics.sub(factionStatsView, oldIdx + 4, points);
+    }
+    // Increment new
+    if (fidIdx !== 65535 && fidIdx < MAX_FACTIONS_LIMIT) {
+      const newIdx = fidIdx * STATS_INTS_PER_FACTION;
+      Atomics.add(factionStatsView, newIdx + 0, 1);
+      const points = getTilePoints(x, y, namedCells);
+      Atomics.add(factionStatsView, newIdx + 4, points);
+    }
+  }
+
+  sharedMapView.setUint16(offset + 0, fidIdx, true);
+
+  const colorStr = tile.customColor || tile.color || "#ffffff";
+  let colorInt = parseInt(colorStr.replace("#", ""), 16);
+  if (Number.isNaN(colorInt)) colorInt = 0xffffff;
+  sharedMapView.setUint32(offset + 2, colorInt, true);
+
+  const pIdx = getPlayerIdx(tile.paintedBy);
+  sharedMapView.setUint32(offset + 6, pIdx, true);
+
+  sharedMapView.setUint8(offset + 10, tile.overpaint || 0);
+
+  let flags = 0;
+  let exp = 0;
+  if (tile.core) {
+    flags |= 1;
+    exp = new Date(tile.core.expiresAt || 0).getTime();
+  }
+  if (tile.coreificationUntil) {
+    flags |= 2;
+    exp = new Date(tile.coreificationUntil).getTime();
+  }
+  if (Number.isNaN(exp)) exp = 0;
+
+  sharedMapView.setUint8(offset + 11, flags);
+  sharedMapView.setFloat64(offset + 12, exp, true);
+
+  const pAt = tile.paintedAt
+    ? Math.floor(new Date(tile.paintedAt).getTime() / 1000)
+    : 0;
+  sharedMapView.setUint32(offset + 20, pAt, true);
 }
 
 // 管理者設定によるゲーム停止チェックミドルウェア
@@ -1266,6 +1478,12 @@ function queueMapUpdateInternal() {
   // 具体的な変更内容は不明だが、変更があったことだけ記録して保存を促す
   // キーとしてダミーまたは全保存フラグを立てる
   pendingChanges.set("__FULL_SAVE_REQUIRED__", true);
+  // [FIX] Ensure timer is set
+  if (!mapSaveTimer) {
+    mapSaveTimer = setTimeout(() => {
+      persistMapState();
+    }, MAP_SAVE_INTERVAL);
+  }
   checkSaveCondition();
 }
 
@@ -1515,7 +1733,8 @@ app.get("/api/admin/settings", requireAdminAuth, (req, res) => {
       fallApBonusMin: 10,
       fallApBonusMax: 50,
       zocMultiplier: 2.0,
-      zocReducedMultiplier: 1.3,
+      zocReducedMultiplier: 1.5,
+      namedTileCost: 1000,
     },
     accountSettings: settings.accountSettings || {
       maxAccountsPerIp: 2,
@@ -1534,7 +1753,7 @@ app.get("/api/admin/settings", requireAdminAuth, (req, res) => {
       instantCoreThreshold: 400,
       maxCoreTiles: 2500,
     },
-    mergerSettings: settings.mergerSettings || { prohibitedRank: 5 }, // [NEW]
+    mergerSettings: settings.mergerSettings || { prohibitedRank: 0 },
   });
 });
 
@@ -1678,7 +1897,7 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
   const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
     isGameStopped: false,
     adminPassword: null,
-    mergerSettings: { prohibitedRank: 5 },
+    mergerSettings: { prohibitedRank: 0 },
   });
 
   if (typeof isGameStopped === "boolean") {
@@ -1740,7 +1959,7 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
   // [NEW] Merger Settingsの保存
   if (req.body.mergerSettings && typeof req.body.mergerSettings === "object") {
     settings.mergerSettings = {
-      prohibitedRank: parseInt(req.body.mergerSettings.prohibitedRank) || 5, // Default 5
+      prohibitedRank: parseInt(req.body.mergerSettings.prohibitedRank) || 0,
     };
   }
 
@@ -1814,7 +2033,7 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
   // [NEW] 勢力併合設定の保存
   if (req.body.mergerSettings && typeof req.body.mergerSettings === "object") {
     const ms = { ...req.body.mergerSettings };
-    if (ms.prohibitedRank === undefined) ms.prohibitedRank = 5;
+    if (ms.prohibitedRank === undefined) ms.prohibitedRank = 0;
     settings.mergerSettings = ms;
   }
 
@@ -1871,7 +2090,7 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
     },
     mapImageSettings: settings.mapImageSettings || { intervalMinutes: 1 },
     scheduledAction: settings.scheduledAction || null,
-    mergerSettings: settings.mergerSettings || { prohibitedRank: 5 },
+    mergerSettings: settings.mergerSettings || { prohibitedRank: 0 },
   });
 
   res.json({
@@ -1901,7 +2120,7 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
       startTime: "01:00",
       endTime: "06:00",
     },
-    mergerSettings: settings.mergerSettings || { prohibitedRank: 5 },
+    mergerSettings: settings.mergerSettings || { prohibitedRank: 0 },
   });
 });
 
@@ -1909,7 +2128,7 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
 function checkScheduledAction() {
   const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
     isGameStopped: false,
-    mergerSettings: { prohibitedRank: 5 },
+    mergerSettings: { prohibitedRank: 0 },
   });
   if (settings.scheduledAction && settings.scheduledAction.time) {
     const scheduledTime = new Date(settings.scheduledAction.time).getTime();
@@ -2048,7 +2267,7 @@ async function clampFactionSharedAP(
 
   const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
     apSettings: {},
-    mergerSettings: { prohibitedRank: 5 },
+    mergerSettings: { prohibitedRank: 0 },
   });
   const players = playersJson || loadJSON(PLAYERS_PATH, { players: {} });
 
@@ -2182,7 +2401,7 @@ async function processSecretTriggers(isScheduled = false) {
           // [UPDATED] 統一AP計算ロジックを使用
           const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
             apSettings: {},
-            mergerSettings: { prohibitedRank: 5 },
+            mergerSettings: { prohibitedRank: 0 },
           });
           const { limit: sharedLimit, activeMemberCount } =
             calculateFactionSharedAPLimit(faction, playersData, settings);
@@ -2433,7 +2652,7 @@ async function initializeData() {
       isGameStopped: false,
       adminPassword:
         "$2b$10$vo24P/c5vT0DX6Sl8E8/DOsMsTfhhrrPo9.Hzx8Tyew1G8ESJJXsu", // admin
-      mergerSettings: { prohibitedRank: 5 },
+      mergerSettings: { prohibitedRank: 0 },
     });
   }
 
@@ -2589,7 +2808,7 @@ function handleApRefill(player, players, playerId, saveToDisk = true) {
   // 設定読み込み
   const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
     apSettings: {},
-    mergerSettings: { prohibitedRank: 5 },
+    mergerSettings: { prohibitedRank: 0 },
   });
   const apConfig = settings.apSettings || {
     apPerPost: 10,
@@ -3031,7 +3250,7 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
   // 毎回計算は少し重いが、頻繁に変わる(Active人数ベース)ためここで計算する
   const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
     apSettings: {},
-    mergerSettings: { prohibitedRank: 5 },
+    mergerSettings: { prohibitedRank: 0 },
   });
   const { limit: sharedLimit } = calculateFactionSharedAPLimit(
     f,
@@ -3376,7 +3595,7 @@ async function syncPlayerWithGameIds(player, req, gameIds = null) {
 
   const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
     gardenMode: false,
-    mergerSettings: { prohibitedRank: 5 },
+    mergerSettings: { prohibitedRank: 0 },
   });
   if (!settings.gardenMode) return;
 
@@ -3626,7 +3845,7 @@ app.post("/api/admin/change-password", requireAdminAuth, async (req, res) => {
     const { currentPassword, newPassword } = req.body;
     const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
       adminPassword: null,
-      mergerSettings: { prohibitedRank: 5 },
+      mergerSettings: { prohibitedRank: 0 },
     });
 
     if (!(await verifyAdminPassword(currentPassword, settings))) {
@@ -3670,7 +3889,7 @@ app.post("/api/auth/signup", async (req, res) => {
     // 庭園モードチェック (アカウント作成時はスキップし、作成後に認証状を表示する)
     const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
       gardenMode: false,
-      mergerSettings: { prohibitedRank: 5 },
+      mergerSettings: { prohibitedRank: 0 },
     });
     /*
     if (settings.gardenMode) {
@@ -3848,7 +4067,7 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
   try {
     const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
       gardenMode: false,
-      mergerSettings: { prohibitedRank: 5 },
+      mergerSettings: { prohibitedRank: 0 },
     });
     const isGardenMode = settings.gardenMode || false;
     const today = getTodayString();
@@ -3868,7 +4087,11 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
         gardenMode: isGardenMode,
         gardenAuthKey: guestKey,
         gardenIsAuthorized: getAuthStatus(guestKey),
-        mergerSettings: settings.mergerSettings || { prohibitedRank: 5 }, // [NEW] send to client
+        mergerSettings: settings.mergerSettings || { prohibitedRank: 0 }, // [NEW] send to client
+        namedTileSettings: {
+          maxNamedTiles: 50,
+          ...(settings.namedTileSettings || {}),
+        }, // [FIX] Merge defaults
       });
     }
 
@@ -3930,6 +4153,10 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
     responseData.gardenRefillCost = settings.apSettings?.gardenRefillCost ?? 30;
     responseData.gardenRefillAmount =
       settings.apSettings?.gardenRefillAmount ?? 50;
+    responseData.namedTileSettings = {
+      maxNamedTiles: 50,
+      ...(settings.namedTileSettings || {}),
+    }; // [FIX] Merge defaults
 
     // [NEW] AP設定情報を返す
     responseData.apSettings = {
@@ -3952,6 +4179,25 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
 });
 
 // プレイヤー情報取得 (認証必須)
+// [NEW] プレイヤー名一覧取得 (ID -> Name マッピング)
+app.get("/api/player/names", (req, res) => {
+  try {
+    const playersData = loadJSON(PLAYERS_PATH, { players: {} });
+    const nameMap = {};
+    if (playersData && playersData.players) {
+      Object.keys(playersData.players).forEach((pid) => {
+        const p = playersData.players[pid];
+        nameMap[pid] = p.displayName || p.username || "Unknown";
+      });
+    }
+    res.json(nameMap);
+  } catch (e) {
+    console.error("Error fetching player names:", e);
+    res.status(500).json({ error: "名鑑の取得に失敗しました" });
+  }
+});
+
+// ログインユーザー情報取得
 app.get("/api/player", authenticate, async (req, res) => {
   try {
     const playerId = req.playerId;
@@ -6188,6 +6434,11 @@ app.post(
       loadJSON(FACTIONS_PATH, { factions: {} }, true).factions[
         player.factionId
       ];
+
+    // [DEBUG] AP Trace Start
+    console.log(
+      `[AP_TRACE] Start Paint. Player: ${player.id}, AP: ${player.ap}, ReqID: ${req.playerId}`,
+    );
     if (!faction) {
       console.log(`[PaintError] Faction not found for ID: ${player.factionId}`);
       return res.status(400).json({ error: "勢力データが破損しています" });
@@ -6300,29 +6551,12 @@ app.post(
     }
 
     try {
-      // --- [FIX] レースコンディションを防ぐため、最新のプレイヤーデータを再取得 ---
-      // runWorkerTask (非同期) の間に他のリクエストで player データが更新されている可能性があるため、
-      // 実際に書き込む直前にデータを再取得する。
-      const freshPlayers = loadJSON(PLAYERS_PATH, { players: {} }, true); // ignoreCache=true で強制読み込み推奨だが、負荷考慮して通常読み込みでも可。今回は念のため最新化。
-      const freshPlayer = freshPlayers.players[req.playerId];
+      // [FIX] Removed aggressive refresh from disk. Memory state is the source of truth.
+      // Trying to reload from disk here causes rollback to previous save state (throttled).
+      // We rely on the `player` object reference being up-to-date in memory.
 
-      if (!freshPlayer) {
-        throw new Error("プレイヤーデータが見つかりません（再取得失敗）");
-      }
-
-      // オブジェクト参照を更新
-      // 注意: 下の attemptApConsumption は 'player' 変数を使っているので、ここで player 変数の中身を書き換えるか、変数を上書きする必要がある。
-      // ただし const player = ... と定義しているので再代入不可。
-      // プロパティをコピーするか、attemptApConsumption に freshPlayer を渡す必要がある。
-
-      // 最も安全なのは、以降の処理で freshPlayer を使うこと。
-      // player オブジェクトのプロパティを最新で上書きする
-      Object.assign(player, freshPlayer);
-
-      // [FIX] 他のプレイヤーの更新も反映させるため、players.players を最新のものに差し替える
-      // ただし、player 変数（操作対象）への参照は維持する必要があるため、明示的に戻す。
-      players.players = freshPlayers.players;
-      players.players[req.playerId] = player;
+      // const freshPlayers = loadJSON(PLAYERS_PATH, { players: {} }, true);
+      // ... (removed)
 
       // --- [NEW] ジャイアントキリング判定 (AP消費前) ---
       // 条件: 攻撃対象（同盟含む）のポイントが自勢力（同盟含む）の2.0倍以上
@@ -6423,6 +6657,24 @@ app.post(
           );
         }
 
+        // [DEBUG] AP Trace After Consumption
+        console.log(
+          `[AP_TRACE] After Consumption. Player: ${player.id}, AP: ${player.ap}, SharedUsed: ${resultApConsumption.usedSharedAp}`,
+        );
+
+        // [DEBUG] AP Trace After Consumption
+        console.log(
+          `[AP_TRACE] After Consumption/MapLock. Player: ${player.id}, AP: ${player.ap}, SharedUsed: ${resultApConsumption.usedSharedAp}`,
+        );
+
+        if (resultApConsumption.usedSharedAp > 0) {
+          queueFactionSave(); // [FIX] 共有AP消費を保存
+        }
+        console.log(
+          `[Paint] Queueing player save. AP: ${player.ap}, LastAction: ${player.lastApAction}`,
+        );
+        queuePlayerSave(); // [FIX] 個人AP消費を保存
+
         // Notify Giant Killing
         if (isGiantKilling) {
           io.to(`user:${req.playerId}`).emit("notification:toast", {
@@ -6435,27 +6687,58 @@ app.post(
         // --- トークンカウント開始 ---
         // 事前に勢力ごとのタイル数と中核数をカウント
         const currentFactionStats = {}; // fid -> { tiles, cores }
-        Object.values(mapData.tiles).forEach((t) => {
-          const fid = t.faction || t.factionId;
-          if (fid) {
-            if (!currentFactionStats[fid])
-              currentFactionStats[fid] = { tiles: 0, cores: 0 };
-            currentFactionStats[fid].tiles++;
-            if (t.core) {
-              const coreFid = t.core.factionId;
-              if (!currentFactionStats[coreFid])
-                currentFactionStats[coreFid] = { tiles: 0, cores: 0 };
-              const nowMs = Date.now();
-              if (
-                coreFid === fid &&
-                (!t.core.expiresAt ||
-                  new Date(t.core.expiresAt).getTime() > nowMs)
-              ) {
-                currentFactionStats[coreFid].cores++;
+        if (sharedMapView) {
+          // [OPTIMIZATION] SAB 走査により JSON 全走査を回避
+          const size = 500;
+          const nowMs = Date.now();
+          for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+              const offset = (y * size + x) * TILE_BYTE_SIZE;
+              const fidIdx = sharedMapView.getUint16(offset, true);
+              if (fidIdx === 65535) continue;
+
+              const actualFid = getFactionIdFromIdx(fidIdx);
+
+              if (actualFid) {
+                if (!currentFactionStats[actualFid])
+                  currentFactionStats[actualFid] = { tiles: 0, cores: 0 };
+                currentFactionStats[actualFid].tiles++;
+
+                const flags = sharedMapView.getUint8(offset + 11);
+                if (flags & 1) {
+                  // CORE flag
+                  const exp = sharedMapView.getFloat64(offset + 12, true);
+                  if (exp === 0 || exp > nowMs) {
+                    currentFactionStats[actualFid].cores++;
+                  }
+                }
               }
             }
           }
-        });
+        } else {
+          // フォールバック
+          Object.values(mapData.tiles).forEach((t) => {
+            const fid = t.faction || t.factionId;
+            if (fid) {
+              if (!currentFactionStats[fid])
+                currentFactionStats[fid] = { tiles: 0, cores: 0 };
+              currentFactionStats[fid].tiles++;
+              if (t.core) {
+                const coreFid = t.core.factionId;
+                if (!currentFactionStats[coreFid])
+                  currentFactionStats[coreFid] = { tiles: 0, cores: 0 };
+                const nowMs = Date.now();
+                if (
+                  coreFid === fid &&
+                  (!t.core.expiresAt ||
+                    new Date(t.core.expiresAt).getTime() > nowMs)
+                ) {
+                  currentFactionStats[coreFid].cores++;
+                }
+              }
+            }
+          });
+        }
 
         for (const rawT of tiles) {
           // [FIX] "100-1" のような文字列結合バグを防ぐため、座標を数値に変換
@@ -6943,6 +7226,16 @@ app.post(
           });
         });
         */
+
+        // [FIX] Update mapData and SAB (Critical for persistence & sync)
+        Object.keys(updatedTiles).forEach((key) => {
+          const t = updatedTiles[key];
+          mapData.tiles[key] = t; // Merge into JSON state (for saveJSON)
+
+          // Update SAB (for Binary Map & Worker)
+          const [x, y] = key.split("_").map(Number);
+          updateTileSAB(x, y, t, namedCells);
+        });
 
         return mapData;
       });
@@ -7495,7 +7788,19 @@ app.post(
     const ntSettings = settings.namedTileSettings || {
       cost: 100,
       intervalHours: 0,
+      maxNamedTiles: 50,
     };
+
+    // [NEW] 最大数チェック
+    const maxNamedTiles = ntSettings.maxNamedTiles ?? 50;
+    if (maxNamedTiles > 0) {
+      const currentCount = Object.keys(namedCells).length;
+      if (currentCount >= maxNamedTiles) {
+        return res.status(400).json({
+          error: `ネームドマスの最大数(${maxNamedTiles})に達しているため、これ以上作成できません。`,
+        });
+      }
+    }
 
     if (ntSettings.intervalHours > 0 && faction.lastNamedTileCreated) {
       const lastCreated = new Date(faction.lastNamedTileCreated).getTime();
@@ -9213,11 +9518,23 @@ app.post(
       return res.status(404).json({ error: "申請元の勢力が見つかりません" });
     }
 
-    // すでに他の同盟に加盟していないかチェック
     if (targetFaction.allianceId && targetFaction.allianceId !== allianceId) {
       return res
         .status(400)
         .json({ error: "対象の勢力は既に他の同盟に加盟しています" });
+    }
+
+    // [NEW] 承認直前の戦争チェック
+    const wars = loadJSON(WARS_PATH, { wars: {} });
+    // 同盟メンバーを取得
+    let mySideFactionIds = alliance.members;
+    // 相互に戦争状態がないかチェック
+    for (const myFid of mySideFactionIds) {
+      if (isAtWarWith(myFid, targetFactionId, wars)) {
+        return res
+          .status(400)
+          .json({ error: "その勢力とは戦争中のため、加盟を承認できません" });
+      }
     }
 
     // 申請を承認
@@ -9234,7 +9551,7 @@ app.post(
     saveJSON(FACTIONS_PATH, factions);
 
     // --- 戦争解除/自動参戦ロジック ---
-    const wars = loadJSON(WARS_PATH, { wars: {} });
+    // wars is already loaded above
     const newMemberId = targetFactionId;
 
     // 1. 同盟内勢力との戦争を解除
@@ -9953,11 +10270,33 @@ app.post(
     if (!targetFaction)
       return res.status(404).json({ error: "対象勢力が見つかりません" });
 
+    // [New Phase 8] 戦争状態チェック
+    const wars = loadJSON(WARS_PATH, { wars: {} });
+    if (isAtWarWith(myFactionId, targetFactionId, wars)) {
+      return res.status(400).json({
+        error: "戦争状態にある勢力との間で割譲を行うことはできません",
+      });
+    }
+
     // 1. 保有チェック & 全マス割譲禁止チェック
+    // [OPTIMIZATION] 全走査を避け、SAB または factions.factions からタイル数を取得
     let myTotalTiles = 0;
-    Object.values(mapData.tiles).forEach((t) => {
-      if ((t.faction || t.factionId) === myFactionId) myTotalTiles++;
-    });
+    if (sharedMapView) {
+      const targetFidIdx = getFactionIdx(myFactionId);
+      const size = 500;
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const offset = (y * size + x) * TILE_BYTE_SIZE;
+          if (sharedMapView.getUint16(offset, true) === targetFidIdx) {
+            myTotalTiles++;
+          }
+        }
+      }
+    } else {
+      myTotalTiles = Object.values(mapData.tiles).filter(
+        (t) => (t.faction || t.factionId) === myFactionId,
+      ).length;
+    }
 
     if (tiles.length >= myTotalTiles) {
       return res.status(400).json({
@@ -9983,6 +10322,8 @@ app.post(
         [0, 1],
         [0, -1],
         [1, 0],
+        [0, -1],
+        [1, 0],
         [-1, 0],
         [1, 1],
         [1, -1],
@@ -9990,9 +10331,21 @@ app.post(
         [-1, -1],
       ];
       return directions.some(([dx, dy]) => {
-        const nKey = `${t.x + dx}_${t.y + dy}`;
-        const nTile = mapData.tiles[nKey];
-        return nTile && (nTile.faction || nTile.factionId) === targetFactionId;
+        const nx = t.x + dx;
+        const ny = t.y + dy;
+        if (nx < 0 || nx >= 500 || ny < 0 || ny >= 500) return false;
+
+        if (sharedMapView) {
+          const offset = (ny * 500 + nx) * TILE_BYTE_SIZE;
+          const fidIdx = sharedMapView.getUint16(offset, true);
+          return fidIdx === getFactionIdx(targetFactionId);
+        } else {
+          const nKey = `${nx}_${ny}`;
+          const nTile = mapData.tiles[nKey];
+          return (
+            nTile && (nTile.faction || nTile.factionId) === targetFactionId
+          );
+        }
       });
     });
 
@@ -12107,16 +12460,45 @@ app.post(
 
     saveJSON(FACTIONS_PATH, factions);
 
-    // マップ上のタイルの色も更新
-    const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
+    // [OPTIMIZATION] マップ上のタイルの色更新 (SABベース & JSON 差分反映)
     const updatedTiles = {};
-    for (const [key, tile] of Object.entries(mapState.tiles)) {
-      if ((tile.faction || tile.factionId) === factionId) {
-        tile.color = faction.color;
-        updatedTiles[key] = tile;
+    if (sharedMapView) {
+      const size = 500;
+      const targetFidIdx = getFactionIdx(factionId);
+      const newColorInt = parseInt(faction.color.replace("#", ""), 16);
+
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const offset = (y * size + x) * TILE_BYTE_SIZE;
+          const fidIdx = sharedMapView.getUint16(offset, true);
+
+          if (fidIdx === targetFidIdx) {
+            // 色を更新
+            sharedMapView.setUint32(offset + 2, newColorInt, true);
+
+            // JSON側も更新が必要（saveMapState で保存される）
+            const key = `${x}_${y}`;
+            const tile = mapState.tiles[key];
+            if (tile) {
+              tile.color = faction.color;
+              updatedTiles[key] = tile;
+            }
+          }
+        }
       }
+      // 変更を即時反映（ディスク保存は queueMapUpdate 経由）
+      queueMapUpdateInternal();
+    } else {
+      // フォールバック: 旧来の JSON ロード方式
+      // (通常は here には来ないが、SAB が何らかの理由で無効な場合のため)
+      for (const [key, tile] of Object.entries(mapState.tiles)) {
+        if ((tile.faction || tile.factionId) === factionId) {
+          tile.color = faction.color;
+          updatedTiles[key] = tile;
+        }
+      }
+      saveJSON(MAP_STATE_PATH, mapState);
     }
-    saveJSON(MAP_STATE_PATH, mapState);
 
     const changedByName = player.displayName || req.playerId.substring(0, 8);
     if (name && name !== faction.name) {
@@ -12236,6 +12618,12 @@ app.get(
         return true;
       })
       .filter((f) => {
+        // [New Phase 8] 戦争中の勢力は除外
+        const wars = loadJSON(WARS_PATH, { wars: {} });
+        if (isAtWarWith(myFactionId, f.id, wars)) return false;
+        return true;
+      })
+      .filter((f) => {
         // Core Cluster Adjacency Check
         // 1. Get My Core Clusters
         const myCoreClusters = getCoreClusters(myFactionId, mapState);
@@ -12306,6 +12694,14 @@ app.post(
     if (!targetFaction)
       return res.status(404).json({ error: "対象の勢力が見つかりません" });
 
+    // [New Phase 8] 戦争状態チェック
+    const wars = loadJSON(WARS_PATH, { wars: {} });
+    if (isAtWarWith(myFactionId, targetFactionId, wars)) {
+      return res.status(400).json({
+        error: "戦争状態にある勢力に対して併合を要請することはできません",
+      });
+    }
+
     // ポイントバリデーション
     if ((targetFaction.totalPoints || 0) < (myFaction.totalPoints || 0)) {
       return res.status(400).json({
@@ -12314,7 +12710,7 @@ app.post(
     }
 
     // Rank Restriction
-    const prohibitedRank = settings.mergerSettings?.prohibitedRank ?? 5;
+    const prohibitedRank = settings.mergerSettings?.prohibitedRank ?? 0;
 
     // 0の場合は制限なし
     if (prohibitedRank > 0) {
@@ -12554,8 +12950,38 @@ app.post(
       }
     }
 
-    // 3. 相手が既に同盟に加盟している場合（盟主でない場合）
-    // チェック削除 (UI側で盟主にしか送れないようになっており、サーバー側のID比較ロジックに不備があったため)
+    // 3. 相手と戦争状態でないかチェック
+    const wars = loadJSON(WARS_PATH, { wars: {} });
+
+    // 自分の同盟メンバーを取得 (自分が同盟に入っていればそのメンバー、入っていなければ自分のみ)
+    let mySideFactionIds = [myFactionId];
+    if (myFaction.allianceId && alliances[myFaction.allianceId]) {
+      mySideFactionIds = alliances[myFaction.allianceId].members;
+    }
+
+    // 相手の同盟メンバーを取得 (相手が同盟に入っていればそのメンバー、入っていなければ相手のみ)
+    let targetSideFactionIds = [targetFactionId];
+    if (targetFaction.allianceId && alliances[targetFaction.allianceId]) {
+      targetSideFactionIds = alliances[targetFaction.allianceId].members;
+    }
+
+    // 相互に戦争状態がないかチェック
+    // Case 1: 自分の同盟(私) vs 相手の同盟(彼ら)
+    for (const myFid of mySideFactionIds) {
+      if (isAtWarWith(myFid, targetFactionId, wars)) {
+        return res
+          .status(400)
+          .json({ error: "相手の勢力と戦争中のため、要請を送れません" });
+      }
+      // 相手が同盟持ちの場合もチェック
+      for (const targetFid of targetSideFactionIds) {
+        if (isAtWarWith(myFid, targetFid, wars)) {
+          return res.status(400).json({
+            error: "相手の同盟勢力と戦争中のため、要請を送れません",
+          });
+        }
+      }
+    }
 
     // --------------------------------------------------------------------------
     // データ構造のマイグレーション
@@ -12756,6 +13182,38 @@ app.post(
           error:
             "両勢力が異なる同盟に所属しているため結成できません。一度脱退してください。",
         });
+      }
+
+      // [NEW] 承認直前の戦争チェック
+      const wars = loadJSON(WARS_PATH, { wars: {} });
+      // 自分の同盟メンバーを取得 (自分が同盟に入っていればそのメンバー、入っていなければ自分のみ)
+      let mySideFactionIds = [myFactionId];
+      if (myFaction.allianceId && alliances[myFaction.allianceId]) {
+        mySideFactionIds = alliances[myFaction.allianceId].members;
+      }
+      // 相手の同盟メンバーを取得 (相手が同盟に入っていればそのメンバー、入っていなければ相手のみ)
+      let requesterSideFactionIds = [requesterFactionId];
+      if (
+        requesterFaction.allianceId &&
+        alliances[requesterFaction.allianceId]
+      ) {
+        requesterSideFactionIds =
+          alliances[requesterFaction.allianceId].members;
+      }
+      // 相互に戦争状態がないかチェック
+      for (const myFid of mySideFactionIds) {
+        if (isAtWarWith(myFid, requesterFactionId, wars)) {
+          return res.status(400).json({
+            error: "相手の勢力と戦争中のため、要請を承認できません",
+          });
+        }
+        for (const reqFid of requesterSideFactionIds) {
+          if (isAtWarWith(myFid, reqFid, wars)) {
+            return res.status(400).json({
+              error: "相手の同盟勢力と戦争中のため、要請を承認できません",
+            });
+          }
+        }
       }
     }
 
@@ -14173,9 +14631,7 @@ validateDiplomacyIntegrity();
 
 // [REFRACTOR] Direct Disk Access Mode
 // Data is always on disk, so "save all" is not needed.
-function saveAllGameData() {
-  console.log("[Save] Direct Disk Mode active. No memory flush needed.");
-}
+// function saveAllGameData() { ... } (Removed)
 
 // シャットダウン時にメモリ上のデータをディスクに保存
 async function gracefulShutdown(signal) {
@@ -14184,12 +14640,9 @@ async function gracefulShutdown(signal) {
   // [OPTIMIZATION] 未保存の全ての変更を強制保存
   const promises = [];
 
-  if (pendingChanges.size > 0) {
-    console.log(
-      `[Shutdown] Saving ${pendingChanges.size} pending map changes...`,
-    );
-    promises.push(persistMapState());
-  }
+  // Always check for map save, regardless of declared pending count
+  console.log(`[Shutdown] Saving map changes (Force)...`);
+  promises.push(persistMapState());
 
   if (playerSaveTimer || FILE_CACHE.has(PLAYERS_PATH)) {
     console.log("[Shutdown] Saving pending player changes...");
@@ -14209,12 +14662,17 @@ async function gracefulShutdown(signal) {
   }
 
   try {
+    // [FIX] Wait for all saves to complete
     await Promise.all(promises);
   } catch (err) {
     console.error("[Shutdown] Error saving pending data:", err);
   }
 
-  saveAllGameData();
+  // saveAllGameData is empty, so we rely on the above persists.
+  // saveAllGameData();
+
+  console.log("[Shutdown] All data saved. Exiting...");
+  process.exit(0);
 
   console.log("[Shutdown] All data saved. Exiting...");
   process.exit(0);

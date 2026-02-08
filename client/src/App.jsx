@@ -47,7 +47,7 @@ function App() {
   const mapWorkerPool = useMapWorkerPool();
 
   // ===== カスタムフックによる状態管理の抽出 =====
-  const { setTiles, sharedData, version: worldVersion, importMappings, getTile } = useWorldState();
+  const { setTiles, sharedData, version: worldVersion, importMappings, getTile, updateFactionStats } = useWorldState();
 
   const {
     skipConfirmation, setSkipConfirmation,
@@ -577,15 +577,14 @@ function App() {
           sab: sharedData.sab
         });
 
-        const { version, playerNames, factionsList } = loadResult;
+        const { version, playerNames: workerNames, playerList, factionsList } = loadResult;
         setMapLoadProgress(100);
 
-        if (playerNames) {
-          setPlayerNames(playerNames);
-        }
+        // [MOD] プレイヤー名表示名をIDで上書きしないように。workerNames は IDのみのリスト
+        // setPlayerNames(workerNames);
 
-        // マッピングを同期
-        importMappings({ factionsList, playerNames });
+        // マッピングを同期 (ID配列を優先して渡す)
+        importMappings({ factionsList, playerList, playerNames: workerNames });
 
         setMapLoading(false);
 
@@ -717,8 +716,7 @@ function App() {
                     // 再接続時に補充されていたらアラート
                     if (data.player.refilledAmount > 0) {
                       addNotification(`再接続中に APが ${data.player.refilledAmount} 補充されました！`, "AP補充");
-                      setApUpdated(true);
-                      setTimeout(() => setApUpdated(false), 1000);
+                      triggerApEffect();
                     }
                 }
             })
@@ -730,10 +728,12 @@ function App() {
             url: '/api/map/binary',
             sab: sharedData.sab
         })
-        .then(({ version, playerNames, factionsList }) => {
+        .then(({ version, playerNames: workerNames, playerList, factionsList }) => {
             console.log("Reconnect Map Updated (Binary)");
-            importMappings({ factionsList, playerNames });
-            if (playerNames) setPlayerNames(playerNames);
+            // IDリストを使用してマッピングを同期
+            importMappings({ factionsList, playerList, playerNames: workerNames });
+            // 表示名をIDで上書きしない
+            // if (workerNames) setPlayerNames(workerNames);
         })
         .catch(e => console.error("Reconnect Map fetch error:", e));
 
@@ -914,6 +914,10 @@ function App() {
     });
 
     socket.on('faction:updated', ({ factionId, faction }) => {
+      // [NEW] Update SAB for Workers
+      if (faction && updateFactionStats) {
+        updateFactionStats(faction);
+      }
       setFactions(prev => {
         const next = faction === null ? { ...prev } : { ...prev, [factionId]: faction };
         if (faction === null) delete next[factionId];
@@ -957,8 +961,7 @@ function App() {
                // アラート表示
                if (data.player.refilledAmount > 0) {
                   addNotification(`APが ${data.player.refilledAmount} 補充されました！`, "AP補充");
-                  setApUpdated(true);
-                  setTimeout(() => setApUpdated(false), 1000);
+                  triggerApEffect();
                }
             } else if (res.status === 401) {
                 // 認証切れならリロードまたはログイン画面へ
@@ -986,8 +989,7 @@ function App() {
             // AP補充アラート (bucket_checkと同等のロジックを追加)
             if (data.player.refilledAmount > 0) {
                addNotification(`APが ${data.player.refilledAmount} 補充されました！`, "AP補充");
-               setApUpdated(true);
-               setTimeout(() => setApUpdated(false), 1000);
+               triggerApEffect();
             }
           }
         })
@@ -1291,8 +1293,7 @@ function App() {
 
         // AP関連の場合はエフェクトも出す? (省略)
         // if (message.includes("AP")) {
-        //     setApUpdated(true);
-        //     setTimeout(() => setApUpdated(false), 1000);
+        //     triggerApEffect();
         // }
     });
 
@@ -1509,14 +1510,33 @@ function App() {
     };
   }, []);
 
-  // アクティビティログ初期取得
+  // [NEW] プレイヤー名鑑取得
+  const fetchPlayerNames = useCallback(async () => {
+      try {
+          const res = await fetch('/api/player/names', { credentials: 'include' });
+          if (res.ok) {
+              const names = await res.json();
+              setPlayerNames(prev => ({ ...prev, ...names }));
+          }
+      } catch (e) {
+          console.error("Failed to fetch player names:", e);
+      }
+  }, []);
+
+  // アクティビティログ初期取得 & プレイヤー名鑑取得
   useEffect(() => {
     if (!authStatus.authenticated) return;
+
+    // Activity Log
     fetch('/api/activity-log', { credentials: 'include' })
       .then(res => res.json())
       .then(data => setActivityLog(data.entries || []))
       .catch(() => {});
-  }, [authStatus.authenticated]);
+
+    // Player Names
+    fetchPlayerNames();
+
+  }, [authStatus.authenticated, fetchPlayerNames]);
 
   // [NEW] ログ検索用State
   const [logSearchTerm, setLogSearchTerm] = useState('');
@@ -1567,7 +1587,7 @@ function App() {
 
 
   // タイルクリックハンドラ
-  const handleTileClick = useCallback((x, y) => {
+  const handleTileClick = useCallback((x, y, forceSelect = false) => {
     // 勢力作成モード（起点選択中）
     if (pendingOrigin !== null) {
       setPendingOrigin({ x, y });
@@ -1578,12 +1598,17 @@ function App() {
     const key = `${x}_${y}`;
 
     // タイル塗りモード
-    if (!playerData) return;
+    if (!playerData) {
+        // console.log("Debug: handleTileClick ignored - no playerData");
+        return;
+    }
 
     // クリックされたタイルに勢力があるか確認
     const targetTile = getTile(x, y);
+    console.log(`Debug: handleTileClick at (${x},${y})`, targetTile, "MyFaction:", playerData.factionId);
 
-    if (targetTile && (targetTile.factionId || targetTile.faction)) {
+    // [MOD] forceSelect=true の場合は、参加確認や無所属チェックをスキップして選択処理へ
+    if (!forceSelect && targetTile && (targetTile.factionId || targetTile.faction)) {
         const tfid = targetTile.factionId || targetTile.faction;
         // 自分が無所属なら参加確認ポップアップ
         if (!playerData.factionId) {
@@ -1596,7 +1621,7 @@ function App() {
                 }
                 setJoiningFaction(targetFaction);
             }
-            return;
+            // return; // [MOD] 以前はここで return していたため選択できなかった。モーダルは出しつつ選択も継続。
         } else {
             // [Check] 既に所属済みの場合、他勢力参加はできない（脱退してから）
             // ポップアップを出さない。
@@ -1605,7 +1630,8 @@ function App() {
         // 所属済みなら、他勢力のタイルでも選択（上書き）可能にするためリターンしない
     }
 
-    if (!playerData.factionId) return;
+    // [MOD] 無所属でも空タイルを選択できるようにする (調査/デバッグのため)
+    // if (!forceSelect && !playerData.factionId) return;
 
     // 既に選択済みか確認
     if (selectedTiles.some(t => t.x === x && t.y === y)) {
@@ -1680,8 +1706,7 @@ function App() {
         setPlayerData(prev => ({ ...prev, ap: data.remainingAP }));
         if (data.refilledAmount > 0) {
           addNotification(`APが ${data.refilledAmount} 補充されました！`, "AP補充");
-          setApUpdated(true);
-          setTimeout(() => setApUpdated(false), 1000);
+          triggerApEffect();
         }
       } else {
         addNotification(data.error || '塗りに失敗しました', "エラー");
@@ -2659,8 +2684,8 @@ function App() {
           version={worldVersion}
           factions={factions}
           selectedTiles={selectedTiles}
-          onTileClick={(x, y) => {
-              handleTileClick(x, y);
+          onTileClick={(x, y, force) => {
+              handleTileClick(x, y, force);
           }}
 
           playerFactionId={playerData?.factionId}
@@ -2952,6 +2977,7 @@ function App() {
 
         isMergeEnabled={authStatus.isMergeEnabled ?? true}
         mergerSettings={authStatus.mergerSettings} // [NEW] Pass settings
+        namedTileSettings={authStatus.namedTileSettings} // [NEW]
         apSettings={authStatus.apSettings} // [NEW] 設定渡し
         gardenRefillCost={authStatus.gardenRefillCost || 30}
         gardenRefillAmount={authStatus.gardenRefillAmount || 50}

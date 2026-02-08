@@ -74,6 +74,17 @@ socket.on("tile:update:bin", (buffer) => {
       paintedAt, // 秒単位
     };
 
+    const safeISOString = (ms) => {
+      if (!ms || typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0)
+        return null;
+      try {
+        const d = new Date(ms);
+        return isNaN(d.getTime()) ? null : d.toISOString();
+      } catch (e) {
+        return null;
+      }
+    };
+
     if (flags & 1) {
       // isCore
       // Faction ID is needed for core object?
@@ -85,12 +96,12 @@ socket.on("tile:update:bin", (buffer) => {
       // We will pass `fidIdx` instead of `factionId`. useWorldState must handle it.
       tile.core = {
         fidIdx,
-        expiresAt: exp > 0 ? new Date(exp).toISOString() : null,
+        expiresAt: safeISOString(exp),
       };
     }
     if (flags & 2) {
       // isCoreifying
-      tile.coreificationUntil = new Date(exp).toISOString();
+      tile.coreificationUntil = safeISOString(exp);
       tile.coreificationFidIdx = fidIdx;
     }
 

@@ -247,7 +247,7 @@ function renderTiles(data) {
         paintedByIdx = sabView.getUint32(offset + 6, true);
         // overpaint = sabView.getUint8(offset + 10);
         flags = sabView.getUint8(offset + 11);
-        exp = sabView.getFloat64(offset + 16, true); // Alignment fix
+        exp = sabView.getFloat64(offset + 12, true); // [FIX] Offset 12
 
         // tileオブジェクトの最小限のシミュレーション（互換性のため）
         if (fidIdx !== 65535) {
@@ -450,9 +450,18 @@ self.onmessage = function (e) {
     if (type === "SETUP_WORKER") {
       workerIndex = data.workerIndex;
       totalWorkers = data.totalWorkers;
-      // console.log(`[RenderWorker] Setup: Index=${workerIndex}, Total=${totalWorkers}`);
     } else if (type === "INIT") {
-      init(data.canvas);
+      // Handle both nested data (legacy) and flat (new)
+      const setup = data || e.data;
+      init(setup.canvas);
+
+      if (setup.sab) sabView = new DataView(setup.sab);
+      if (setup.zocSab) zocSabView = new Uint16Array(setup.zocSab);
+
+      if (setup.isDualMode) {
+        // initDualMode logic if needed
+      }
+
       self.postMessage({ type: "INIT_COMPLETE", success: true });
     } else if (type === "INIT_DUAL") {
       // [NEW] デュアルキャンバス初期化
@@ -558,3 +567,57 @@ self.onmessage = function (e) {
     self.postMessage({ type: "ERROR", error: error.message });
   }
 };
+
+function renderZocFromSAB(
+  ctx,
+  viewport,
+  tileSize,
+  width,
+  height,
+  factions,
+  factionsList,
+) {
+  const startX = Math.floor(viewport.x - width / tileSize / 2);
+  const startY = Math.floor(viewport.y - height / tileSize / 2);
+  const endX = Math.ceil(viewport.x + width / tileSize / 2);
+  const endY = Math.ceil(viewport.y + height / tileSize / 2);
+
+  const minX = Math.max(0, startX);
+  const maxX = Math.min(MAP_SIZE - 1, endX);
+  const minY = Math.max(0, startY);
+  const maxY = Math.min(MAP_SIZE - 1, endY);
+
+  const centerX = width / 2;
+  const centerY = height / 2;
+
+  ctx.save();
+  ctx.globalAlpha = 0.3;
+
+  // Optimize: Iterate minimal area
+  for (let y = minY; y <= maxY; y++) {
+    for (let x = minX; x <= maxX; x++) {
+      const offset = y * MAP_SIZE + x;
+      const zocIdx = zocSabView[offset];
+
+      if (zocIdx !== 0) {
+        let color = "#aaaaaa";
+
+        if (zocIdx === 65534) {
+          color = "#666666"; // Conflict
+        } else if (zocIdx < factionsList.length) {
+          const fid = factionsList[zocIdx];
+          if (fid && factions[fid]) {
+            color = factions[fid].color;
+          }
+        }
+
+        const screenX = centerX + (x - viewport.x) * tileSize;
+        const screenY = centerY + (y - viewport.y) * tileSize;
+
+        ctx.fillStyle = color;
+        ctx.fillRect(screenX, screenY, tileSize, tileSize);
+      }
+    }
+  }
+  ctx.restore();
+}

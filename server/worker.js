@@ -1,4 +1,4 @@
-const { parentPort } = require("worker_threads");
+const { parentPort, workerData } = require("worker_threads");
 const fs = require("fs");
 const path = require("path");
 const { createCanvas, registerFont } = require("canvas");
@@ -118,6 +118,31 @@ let workerMapSAB = null;
 let workerMapView = null;
 let workerIndexToFactionId = [];
 let workerIndexToPlayerId = [];
+
+// [NEW] Advanced SABs
+let workerZocMapSAB = null;
+let workerZocMapView = null;
+let workerFactionStatsSAB = null;
+let workerFactionStatsView = null;
+let MAX_FACTIONS_LIMIT = 2000;
+let STATS_INTS_PER_FACTION = 16;
+
+if (workerData) {
+  if (workerData.sharedMapSAB) {
+    workerMapSAB = workerData.sharedMapSAB;
+    workerMapView = new DataView(workerMapSAB);
+  }
+  if (workerData.sharedZocMapSAB) {
+    workerZocMapSAB = workerData.sharedZocMapSAB;
+    workerZocMapView = new Uint16Array(workerZocMapSAB);
+  }
+  if (workerData.factionStatsSAB) {
+    workerFactionStatsSAB = workerData.factionStatsSAB;
+    workerFactionStatsView = new Int32Array(workerFactionStatsSAB);
+    MAX_FACTIONS_LIMIT = workerData.MAX_FACTIONS_LIMIT || 2000;
+    STATS_INTS_PER_FACTION = workerData.STATS_INTS_PER_FACTION || 16;
+  }
+}
 
 /**
  * SABからタイルデータを読み取るヘルパー
@@ -367,7 +392,7 @@ function buildCoreCoordsMap(mapState) {
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
         const offset = (y * size + x) * TILE_BYTE_SIZE;
-        const flags = workerMapView.getUint8(offset + 7);
+        const flags = workerMapView.getUint8(offset + 11);
         if (flags & 1) {
           // Core flag
           const fidIdx = workerMapView.getUint16(offset, true);
@@ -451,6 +476,23 @@ function ensureCachesValid(mapState, namedCells, factions, alliances) {
  * @returns {{ isZoc: boolean, isZocReduced: boolean }}
  */
 function checkZocWithCache(x, y, targetFactionId, playerFactionId, alliedFids) {
+  // [NEW] SAB Optimization
+  if (workerZocMapView) {
+    const size = 500;
+    const offset = y * size + x;
+    const zocIdx = workerZocMapView[offset];
+    if (zocIdx === 0) return { isZoc: false, isZocReduced: false };
+
+    if (zocIdx !== 65534 && zocIdx !== 65535) {
+      // 65534=Conflict
+      const zocFid = workerIndexToFactionId[zocIdx];
+      if (zocFid === playerFactionId || alliedFids.has(zocFid)) {
+        return { isZoc: false, isZocReduced: false };
+      }
+      // If Enemy ZOC, fall through to check isZocReduced
+    }
+  }
+
   if (!zocInfluenceCache || !coreCoordsCache) {
     return { isZoc: false, isZocReduced: false };
   }
@@ -544,9 +586,41 @@ function getFactionClusterInfo(
   alliedFids = null,
 ) {
   const initialFactionTiles = new Set();
+
+  // 1. 指定されたキーがあればそれを使用
   if (knownFactionKeys) {
     knownFactionKeys.forEach((k) => initialFactionTiles.add(k));
-  } else {
+  }
+  // 2. SAB環境: インデックスがあれば高速取得
+  else if (
+    workerMapView &&
+    typeof factionTileIndex !== "undefined" &&
+    factionTileIndex?.data
+  ) {
+    const fidsToCheck = alliedFids || new Set([factionId]);
+    fidsToCheck.forEach((fid) => {
+      const keys = factionTileIndex.data.get(fid);
+      if (keys) keys.forEach((k) => initialFactionTiles.add(k));
+    });
+  }
+  // 3. SAB環境: インデックスがない場合は全走査 (フォールバック)
+  else if (workerMapView) {
+    const size = 500;
+    const fidsToCheck = alliedFids || new Set([factionId]);
+    for (let i = 0; i < size * size; i++) {
+      const offset = i * TILE_BYTE_SIZE;
+      const fidIdx = workerMapView.getUint16(offset, true);
+      if (fidIdx === 65535) continue;
+      const fid = workerIndexToFactionId[fidIdx];
+      if (fidsToCheck.has(fid)) {
+        const x = i % size;
+        const y = Math.floor(i / size);
+        initialFactionTiles.add(`${x}_${y}`);
+      }
+    }
+  }
+  // 4. JSON環境: mapStateから取得
+  else {
     for (const key in mapState.tiles) {
       const t = mapState.tiles[key];
       const fid = t.factionId;
@@ -645,7 +719,7 @@ function calculatePaintCost(
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
         const offset = (y * size + x) * TILE_BYTE_SIZE;
-        const flags = workerMapView.getUint8(offset + 7);
+        const flags = workerMapView.getUint8(offset + 11);
         if (flags & 1) {
           // CORE flag
           const fidIdx = workerMapView.getUint16(offset, true);
@@ -666,49 +740,85 @@ function calculatePaintCost(
     }
   }
 
-  // 2. 他勢力に包囲されているかの判定 (呼び出しごとに1回)
+  // 2. 他勢力に包囲されているかの判定
   let isLandlocked = true;
 
-  // [OPTIMIZATION] factionTileIndexを使用してループ回数を削減
-  const factionTiles =
-    factionTileIndex &&
-    factionTileIndex.data &&
-    factionTileIndex.data.has(factionId)
-      ? factionTileIndex.data.get(factionId)
-      : Object.keys(mapState.tiles).filter(
-          (k) => mapState.tiles[k].factionId === factionId,
-        ); // フォールバック: 低速だが正確
+  // [FIX] Landlocked Check Implementation
+  if (workerMapView && workerIndexToFactionId) {
+    const size = 500;
+    // Full scan of SAB (250k items) - fast enough
+    for (let i = 0; i < size * size; i++) {
+      const offset = i * TILE_BYTE_SIZE;
+      const fidIdx = workerMapView.getUint16(offset, true);
+      // Skip if not my faction (using raw index check if possible, or mapping)
+      // optimization: we need to know my faction's index.
+      // Mapping back fid -> index is slow if linear.
+      // But we can map index -> fid.
+      const tFid = workerIndexToFactionId[fidIdx];
 
-  for (const k of factionTiles) {
-    // インデックスが古い可能性があるため存在確認
-    const tile = mapState.tiles[k];
-    if (!tile || tile.factionId !== factionId) continue;
-
-    const [tx, ty] = k.split("_").map(Number);
-    const ns = [
-      [0, 1],
-      [0, -1],
-      [1, 0],
-      [-1, 0],
-      [1, 1],
-      [1, -1],
-      [-1, 1],
-      [-1, -1],
-    ];
-    for (const [dx, dy] of ns) {
-      const nx = tx + dx;
-      const ny = ty + dy;
-      if (nx < 0 || nx >= MAP_SIZE || ny < 0 || ny >= MAP_SIZE) continue;
-
-      // [OPTIMIZATION] 座標インデックスを使用して高速取得
-      const nt = getTileAt(nx, ny, mapState);
-
-      if (!nt || !nt.factionId) {
-        isLandlocked = false;
-        break;
+      if (tFid === factionId) {
+        const y = Math.floor(i / size);
+        const x = i % size;
+        const neighbors = [
+          [0, 1],
+          [0, -1],
+          [1, 0],
+          [-1, 0],
+        ];
+        for (const [dx, dy] of neighbors) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx >= 0 && nx < size && ny >= 0 && ny < size) {
+            const nOffset = (ny * size + nx) * TILE_BYTE_SIZE;
+            const nFidIdx = workerMapView.getUint16(nOffset, true);
+            if (nFidIdx === 65535) {
+              // Empty
+              isLandlocked = false;
+              break;
+            }
+            const nFid = workerIndexToFactionId[nFidIdx];
+            if (!nFid || alliedFids.has(nFid)) {
+              isLandlocked = false;
+              break;
+            }
+          } else {
+            // Edge of map -> Not landlocked? Depends on rules. Usually edges are walls.
+            // If rules say edges are NOT blocks, then set false.
+            // Assuming edges are walls (neutral blocks), so keep searching.
+          }
+        }
       }
+      if (!isLandlocked) break;
     }
-    if (!isLandlocked) break;
+  } else {
+    // Fallback to JSON
+    // Note: If mapState.tiles is empty (SAB mode but failed?), this will result in isLandlocked=true (default)
+    // which is wrong if we have tiles. But we handled SAB above.
+    const tilesToCheck = Object.values(mapState.tiles).filter(
+      (t) => t.factionId === factionId || t.faction === factionId,
+    );
+    for (const t of tilesToCheck) {
+      const neighbors = [
+        [0, 1],
+        [0, -1],
+        [1, 0],
+        [-1, 0],
+      ];
+      for (const [dx, dy] of neighbors) {
+        const nx = Number(t.x) + dx;
+        const ny = Number(t.y) + dy;
+        const nKey = `${nx}_${ny}`;
+        if (nx >= 0 && nx < MAP_SIZE && ny >= 0 && ny < MAP_SIZE) {
+          const nTile = mapState.tiles[nKey];
+          const nFid = nTile ? nTile.factionId || nTile.faction : null;
+          if (!nFid || alliedFids.has(nFid)) {
+            isLandlocked = false;
+            break;
+          }
+        }
+      }
+      if (!isLandlocked) break;
+    }
   }
 
   // 3. クラスタ情報（提案タイルを含む）
@@ -732,7 +842,8 @@ function calculatePaintCost(
   // --- メインループ: 各タイルの処理 ---
   for (const t of tiles) {
     const key = `${t.x}_${t.y}`;
-    const existing = mapState.tiles[key];
+    // [FIX] SAB 対応: getTileAt を使用してタイル情報を取得
+    const existing = getTileAt(t.x, t.y, mapState);
     const existingFid = existing ? existing.factionId : null;
 
     if (action === "overpaint") {
@@ -768,7 +879,8 @@ function calculatePaintCost(
             isSieged = false; // 壁は味方
             break;
           }
-          const nTile = mapState.tiles[`${nx}_${ny}`];
+          // [FIX] SAB 対応: getTileAt を使用してタイル情報を取得
+          const nTile = getTileAt(nx, ny, mapState);
           const nFid = nTile ? nTile.factionId : null;
 
           // 1. 空白、自勢力、同盟 は安全
@@ -902,7 +1014,8 @@ function calculatePaintCost(
               isSieged = false; // Wall is safe
               break;
             }
-            const nTile = mapState.tiles[`${nx}_${ny}`];
+            // [FIX] SAB 対応: getTileAt を使用してタイル情報を反映
+            const nTile = getTileAt(nx, ny, mapState);
             const nFid = nTile ? nTile.factionId : null;
 
             // 1. Check if neighbor is Friendly to Defender (Self, Ally, or Empty)
@@ -951,7 +1064,7 @@ function calculatePaintCost(
         // ZOC内（敵拠点隣接）の場合はコスト増加 (設定値使用)
         if (t.isZoc) {
           if (t.isZocReduced) {
-            const mult = namedTileSettings.zocReducedMultiplier ?? 1.3;
+            const mult = namedTileSettings.zocReducedMultiplier ?? 1.5;
             base = Math.round(base * mult);
           } else {
             const mult = namedTileSettings.zocMultiplier ?? 2.0;
@@ -1082,7 +1195,20 @@ parentPort.on("message", async (msg) => {
       const factionStats = {};
       const pointUpdates = {};
 
-      if (workerMapView) {
+      if (workerFactionStatsView) {
+        // [NEW] Use FactionStatsSAB (O(F)) - Ultra fast
+        // Iterate all potential faction indices
+        for (let i = 1; i < MAX_FACTIONS_LIMIT; i++) {
+          const fid = workerIndexToFactionId[i];
+          if (!fid) continue;
+          const idx = i * STATS_INTS_PER_FACTION;
+          const tiles = Atomics.load(workerFactionStatsView, idx + 0);
+          const cores = Atomics.load(workerFactionStatsView, idx + 1);
+          if (tiles > 0 || cores > 0) {
+            factionStats[fid] = { tiles, cores };
+          }
+        }
+      } else if (workerMapView) {
         // [NEW] バイナリ走査による統計計算 (超低メモリ)
         const size = 500;
         for (let y = 0; y < size; y++) {
@@ -1097,10 +1223,10 @@ parentPort.on("message", async (msg) => {
                 factionStats[fid] = { tiles: 0, cores: 0 };
               factionStats[fid].tiles++;
 
-              const flags = workerMapView.getUint8(offset + 7);
+              const flags = workerMapView.getUint8(offset + 11);
               if (flags & 1) {
                 // CORE flag
-                const exp = workerMapView.getFloat64(offset + 8, true);
+                const exp = workerMapView.getFloat64(offset + 12, true);
                 if (exp === 0 || exp > nowMs) {
                   factionStats[fid].cores++;
                 }
@@ -1222,7 +1348,8 @@ parentPort.on("message", async (msg) => {
 
       // [OPTIMIZED] キャッシュベースのZOC判定 - O(tiles) instead of O(tiles × namedCells × mapTiles)
       for (const t of tiles) {
-        const targetTile = mapState.tiles[`${t.x}_${t.y}`];
+        // [FIX] SAB 対応: getTileAt を使用してタイル情報を取得
+        const targetTile = getTileAt(t.x, t.y, mapState);
         const targetFactionId = targetTile ? targetTile.factionId : null;
 
         const { isZoc, isZocReduced } = checkZocWithCache(
@@ -1247,7 +1374,8 @@ parentPort.on("message", async (msg) => {
       let targetFactionNameForWar = null;
 
       for (const t of tiles) {
-        const existing = mapState.tiles[`${t.x}_${t.y}`];
+        // [FIX] SAB 対応: getTileAt を使用してタイル情報を取得
+        const existing = getTileAt(t.x, t.y, mapState);
         const efid = existing ? existing.factionId : null;
         if (efid && efid !== player.factionId) {
           const enemyFaction = factions.factions[efid];
@@ -1357,21 +1485,60 @@ parentPort.on("message", async (msg) => {
       let stats = preCalculatedStats || {};
 
       if (!preCalculatedStats) {
-        // タイル走査 (チャンクまたはフル)
-        const mapData = tiles
-          ? { tiles }
-          : loadJSON(filePaths.mapState, { tiles: {} });
-
+        // [OPTIMIZATION] SharedArrayBuffer がある場合は JSON ロードをスキップ
+        const hasSAB = !!workerMapView;
         const namedCells = loadJSON(filePaths.namedCells, {});
-        Object.entries(mapData.tiles).forEach(([key, tile]) => {
-          const fid = tile.faction || tile.factionId;
-          if (fid && factionsData.factions[fid]) {
-            if (!stats[fid]) stats[fid] = { id: fid, points: 0, tiles: 0 };
-            const [x, y] = key.split("_").map(Number);
-            stats[fid].tiles++;
-            stats[fid].points += getTilePoints(x, y, namedCells);
+
+        if (hasSAB) {
+          if (workerFactionStatsView) {
+            // [NEW] Use FactionStatsSAB (O(F))
+            for (let i = 1; i < MAX_FACTIONS_LIMIT; i++) {
+              const fid = workerIndexToFactionId[i];
+              if (!fid || !factionsData.factions[fid]) continue;
+
+              const idx = i * STATS_INTS_PER_FACTION;
+              const tiles = Atomics.load(workerFactionStatsView, idx + 0);
+              const points = Atomics.load(workerFactionStatsView, idx + 4); // Offset 4 is totalPoints
+
+              if (tiles > 0 || points > 0) {
+                stats[fid] = { id: fid, tiles, points };
+              }
+            }
+          } else {
+            // バイナリ走査 (超高速)
+            const size = 500;
+            for (let y = 0; y < size; y++) {
+              for (let x = 0; x < size; x++) {
+                const offset = (y * size + x) * TILE_BYTE_SIZE;
+                const fidIdx = workerMapView.getUint16(offset, true);
+                if (fidIdx === 65535) continue;
+
+                const fid = workerIndexToFactionId[fidIdx];
+                if (fid && factionsData.factions[fid]) {
+                  if (!stats[fid])
+                    stats[fid] = { id: fid, points: 0, tiles: 0 };
+                  stats[fid].tiles++;
+                  stats[fid].points += getTilePoints(x, y, namedCells);
+                }
+              }
+            }
           }
-        });
+        } else {
+          // タイル走査 (チャンクまたはフル) - JSONベース
+          const mapData = tiles
+            ? { tiles }
+            : loadJSON(filePaths.mapState, { tiles: {} });
+
+          Object.entries(mapData.tiles).forEach(([key, tile]) => {
+            const fid = tile.faction || tile.factionId;
+            if (fid && factionsData.factions[fid]) {
+              if (!stats[fid]) stats[fid] = { id: fid, points: 0, tiles: 0 };
+              const [x, y] = key.split("_").map(Number);
+              stats[fid].tiles++;
+              stats[fid].points += getTilePoints(x, y, namedCells);
+            }
+          });
+        }
 
         // チャンク処理 (並列) の場合はここで中間結果を返す
         if (tiles) {
@@ -1388,9 +1555,6 @@ parentPort.on("message", async (msg) => {
       // 勢力データのボーナスポイントを加算 (シングルタスク / マージ後の最終処理用)
       const players = loadJSON(filePaths.players, { players: {} });
       const settings = loadJSON(filePaths.settings, { apSettings: {} });
-      const gameIds = settings.gardenMode
-        ? loadJSON(filePaths.gameIds, {}, true)
-        : null;
       const alliances = loadJSON(filePaths.alliances, { alliances: {} });
 
       const factionPoints = {};
@@ -1441,7 +1605,9 @@ parentPort.on("message", async (msg) => {
         // アクティブメンバーの取得 (handleApRefillと同じ1週間基準)
         const now = Date.now();
         const ONE_WEEK = 7 * 24 * 60 * 60 * 1000;
-        const activeMembers = (faction.members || []).filter((mid) => {
+        const activeMembers = (
+          Array.isArray(faction.members) ? faction.members : []
+        ).filter((mid) => {
           const p = players.players[mid];
           return p && now - new Date(p.lastActive || 0).getTime() <= ONE_WEEK;
         });
@@ -1451,7 +1617,6 @@ parentPort.on("message", async (msg) => {
             faction,
             players,
             settings,
-            gameIds,
             activeMembers,
           );
 
@@ -1537,9 +1702,14 @@ parentPort.on("message", async (msg) => {
     const { filePaths, factionId, tilesInMapKeys } = data;
     // tilesInMapKeys: メインスレッドから渡された対象勢力のタイルキーリスト (高速化用)
     try {
-      const mapState = loadJSON(filePaths.mapState, { tiles: {} });
+      // [OPTIMIZATION] SAB がある場合は JSON ロードをスキップ
+      const mapState = workerMapView
+        ? { tiles: {} }
+        : loadJSON(filePaths.mapState, { tiles: {} });
 
       // Worker内でロジック実行
+      // sharedUtils.getFactionClusterInfoWorker は、内部で getTileAt を使っているため、
+      // getTileAt が SAB 対応していれば、mapState.tiles が空でも動作する。
       const clusterInfo = getFactionClusterInfoWorker(
         factionId,
         mapState,
@@ -1552,7 +1722,10 @@ parentPort.on("message", async (msg) => {
       clusterInfo.clusters.forEach((cluster) => {
         if (cluster.hasCore) {
           cluster.tiles.forEach((tKey) => {
-            const t = mapState.tiles[tKey];
+            // [FIX] SAB 対応: getTileAt を使用してタイル情報を取得
+            const [x, y] = tKey.split("_").map(Number);
+            const t = getTileAt(x, y, mapState);
+
             if (t && !t.core) {
               const paintedTime = new Date(t.paintedAt || 0).getTime();
               // 5分ルール (Worker側で判定)
@@ -2865,34 +3038,98 @@ parentPort.on("message", async (msg) => {
       const mapState = loadJSON(filePaths.mapState, { tiles: {} });
       const updatedTiles = {};
       let count = 0;
+      // [OPTIMIZATION] 全タイル走査 (O(N))
+      // SABが利用可能な場合は、SABを走査して対象勢力のタイルを特定する (高速 & メモリ効率良)
+      // JSONの Object.entries を使うと、巨大な配列が生成されGC負荷が高い。
+      if (workerMapView) {
+        const size = 500;
+        for (let y = 0; y < size; y++) {
+          for (let x = 0; x < size; x++) {
+            const offset = (y * size + x) * TILE_BYTE_SIZE;
+            const fidIdx = workerMapView.getUint16(offset, true);
+            if (fidIdx === 65535) continue;
 
-      // 全タイル走査 (O(N))
-      Object.entries(mapState.tiles).forEach(([key, t]) => {
-        const fid = t.faction || t.factionId;
-        if (fid === requesterFactionId) {
-          // 所有権移転
-          t.factionId = targetFactionId;
-          delete t.faction;
+            const fid = workerIndexToFactionId[fidIdx];
+            if (fid === requesterFactionId) {
+              const key = `${x}_${y}`;
 
-          // 色更新 (カスタムカラーがない場合のみ)
-          if (!t.customColor && targetColor) {
-            t.color = targetColor;
+              // マップデータ(JSON用)を構築
+              // mapState.tiles[key] が存在しない場合もあるため、SABから復元するか、
+              // そもそも mapState がロードされている前提か？
+              // server.js からは filePaths.mapState が渡されるので loadJSON でロード済み。
+              // ただし SAB モードでは loadJSON をスキップしている可能性がある (line 1064 logic)
+              // line 2865: const mapState = loadJSON(...)
+              // ここでは常にロードしている(SAB checkがない)。
+              // なので mapState.tiles[key] は存在するはず。
+
+              const t = mapState.tiles[key];
+              if (!t) {
+                // SABにはあるがJSONにない？同期ズレの可能性。
+                // 安全のためスキップ、またはSABから再生成が必要。
+                // ここではスキップするが、通常は同期されているはず。
+                continue;
+              }
+
+              // 所有権移転
+              t.factionId = targetFactionId;
+              delete t.faction;
+
+              if (!t.customColor && targetColor) {
+                t.color = targetColor;
+              }
+
+              if (t.core) {
+                t.core.factionId = targetFactionId;
+              } else {
+                t.paintedAt = new Date().toISOString();
+              }
+
+              updatedTiles[key] = t;
+              count++;
+            }
           }
-
-          // 中核タイルのハンドリング
-          if (t.core) {
-            // 元々中核だったマスだけ中核を継承
-            t.core.factionId = targetFactionId;
-          } else {
-            // 中核でなかったマスは、即座に自動中核化されるのを防ぐため、塗装時間を現在時刻に更新
-            // (SAB等で時刻を使う場合もあるが、とりあえずJSON上の値を更新)
-            t.paintedAt = new Date().toISOString();
-          }
-
-          updatedTiles[key] = t;
-          count++;
         }
-      });
+      } else {
+        // Fallback: Legacy JSON Scan
+        Object.entries(mapState.tiles).forEach(([key, t]) => {
+          const fid = t.faction || t.factionId;
+          if (fid === requesterFactionId) {
+            // 所有権移転
+            t.factionId = targetFactionId;
+            delete t.faction;
+
+            // 色更新 (カスタムカラーがない場合のみ)
+            if (!t.customColor && targetColor) {
+              t.color = targetColor;
+            }
+
+            // 中核タイルのハンドリング
+            if (t.core) {
+              // 元々中核だったマスだけ中核を継承
+              t.core.factionId = targetFactionId;
+            } else {
+              // 中核でなかったマスは、即座に自動中核化されるのを防ぐため、塗装時間を現在時刻に更新
+              t.paintedAt = new Date().toISOString();
+            }
+
+            updatedTiles[key] = t;
+            count++;
+          }
+        });
+      }
+
+      // インデックスの更新 (同期)
+      if (factionTileIndex) {
+        if (factionTileIndex.data.has(requesterFactionId)) {
+          factionTileIndex.data.delete(requesterFactionId);
+        }
+        if (!factionTileIndex.data.has(targetFactionId)) {
+          factionTileIndex.data.set(targetFactionId, new Set());
+        }
+        Object.keys(updatedTiles).forEach((key) => {
+          factionTileIndex.data.get(targetFactionId).add(key);
+        });
+      }
 
       parentPort.postMessage({
         success: true,
@@ -2910,10 +3147,15 @@ parentPort.on("message", async (msg) => {
     const { filePaths } = data;
     try {
       const factionsData = loadJSON(filePaths.factions, { factions: {} });
-      const mapState = loadJSON(filePaths.mapState, { tiles: {} });
       const validFactionIds = new Set(Object.keys(factionsData.factions));
       let changed = false;
       let removedCount = 0;
+
+      // [NEW] CHECK_CONSISTENCY で mapState.tiles に直接アクセスしているため
+      // これは JSON メンテナンス用タスクとしてそのまま残すが、
+      // 巨大すぎてメモリ制限にかかる場合は SAB スキャンで ID チェックのみ行う形に将来的に移行可能。
+      // 現状はデータのクリーンアップ(削除/移行)を行う唯一の場所なので JSON をロードする。
+      const mapState = loadJSON(filePaths.mapState, { tiles: {} });
 
       Object.entries(mapState.tiles).forEach(([key, tile]) => {
         // 1. 不正な勢力IDチェック
@@ -3206,6 +3448,17 @@ parentPort.on("message", async (msg) => {
           tile.coreificationFactionId = toFactionId;
 
           updatedTiles[key] = tile;
+
+          // [OPTIMIZATION] インデックスの同期更新
+          if (factionTileIndex) {
+            if (factionTileIndex.data.has(fromFactionId)) {
+              factionTileIndex.data.get(fromFactionId).delete(key);
+            }
+            if (!factionTileIndex.data.has(toFactionId)) {
+              factionTileIndex.data.set(toFactionId, new Set());
+            }
+            factionTileIndex.data.get(toFactionId).add(key);
+          }
         }
       });
 
@@ -3234,7 +3487,12 @@ parentPort.on("message", async (msg) => {
     // 全体マップ画像生成タスク（3パターンモード対応）
     try {
       const { filePaths, outputPath, mode } = data;
-      const mapState = loadJSON(filePaths.mapState, { tiles: {} });
+      // [OPTIMIZATION] SABがある場合は mapState (JSON) のロードをスキップ
+      // generateFullMapImage 内で SAB (workerMapView) を参照する
+      const mapState = workerMapView
+        ? { tiles: {} }
+        : loadJSON(filePaths.mapState, { tiles: {} });
+
       const factions = loadJSON(filePaths.factions, { factions: {} });
       const namedCells = loadJSON(filePaths.namedCells, {});
       const alliances = loadJSON(filePaths.alliances, { alliances: {} });
@@ -3480,36 +3738,82 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
   }
 
   // タイル描画
-  Object.entries(mapState.tiles).forEach(([key, tile]) => {
-    const [x, y] = key.split("_").map(Number);
-    const fid = tile.faction || tile.factionId;
-    const faction = factions[fid];
+  // [OPTIMIZATION] SABが利用可能な場合は、SABを走査して描画 (高速 & メモリ削減)
+  if (workerMapView) {
+    const size = 500;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const offset = (y * size + x) * TILE_BYTE_SIZE;
+        const fidIdx = workerMapView.getUint16(offset, true);
+        if (fidIdx === 65535) continue; // 無所属
 
-    if (faction) {
-      let color = tile.customColor || faction.color || "#888888";
+        const fid = workerIndexToFactionId[fidIdx];
+        const faction = factions[fid];
+        if (faction) {
+          let color = faction.color || "#888888";
 
-      // 同盟モードでは同盟ごとに色分け、未加入は灰色
-      if (mode === "alliance") {
-        const allianceId = factionToAlliance[fid];
-        if (allianceId) {
-          const alliance = alliances[allianceId];
-          if (alliance && alliance.color) {
-            color = alliance.color;
+          // カスタムカラー (SABからは取れないため、faction colorを優先、または必要なら別途管理)
+          // 現状のSAB構造: offset+2 に colorInt がある
+          const colorInt = workerMapView.getUint32(offset + 2, true);
+          // colorInt から #RRGGBB を復元
+          const hex = colorInt.toString(16).padStart(6, "0");
+          color = `#${hex}`;
+
+          // 同盟モードのオーバーライド
+          if (mode === "alliance") {
+            const allianceId = factionToAlliance[fid];
+            if (allianceId) {
+              const alliance = alliances[allianceId];
+              if (alliance && alliance.color) {
+                color = alliance.color;
+              }
+            } else {
+              color = "#888888"; // 未加入は灰色
+            }
           }
-        } else {
-          color = "#888888"; // 未加入は灰色
+
+          ctx.fillStyle = color;
+          ctx.fillRect(
+            curPaddingX + x * TILE_SIZE,
+            curPaddingY + y * TILE_SIZE,
+            TILE_SIZE,
+            TILE_SIZE,
+          );
         }
       }
-
-      ctx.fillStyle = color;
-      ctx.fillRect(
-        curPaddingX + x * TILE_SIZE,
-        curPaddingY + y * TILE_SIZE,
-        TILE_SIZE,
-        TILE_SIZE,
-      );
     }
-  });
+  } else {
+    // Fallback: Legacy JSON Scan
+    Object.entries(mapState.tiles).forEach(([key, tile]) => {
+      const [x, y] = key.split("_").map(Number);
+      const fid = tile.faction || tile.factionId;
+      const faction = factions[fid];
+
+      if (faction) {
+        let color = tile.customColor || faction.color || "#888888";
+
+        if (mode === "alliance") {
+          const allianceId = factionToAlliance[fid];
+          if (allianceId) {
+            const alliance = alliances[allianceId];
+            if (alliance && alliance.color) {
+              color = alliance.color;
+            }
+          } else {
+            color = "#888888";
+          }
+        }
+
+        ctx.fillStyle = color;
+        ctx.fillRect(
+          curPaddingX + x * TILE_SIZE,
+          curPaddingY + y * TILE_SIZE,
+          TILE_SIZE,
+          TILE_SIZE,
+        );
+      }
+    });
+  }
 
   // 金枠（50x50センターエリア: 225～274）
   ctx.strokeStyle = "#FFD700";
@@ -3885,7 +4189,7 @@ function expandFactionCores(
 
   clusters.forEach((cluster) => {
     const size = cluster.length;
-    const threshold = coreTileSettings.instantCoreThreshold ?? 500; // expandのデフォルトは500だったが400に統一するか？一旦既存維持(500)で
+    const threshold = coreTileSettings.instantCoreThreshold ?? 400;
     const requiredHours = Math.floor((size - 1) / threshold);
     const requiredMs = requiredHours * 60 * 60 * 1000;
 

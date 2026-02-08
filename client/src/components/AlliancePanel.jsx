@@ -139,7 +139,19 @@ function AlliancePanel({
       <div className="space-y-4 px-1 flex-1 min-h-0">
       {Object.values(alliances).length === 0 && <p className="text-gray-500 text-center py-8">同盟はまだありません</p>}
 
-      {Object.values(alliances).map(a => (
+      {Object.values(alliances)
+          .filter(a => {
+              // [NEW] 戦争チェック: 自分の勢力と戦争中のメンバーがいる同盟は非表示
+              const hasWarWithMe = a.members.some(memberId => {
+                  return Object.values(wars).some(w =>
+                      (w.attackerSide.factions.includes(myFactionId) && w.defenderSide.factions.includes(memberId)) ||
+                      (w.attackerSide.factions.includes(memberId) && w.defenderSide.factions.includes(myFactionId))
+                  );
+              });
+              if (hasWarWithMe) return false;
+              return true;
+          })
+          .map(a => (
         <div key={a.id} className="premium-card relative overflow-hidden group hover:shadow-xl transition-all duration-300 border border-white/10 bg-white/5 py-4 px-5 flex items-center justify-between">
           <div className="absolute top-0 right-0 p-2 opacity-5 group-hover:opacity-10 transition-opacity pointer-events-none">
               <span className="text-4xl">🤝</span>
@@ -323,7 +335,21 @@ function AlliancePanel({
                          >
                              <option value="" disabled>勢力を選択...</option>
                              {Object.values(factions)
-                                 .filter(f => f.id !== myFactionId && !f.allianceId)
+                                 .filter(f => {
+                                     // 基本条件: 自分以外、未所属
+                                     if (f.id === myFactionId || f.allianceId) return false;
+
+                                     // [NEW] 戦争チェック: 自分の同盟メンバーのいずれかと戦争中の勢力は除外
+                                     const isAtWarWithAlliance = myAlliance.members.some(memberId => {
+                                         return activeWars.some(w =>
+                                             (w.attackerSide.factions.includes(memberId) && w.defenderSide.factions.includes(f.id)) ||
+                                             (w.attackerSide.factions.includes(f.id) && w.defenderSide.factions.includes(memberId))
+                                         );
+                                     });
+                                     if (isAtWarWithAlliance) return false;
+
+                                     return true;
+                                 })
                                  .sort((a,b) => (b.totalPoints || 0) - (a.totalPoints || 0))
                                  .map(f => (
                                      <option key={f.id} value={f.id}>{f.name} ({f.members?.length || 0}人)</option>

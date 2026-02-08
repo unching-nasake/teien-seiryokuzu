@@ -185,20 +185,7 @@ class LockManager {
   }
 }
 
-module.exports = {
-  MAP_SIZE,
-  SPECIAL_TILE_MIN,
-  SPECIAL_TILE_MAX,
-  MAX_POINTS,
-  MIN_POINTS,
-  GRADIENT_STEP,
-  NAMED_CELL_BONUS,
-  NAMED_CELL_CREATE_COST,
-  isSpecialTile,
-  getTilePoints,
-  LockManager,
-  calculateFactionPoints,
-};
+// exports at the bottom
 
 function calculateFactionPoints(factionId, mapState, namedCells = null) {
   let territoryPoints = 0;
@@ -266,13 +253,23 @@ function calculateFactionSharedAPLimit(
   settings,
   activeMembers = [],
 ) {
+  // Defensive check for arguments
+  if (!settings) settings = {};
+  if (!Array.isArray(activeMembers)) {
+    // If 4th arg is missing but 3rd arg is used, activeMembers might be undefined or incorrectly passed
+    activeMembers = [];
+  }
+
   const baseShared = settings.apSettings?.limits?.sharedBase ?? 50;
   let validCount = activeMembers.length;
+
   if (settings.gardenMode) {
     if (!playersData || !playersData.players) {
       validCount = 0;
     } else {
-      const validMembers = activeMembers.filter((mid) => {
+      // Ensure we have an array to filter
+      const membersToFilter = Array.isArray(activeMembers) ? activeMembers : [];
+      const validMembers = membersToFilter.filter((mid) => {
         const p = playersData.players[mid];
         if (!p) return false;
         return !!p.lastAuthenticated;

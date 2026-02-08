@@ -146,6 +146,8 @@ function Sidebar({
   onToggleSkipConfirmation,
   onToggleAutoSharedAp,
   isMergeEnabled = true,
+  mergerSettings = {},
+
   truces = {},
   wars = {},
   alliances = {},
@@ -163,6 +165,7 @@ function Sidebar({
   gardenAuthKey = null, // 共有認証キー
   gardenRefillCost = 30, // 庭園AP回復コスト
   gardenRefillAmount = 50, // 庭園AP回復量
+  namedTileSettings = {}, // [NEW]
   onLoginClick // ログインハンドラ
 }) {
   const [apUpdated, setApUpdated] = useState(false);
@@ -1005,6 +1008,17 @@ function Sidebar({
                   }
                   if (!validLocation) return null;
 
+                  // [NEW] ネームドマス最大数チェック
+                  const maxNamedTiles = namedTileSettings?.maxNamedTiles || 0;
+                  const currentTotalNamed = Object.keys(namedCells).length;
+                  if (maxNamedTiles > 0 && currentTotalNamed >= maxNamedTiles) {
+                      return (
+                        <div style={{ marginTop: '8px', padding: '8px', background: 'rgba(50,50,50,0.5)', borderRadius: '4px', fontSize: '0.8rem', color: '#aaa', textAlign: 'center' }}>
+                            最大数({maxNamedTiles})に達しているため<br/>新規作成できません
+                        </div>
+                      );
+                  }
+
                   return (
                       <button
                           className="btn btn-primary"
@@ -1240,6 +1254,21 @@ function Sidebar({
             const isNotAll = selectedTiles.length < currentTotal;
 
             if (selectedTiles.length > 0 && isAllSelf && isNotAll) {
+                // [New Phase 8] 戦争状態チェック
+                const checkWarWith = (fid1, fid2) => {
+                    if (!wars) return false;
+                    const f1 = String(fid1);
+                    const f2 = String(fid2);
+                    return Object.values(wars).some(w => {
+                        const attackers = w.attackerSide?.factions || [];
+                        const defenders = w.defenderSide?.factions || [];
+                        return (
+                            (attackers.includes(f1) && defenders.includes(f2)) ||
+                            (defenders.includes(f1) && attackers.includes(f2))
+                        );
+                    });
+                };
+
                 // 隣接勢力を検索
                 const nearbyFidSet = new Set();
                 const directions = [[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]];
@@ -1247,7 +1276,12 @@ function Sidebar({
                     directions.forEach(([dx, dy]) => {
                         const nt = getTile(t.x+dx, t.y+dy);
                         const nf = nt ? (nt.faction || nt.factionId) : null;
-                        if (nf && nf !== playerData.factionId) nearbyFidSet.add(nf);
+                        if (nf && nf !== playerData.factionId) {
+                            // 戦争中の勢力は譲渡候補から除外
+                            if (!checkWarWith(playerData.factionId, nf)) {
+                                nearbyFidSet.add(nf);
+                            }
+                        }
                     });
                 });
 
