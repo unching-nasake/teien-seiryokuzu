@@ -1808,7 +1808,7 @@ function Sidebar({
                 );
             })()}
 
-            {/* 勢力王は脱退できない (譲渡が必要) */}
+            {/* 勢力主は脱退できない (譲渡が必要) */}
             {!isKing && (
                 <button
                 className="btn"
@@ -1835,7 +1835,9 @@ function Sidebar({
           </div>
         )}
 
+        {/* リスト */}
         <div className="panel">
+            <div className="panel-title">リスト</div>
             <button
                 className="btn btn-purple"
                 onClick={() => setShowFactionList(true)}

@@ -280,6 +280,16 @@
         <!-- メッセージ送信設定 -->
         <div class="section">
           <h3>✉️ メッセージ送信設定</h3>
+          <div class="setting-item setting-item-row">
+            <input
+              type="checkbox"
+              id="messagesEnabled"
+              class="checkbox-large"
+            />
+            <label for="messagesEnabled" class="cursor-pointer"
+              >メッセージ送信機能を有効にする</label
+            >
+          </div>
           <div class="setting-group">
             <div class="setting-item">
               <label>メッセージ送信コスト (AP)</label>
@@ -314,7 +324,7 @@
         </div>
 
         <button class="save-btn" onclick="updateSettings()">
-          設定を全て保存する
+          設定を保存する
         </button>
       </div>
 

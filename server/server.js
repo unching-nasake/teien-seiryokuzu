@@ -521,6 +521,7 @@ function loadSystemSettings() {
     ...DEFAULT_MERGER_SETTINGS,
     ...settings.mergerSettings,
   };
+  if (settings.messagesEnabled === undefined) settings.messagesEnabled = true;
   return settings;
 }
 
@@ -1743,6 +1744,7 @@ app.get("/api/admin/settings", requireAdminAuth, (req, res) => {
     isGameStopped: !!settings.isGameStopped,
     isMergeEnabled: settings.isMergeEnabled !== false, // Default true
     gardenMode: !!settings.gardenMode,
+    messagesEnabled: settings.messagesEnabled !== false,
     apSettings: settings.apSettings || {},
     namedTileSettings: settings.namedTileSettings || {
       cost: 100,
@@ -1929,6 +1931,10 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
     settings.gardenMode = req.body.gardenMode;
   }
 
+  if (typeof req.body.messagesEnabled === "boolean") {
+    settings.messagesEnabled = req.body.messagesEnabled;
+  }
+
   // apSettingsの保存
   if (req.body.apSettings && typeof req.body.apSettings === "object") {
     // 数値型への変換とバリデーション
@@ -2093,6 +2099,7 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
     isGameStopped: settings.isGameStopped,
     isMergeEnabled: settings.isMergeEnabled,
     gardenMode: settings.gardenMode || false,
+    messagesEnabled: settings.messagesEnabled !== false,
     apSettings: {
       ...(settings.apSettings || {}),
       namedTileSettings: settings.namedTileSettings || {
@@ -2115,6 +2122,7 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
     isGameStopped: settings.isGameStopped,
     isMergeEnabled: settings.isMergeEnabled,
     gardenMode: settings.gardenMode || false,
+    messagesEnabled: settings.messagesEnabled !== false,
     apSettings: settings.apSettings || {},
     mapImageSettings: settings.mapImageSettings || { intervalMinutes: 1 },
     adminId: currentAdminIdLocal,
@@ -3276,6 +3284,9 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
     activeMemberIds,
   );
 
+  const systemSettings = loadSystemSettings();
+  const messagesEnabled = systemSettings.messagesEnabled !== false;
+
   return {
     ...f,
     id: fid,
@@ -3292,6 +3303,9 @@ function getEnrichedFaction(fid, factions, players, preCalcStats = null) {
     isWeak,
     adminId: currentAdminIdGlobal,
     sharedAPLimit: sharedLimit, // [NEW] クライアント側で表示に使用
+    globalSettings: {
+      messagesEnabled: messagesEnabled,
+    },
   };
 }
 
@@ -10729,7 +10743,14 @@ app.post(
   requireAuth,
   checkGameStatus,
   (req, res) => {
-    const { targetFactionId, expiresAt } = req.body;
+    const settings = loadSystemSettings();
+    if (settings.messagesEnabled === false) {
+      return res.json({
+        error: "現在、メッセージ送信機能は無効化されています",
+      });
+    }
+
+    const { targetFactionId } = req.body;
 
     const players = loadJSON(PLAYERS_PATH, { players: {} });
     const factions = loadJSON(FACTIONS_PATH, { factions: {} });
@@ -10807,6 +10828,7 @@ app.post(
       }
     };
 
+    const expiresAt = Date.now() + 24 * 60 * 60 * 1000; // 24時間後
     updateRequestList(myFaction.truceRequests, targetFactionId, expiresAt);
     updateRequestList(
       targetFaction.truceRequestsReceived,

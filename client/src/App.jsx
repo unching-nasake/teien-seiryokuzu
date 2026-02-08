@@ -812,6 +812,7 @@ function App() {
         isMergeEnabled: newSettings.isMergeEnabled,
         isGameStopped: newSettings.isGameStopped,
       }));
+      fetchFactions();
     });
 
     socket.on('system:notice', (newNotice) => {

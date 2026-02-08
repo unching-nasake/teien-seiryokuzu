@@ -119,6 +119,8 @@ function updateUI(data) {
     ap.gardenRefillAmount ?? 50;
   document.getElementById("tulipRefillIntervalHours").value =
     ap.tulipRefillIntervalHours ?? 3;
+  document.getElementById("messagesEnabled").checked =
+    data.messagesEnabled ?? true;
   document.getElementById("messageCost").value = ap.messageCost ?? 5;
   document.getElementById("mapImageInterval").value =
     mapSettings.intervalMinutes ?? 1;
@@ -325,6 +327,7 @@ async function fetchSettings() {
 async function updateSettings() {
   const settings = {
     gardenMode: document.getElementById("gardenMode").checked,
+    messagesEnabled: document.getElementById("messagesEnabled").checked,
     apSettings: {
       initialAp: parseInt(document.getElementById("initialAp").value, 10),
       apPerPost: parseInt(document.getElementById("apPerPost").value, 10),
