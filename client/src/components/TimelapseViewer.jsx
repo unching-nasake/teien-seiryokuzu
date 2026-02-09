@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import GameMap from './GameMap';
+import GameMap, { getTilePoints } from './GameMap';
 import Leaderboard from './Leaderboard';
 
 function TimelapseViewer({ onClose, factions, showFactionNames: initialShowFactionNames = true, workerPool }) {
@@ -9,6 +9,7 @@ function TimelapseViewer({ onClose, factions, showFactionNames: initialShowFacti
   const [currentTiles, setCurrentTiles] = useState({});
   const [snapshotFactions, setSnapshotFactions] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [namedCells, setNamedCells] = useState({});
   const timerRef = useRef(null);
 
   // View Options
@@ -26,6 +27,18 @@ function TimelapseViewer({ onClose, factions, showFactionNames: initialShowFacti
         if (data.history) {
           setHistoryList(data.history);
           setCurrentIndex(data.history.length - 1); // 最新を表示
+        }
+      })
+      .catch(err => {
+        console.error(err);
+      });
+
+    // ネームドマス取得
+    fetch('/api/named-cells', { credentials: 'include' })
+      .then(res => res.json())
+      .then(data => {
+        if (data && typeof data === 'object') {
+          setNamedCells(data);
         }
         setIsLoading(false);
       })
@@ -91,31 +104,19 @@ function TimelapseViewer({ onClose, factions, showFactionNames: initialShowFacti
 
      // 2. カウント/ポイント集計
      const scores = {};
-     let usePoints = false;
+     const mapSize = 500; // デフォルト 500
 
-/*
-     if (snapshotFactions) {
-         // snapshotが存在する場合、その時点の totalPoints を使用
-         Object.keys(snapshotFactions).forEach(fid => {
-             const f = snapshotFactions[fid];
-             if (f && typeof f.totalPoints === 'number') {
-                 usePoints = true;
-                 scores[fid] = f.totalPoints;
-             }
-         });
-     }
-     */
+     // タイルから集集計 (ポイント対応)
+     Object.entries(currentTiles).forEach(([key, t]) => {
+         const fid = t.faction || t.factionId;
+         if (fid) {
+             const [x, y] = key.split('_').map(Number);
+             const points = getTilePoints(x, y, mapSize, namedCells);
+             scores[fid] = (scores[fid] || 0) + points;
+         }
+     });
 
-     // スナップショットにポイントデータがない、またはスナップショット自体がない場合
-     if (!usePoints) {
-         // タイル数から集計 (互換性)
-         Object.values(currentTiles).forEach(t => {
-             const fid = t.faction || t.factionId;
-             if (fid) {
-                 scores[fid] = (scores[fid] || 0) + 1;
-             }
-         });
-     }
+     const usePoints = true; // 常にポイントベースにする
 
      // 3. アイテム整形
      // sourceFactionsにある勢力のみを対象とする
@@ -176,20 +177,23 @@ function TimelapseViewer({ onClose, factions, showFactionNames: initialShowFacti
 
         <div className="timelapse-map-wrapper">
              {/* GameMapを再利用。操作不可にする */}
-             <GameMap
-                tiles={currentTiles}
-                factions={snapshotFactions || factions}
-                selectedTiles={[]}
-                onTileClick={() => {}} // No-op
-                playerFactionId={null}
-                readOnly={true}
-                showTooltip={false} // タイムラプスではツールチップ（黒いバー）を出さない
-                showFactionNames={showFactionNames}
-                showAllianceNames={showFactionNames}
-                allianceDisplayMode={allianceDisplayMode}
-                limitZoomOut={false}
-                workerPool={workerPool}
-              />
+              <GameMap
+                 tileData={null} // タイムラプスは旧式の tiles={currentTiles} を使用
+                 tiles={currentTiles}
+                 factions={snapshotFactions || factions}
+                 selectedTiles={[]}
+                 onTileClick={() => {}} // No-op
+                 playerFactionId={null}
+                 readOnly={true}
+                 showTooltip={false} // タイムラプスではツールチップ（黒いバー）を出さない
+                 showFactionNames={showFactionNames}
+                 showAllianceNames={showFactionNames}
+                 allianceDisplayMode={allianceDisplayMode}
+                 limitZoomOut={false}
+                 workerPool={workerPool}
+                 namedCells={namedCells}
+                 showNamedTileNames={showFactionNames} // 名前表示ONの時だけ星名も出す
+               />
 
              {/* リーダーボード表示 */}
              {showLeaderboard && (

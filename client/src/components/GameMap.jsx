@@ -5,10 +5,10 @@ import { useMultiRenderWorker } from '../hooks/useMultiRenderWorker';
 // [REMOVED] Hardcoded MAP_SIZE = 500
 const TILE_SIZE = 16;
 const VIEWPORT_PADDING = 50;
-const MAX_POINTS = 10;
-const MIN_POINTS = 1;
-const GRADIENT_STEP = 5;
-const NAMED_CELL_BONUS = 20;
+export const MAX_POINTS = 10;
+export const MIN_POINTS = 1;
+export const GRADIENT_STEP = 5;
+export const NAMED_CELL_BONUS = 20;
 
 // Helper to get special tile range
 const getSpecialTileRange = (mapSize) => {
@@ -25,7 +25,7 @@ const isSpecialTile = (x, y, mapSize) => {
 };
 
 // グラデーションポイント計算
-const getTilePoints = (x, y, mapSize, namedCells = null) => {
+export const getTilePoints = (x, y, mapSize, namedCells = null) => {
   let basePoints;
   const { min, max } = getSpecialTileRange(mapSize);
 
@@ -99,6 +99,7 @@ function GameMap({
   workerPool = null, // [NEW] 共有WorkerPoolを受け取る
   version,
   mapSize = 500, // [NEW] Accept mapSize prop
+  tiles = {}, // [BACKWARD COMPAT] Support legacy tiles object (e.g. for timelapse)
 }) {
 
 
@@ -137,63 +138,83 @@ function GameMap({
 
   // 高速なFactionID取得 (オブジェクト生成なし)
   const getFactionIdRaw = useCallback((x, y) => {
-    if (!sabView) return null;
-    if (x < 0 || x >= mapSize || y < 0 || y >= mapSize) return null; // MAP_SIZE constant
-    const offset = (y * mapSize + x) * 24;
-    const fidIdx = sabView.getUint16(offset + 0, true);
-    return fidIdx === 65535 ? null : (tileData.factionsList ? tileData.factionsList[fidIdx] : null);
-  }, [sabView, tileData, mapSize]);
+    if (sabView && x >= 0 && x < mapSize && y >= 0 && y < mapSize) {
+      const offset = (y * mapSize + x) * 24;
+      const fidIdx = sabView.getUint16(offset + 0, true);
+      return fidIdx === 65535 ? null : (tileData?.factionsList ? tileData.factionsList[fidIdx] : null);
+    }
+    // Fallback for legacy tiles
+    const key = `${x}_${y}`;
+    if (tiles && tiles[key]) {
+      return tiles[key].faction || tiles[key].factionId;
+    }
+    return null;
+  }, [sabView, tileData, mapSize, tiles]);
 
   const getTile = useCallback((x, y) => {
-    if (!sabView) return null;
-    if (x < 0 || x >= mapSize || y < 0 || y >= mapSize) return null;
+    // 1. SABから取得を試みる
+    if (sabView && x >= 0 && x < mapSize && y >= 0 && y < mapSize) {
+      const offset = (y * mapSize + x) * 24; // TILE_BYTE_SIZE = 24
 
-    const offset = (y * mapSize + x) * 24; // TILE_BYTE_SIZE = 24
+      const fidIdx = sabView.getUint16(offset + 0, true);
+      const colorInt = sabView.getUint32(offset + 2, true);
+      const paintedByIdx = sabView.getUint32(offset + 6, true);
+      const overpaint = sabView.getUint8(offset + 10);
+      const flags = sabView.getUint8(offset + 11);
+      // offset 12-19 float64
+      const exp = sabView.getFloat64(offset + 12, true);
 
-    const fidIdx = sabView.getUint16(offset + 0, true);
-    const colorInt = sabView.getUint32(offset + 2, true);
-    const paintedByIdx = sabView.getUint32(offset + 6, true);
-    const overpaint = sabView.getUint8(offset + 10);
-    const flags = sabView.getUint8(offset + 11);
-    // offset 12-19 float64
-    const exp = sabView.getFloat64(offset + 12, true); // [FIX] Offset 12
-    const pAtSec = sabView.getUint32(offset + 20, true);
+      const factionId = fidIdx === 65535 ? null : (tileData?.factionsList ? tileData.factionsList[fidIdx] : null);
+      const color = factionId ? `#${colorInt.toString(16).padStart(6, "0")}` : (blankTileColor || "#ffffff");
+      const paintedBy = paintedByIdx === 0 ? null : (tileData?.playersList ? tileData.playersList[paintedByIdx - 1] : null);
 
-    const factionId = fidIdx === 65535 ? null : (tileData.factionsList ? tileData.factionsList[fidIdx] : null);
-    const color = factionId ? `#${colorInt.toString(16).padStart(6, "0")}` : (blankTileColor || "#ffffff");
-    const paintedBy = paintedByIdx === 0 ? null : (tileData.playersList ? tileData.playersList[paintedByIdx - 1] : null);
+      const tile = {
+        x, y, factionId, faction: factionId, color, paintedBy, overpaint
+      };
 
-    const tile = {
-      x, y, factionId, faction: factionId, color, paintedBy, overpaint
-    };
+      const safeISOString = (ms) => {
+        if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return null;
+        try {
+          return new Date(ms).toISOString();
+        } catch (e) {
+          return null;
+        }
+      };
 
-    const safeISOString = (ms) => {
-      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return null;
-      try {
-        return new Date(ms).toISOString();
-      } catch (e) {
-        return null;
+      if (flags & 1) {
+        tile.core = { factionId, expiresAt: safeISOString(exp) };
       }
-    };
+      if (flags & 2) {
+        tile.coreificationUntil = safeISOString(exp);
+        tile.coreificationFactionId = factionId;
+      }
 
-    if (flags & 1) {
-      tile.core = { factionId, expiresAt: safeISOString(exp) };
-    }
-    if (flags & 2) {
-      tile.coreificationUntil = safeISOString(exp);
-      tile.coreificationFactionId = factionId;
+      return tile;
     }
 
-    return tile;
-  }, [sabView, tileData, blankTileColor]);
+    // 2. フォールバック: tiles オブジェクトから取得 (タイムラプス用)
+    const key = `${x}_${y}`;
+    if (tiles && tiles[key]) {
+      const t = tiles[key];
+      const fid = t.faction || t.factionId;
+      const f = factions[fid];
+      return {
+        ...t,
+        factionId: fid,
+        faction: fid,
+        color: t.color || f?.color || blankTileColor || "#ffffff"
+      };
+    }
+
+    return null;
+  }, [sabView, tileData, blankTileColor, tiles, mapSize, factions]);
 
   // [NEW] Multi-Threaded Render Worker Hook
   // Debounce tile updates to avoid excessive transfers
-  const [debouncedTileData, setDebouncedTileData] = useState(tileData);
+  const [debouncedTileData, setDebouncedTileData] = useState(tileData || tiles);
   useEffect(() => {
-    setDebouncedTileData(tileData);
-    // setMapVersion(v => v + 1); // useWorldStateのversionを使用
-  }, [tileData]);
+    setDebouncedTileData(tileData || tiles);
+  }, [tileData, tiles]);
 
   const {
       initWorkers,
@@ -392,25 +413,28 @@ function GameMap({
 
   useEffect(() => {
     // タイルデータが空なら計算しない
-    if (!tileData || !tileData.sab) return;
+    if (!debouncedTileData) return;
+    const isSAB = !!(debouncedTileData.sab);
+    const hasTiles = !!(!isSAB && debouncedTileData && Object.keys(debouncedTileData).length > 0);
+    if (!isSAB && !hasTiles) return;
 
     let isMounted = true;
 
     if (typeof calculateClustersRef.current !== 'function') return;
 
-    // [OPTIMIZED] Pass mapVersion to avoid hashing in worker
-    calculateClustersRef.current(tileData, mapVersion)
+    // [FIX] calculateClusters(data, version) -> arguments are correct, but ensure we use debouncedTileData
+    calculateClustersRef.current(debouncedTileData, mapVersion)
       .then(clusterMap => {
         if (!isMounted) return;
 
         const centers = {};
         Object.entries(clusterMap).forEach(([fid, clusters]) => {
-          const coreClusters = clusters.filter(c => c.hasCore);
+          const coreClusters = (clusters || []).filter(c => c.hasCore);
           let targetCluster = null;
 
           if (coreClusters.length > 0) {
             targetCluster = coreClusters.reduce((prev, curr) => (curr.count > prev.count ? curr : prev), coreClusters[0]);
-          } else if (clusters.length > 0) {
+          } else if (clusters && clusters.length > 0) {
             targetCluster = clusters.reduce((prev, curr) => (curr.count > prev.count ? curr : prev), clusters[0]);
           }
 
@@ -430,7 +454,7 @@ function GameMap({
       });
 
     return () => { isMounted = false; };
-  }, [tileData, mapVersion]);
+  }, [debouncedTileData, mapVersion]);
 
   // LOD描画用: チャンク単位の代表色を差分更新で計算
   // 変更があったチャンクのみ再計算し、リアルタイム更新時の負荷を軽減
@@ -465,7 +489,7 @@ function GameMap({
 
     // [OPTIMIZED] Pass SharedArrayBuffer to Edge Calculation if needed,
     // or use getTile based loop in worker (which we already updated in mapWorker)
-    calculateEdges(tileData, activeFactionId, mapVersion)
+    calculateEdges(debouncedTileData, activeFactionId, mapVersion)
       .then(edges => {
         if (isMounted) {
           setActiveFactionEdges(edges);
@@ -679,8 +703,8 @@ function GameMap({
             ctx.fillRect(screenX, screenY, tileSize, tileSize);
         }
 
-        // ★マーカー（ズームレベルに関わらず一定サイズで表示）
-        if (viewport.zoom > 0.15) {
+        // ★マーカー（ズームレベルに関わらず一定サイズで表示。名前表示フラグに従う）
+        if (showNamedTileNames && viewport.zoom > 0.15) {
             // マーカーサイズは固定（ズームに依存しない）
             const markerSize = 14; // 固定サイズ
             ctx.fillStyle = '#FFD700'; // 金色で統一

@@ -136,6 +136,45 @@ function rebuildStableMappings(factionsData, playersData) {
   );
 }
 
+async function initializeData() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+
+  // 1. まず各マッピングテーブルの読み込みのみ先行 (SABの解釈に必要)
+  const factionsData = loadJSON(FACTIONS_PATH, { factions: {} });
+  const playersData = loadJSON(PLAYERS_PATH, { players: {} });
+  rebuildStableMappings(factionsData, playersData);
+
+  // 2. バイナリマップがあればそれを優先ロード (高速 & 省メモリ)
+  const binaryLoaded = loadMapBinary();
+
+  // 3. バイナリがない、あるいは壊れている場合のみ JSON から復元
+  if (!binaryLoaded) {
+    console.log(
+      "[Init] Map Binary not found or failed to load. Falling back to JSON...",
+    );
+    if (!fs.existsSync(MAP_STATE_PATH)) {
+      saveJSON(MAP_STATE_PATH, { tiles: {} });
+    }
+    const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
+    syncSABWithJSON(mapState);
+  } else {
+    // バイナリからロードした場合のみ、Stats と ZOC を再構築 (バイナリにはこれらは含まれないため)
+    const namedCells = loadJSON(NAMED_CELLS_PATH, {});
+    recalculateZocSAB(namedCells, factionsData);
+    // Stats再計算 (バイナリロード直後)
+    recalculateFactionStatsFromSAB(namedCells);
+  }
+
+  if (!fs.existsSync(FACTIONS_PATH)) {
+    saveJSON(FACTIONS_PATH, { factions: {} });
+  }
+  if (!fs.existsSync(PLAYERS_PATH)) {
+    saveJSON(PLAYERS_PATH, { players: {} });
+  }
+}
+
 function getFactionIdx(fid) {
   if (!fid) return 65535;
   if (factionIdToIndex.has(fid)) return factionIdToIndex.get(fid);
@@ -759,8 +798,26 @@ async function saveMapBinary() {
   console.log(`[BinaryMap] Persisted binary map to ${MAP_STATE_BIN_PATH}`);
 }
 
-// [NEW] バイナリマップのロード (Unused, removed to fix lint)
-// function loadMapBinary() { ... }
+// [NEW] バイナリマップのロード
+function loadMapBinary() {
+  if (!fs.existsSync(MAP_STATE_BIN_PATH)) return false;
+  try {
+    const buffer = fs.readFileSync(MAP_STATE_BIN_PATH);
+    if (buffer.length !== sharedMapSAB.byteLength) {
+      console.warn(
+        `[BinaryMap] File size mismatch: expected ${sharedMapSAB.byteLength}, got ${buffer.length}`,
+      );
+      return false;
+    }
+    const uint8View = new Uint8Array(sharedMapSAB);
+    uint8View.set(new Uint8Array(buffer));
+    console.log(`[BinaryMap] Loaded map from binary: ${MAP_STATE_BIN_PATH}`);
+    return true;
+  } catch (e) {
+    console.error(`[BinaryMap] Failed to load binary map:`, e);
+    return false;
+  }
+}
 
 // [NEW] Merger Settings Defaults
 const DEFAULT_MERGER_SETTINGS = {
@@ -1894,36 +1951,17 @@ async function persistMapState() {
       mapSaveTimer = null;
     }
 
-    // メモリ上の最新データを保存
-    // loadJSONはメモリキャッシュ(FILE_CACHE)を返す(false指定)
-    const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} }, false);
-
-    // pendingChanges の内容を mapState にマージ (念のため)
-    pendingChanges.forEach((tile, key) => {
-      if (key === "__FULL_SAVE_REQUIRED__") return;
-      if (!mapState.tiles) mapState.tiles = {};
-
-      if (tile === null) {
-        delete mapState.tiles[key];
-      } else {
-        mapState.tiles[key] = tile;
-      }
-    });
-
-    // pendingChanges をクリアしてから保存 (保存中に新しい変更が来るのを防ぐロックが必要だが、JSはシングルスレッドなのでOK)
-    // ただし await saveJSON 中に他の処理が入る可能性はある。
-    // 理想的には pendingChanges をローカルにコピーしてクリアだが、
-    // 今回は saveJSON 呼び出し時にデータを渡すので、その時点のスナップショットが保存される。
-    pendingChanges.clear(); // ここでクリアしてしまうと、saveJSON失敗時にデータロストするリスクがあるが、簡易実装とする
-
-    // saveJSON は LockManager を使うので安全。内部で saveMapBinary も実行される。
-    await saveJSON(MAP_STATE_PATH, mapState, { skipLock: false });
+    // [New Strategy] Always save Binary for fast recovery.
+    // JSON save is handled in the 1H backup loop or during specific events.
+    await saveMapBinary();
 
     lastMapSaveTime = Date.now();
-    console.log(`[MapSave] Map state saved successfully (JSON & Binary).`);
+    console.log(`[MapSave] Map state binary saved successfully.`);
+
+    // Important: Clear pending changes after successful binary save
+    pendingChanges.clear();
   } catch (e) {
-    console.error(`[MapSave] Failed to save map state:`, e);
-    // 失敗した場合はログに出すのみ (リトライロジックは今回省略)
+    console.error(`[MapSave] Failed to save binary map state:`, e);
   }
 }
 
@@ -3100,78 +3138,31 @@ if (!fs.existsSync(DATA_DIR)) {
 }
 
 // 初期データ作成
-async function initializeData() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  // game_ids は SQLite で管理されるため、パスの存在チェックと初期ファイル作成は不要
-  if (!fs.existsSync(MAP_STATE_PATH)) {
-    saveJSON(MAP_STATE_PATH, { tiles: {} });
-  }
-  if (!fs.existsSync(FACTIONS_PATH)) {
-    saveJSON(FACTIONS_PATH, { factions: {} });
-  }
-  if (!fs.existsSync(PLAYERS_PATH)) {
-    saveJSON(PLAYERS_PATH, { players: {} });
-  }
-  if (!fs.existsSync(FACTION_NOTICES_PATH)) {
-    saveJSON(FACTION_NOTICES_PATH, {});
-  }
-  if (!fs.existsSync(NAMED_CELLS_PATH)) {
-    saveJSON(NAMED_CELLS_PATH, {});
-  }
-  if (!fs.existsSync(ALLIANCES_PATH)) {
-    console.log("[Init] ALLIANCES_PATH not found, initializing...");
-    saveJSON(ALLIANCES_PATH, { alliances: {} });
-  } else {
-    const check = loadJSON(ALLIANCES_PATH, { alliances: {} });
-    console.log(
-      `[Init] ALLIANCES_PATH exists. Current count: ${Object.keys(check.alliances || {}).length}`,
-    );
-  }
-  if (!fs.existsSync(TRUCES_PATH)) {
-    saveJSON(TRUCES_PATH, { truces: {} });
-  }
-  if (!fs.existsSync(SYSTEM_SETTINGS_PATH)) {
-    saveJSON(SYSTEM_SETTINGS_PATH, {
-      isGameStopped: false,
-      adminPassword:
-        "$2b$10$vo24P/c5vT0DX6Sl8E8/DOsMsTfhhrrPo9.Hzx8Tyew1G8ESJJXsu", // admin
-      mergerSettings: { prohibitedRank: 0 },
-    });
-  }
+/**
+ * SABの内容から全勢力の統計(タイル数、ポイント)を再計算する
+ */
+function recalculateFactionStatsFromSAB(namedCells) {
+  const size = MAP_SIZE;
+  factionStatsView.fill(0);
+  for (let i = 0; i < size * size; i++) {
+    const offset = i * TILE_BYTE_SIZE;
+    const fidIdx = sharedMapView.getUint16(offset, true);
+    if (fidIdx !== 65535 && fidIdx < MAX_FACTIONS_LIMIT) {
+      const parsedIdx = fidIdx * STATS_INTS_PER_FACTION;
+      Atomics.add(factionStatsView, parsedIdx + 0, 1); // tileCount
 
-  // 過去データへの互換性対応
-  try {
-    await updateJSON(
-      FACTIONS_PATH,
-      (data) => {
-        let updated = false;
-        Object.values(data.factions || {}).forEach((f) => {
-          if (!f.alliances) {
-            f.alliances = [];
-            updated = true;
-          }
-          if (!f.allianceRequests) {
-            f.allianceRequests = [];
-            updated = true;
-          }
-        });
-        return updated;
-      },
-      {},
-    );
-  } catch (e) {
-    console.error("初期化エラー (factions):", e);
-  }
+      const x = i % size;
+      const y = Math.floor(i / size);
+      const points = getTilePoints(x, y, MAP_SIZE, namedCells);
+      Atomics.add(factionStatsView, parsedIdx + 4, points); // totalPoints
 
-  // 明示的なメモリロード
-  // game_ids は DB 経由で適宜取得するため明示的なロード不要
-  loadJSON(MAP_STATE_PATH, { tiles: {} });
-  loadJSON(FACTIONS_PATH, { factions: {} });
-  loadJSON(PLAYERS_PATH, { players: {} });
-  loadJSON(NAMED_CELLS_PATH, {});
-  loadJSON(TRUCES_PATH, { truces: {} });
+      const flags = sharedMapView.getUint8(offset + 11);
+      if (flags & 1) {
+        // Core
+        Atomics.add(factionStatsView, parsedIdx + 1, 1);
+      }
+    }
+  }
 }
 
 (async () => {
@@ -3181,7 +3172,7 @@ async function initializeData() {
     // 中核マスの整合性チェック
     await recalculateAllFactionCores();
     // 全勢力のポイント再計算 (領土ポイントの整合性を確保)
-    recalculateAllFactionPoints();
+    // recalculateAllFactionPoints(); // StatsSABにより初期化済み
 
     // レガシー形式の戦争エントリをクリーンアップ (factionA_factionB 形式)
     const warsData = loadJSON(WARS_PATH, { wars: {} });
@@ -15873,11 +15864,11 @@ const checkDiplomacyExpirations = async () => {
 setInterval(checkDiplomacyExpirations, 60 * 1000); // 1分ごとにチェック
 
 // [NEW] 定期的なJSONダンプ (バックアップ用)
-// SQLite化したデータを1時間に1回JSONファイルとして出力する
+// SQLite化したデータ、および SAB上のマップデータを1時間に1回JSONファイルとして出力する
 setInterval(
   async () => {
     try {
-      console.log("[Backup] Dumping JSON files from DB/Cache...");
+      console.log("[Backup] Dumping JSON files from DB/Cache/SAB...");
       const backupOptions = { forceDump: true, skipLock: true };
 
       const players = loadJSON(PLAYERS_PATH, { players: {} });
@@ -15891,6 +15882,50 @@ setInterval(
 
       const logs = loadJSON(ACTIVITY_LOG_PATH, { entries: [] });
       await saveJSON(ACTIVITY_LOG_PATH, logs, backupOptions);
+
+      // [NEW] マップデータのJSONバックアップ (SABから全復元)
+      const mapState = { tiles: {} };
+      const size = MAP_SIZE;
+      for (let i = 0; i < size * size; i++) {
+        const offset = i * TILE_BYTE_SIZE;
+        const fidIdx = sharedMapView.getUint16(offset, true);
+        if (fidIdx === 65535) continue;
+
+        const fid = indexToFactionId[fidIdx];
+        if (!fid) continue;
+
+        const x = i % size;
+        const y = Math.floor(i / size);
+        const pIdx = sharedMapView.getUint32(offset + 6, true);
+        const paintedBy = pIdx > 0 ? playerIds[pIdx - 1] : null;
+        const flags = sharedMapView.getUint8(offset + 11);
+        const exp = sharedMapView.getFloat64(offset + 12, true);
+
+        const tile = {
+          factionId: fid,
+          color: `#${sharedMapView
+            .getUint32(offset + 2, true)
+            .toString(16)
+            .padStart(6, "0")}`,
+          paintedBy,
+          overpaint: sharedMapView.getUint8(offset + 10),
+          paintedAt: new Date(
+            sharedMapView.getUint32(offset + 20, true) * 1000,
+          ).toISOString(),
+        };
+        if (flags & 1)
+          tile.core = {
+            factionId: fid,
+            expiresAt: new Date(exp).toISOString(),
+          };
+        if (flags & 2) tile.coreificationUntil = new Date(exp).toISOString();
+
+        mapState.tiles[`${x}_${y}`] = tile;
+      }
+      await saveJSON(MAP_STATE_PATH, mapState, {
+        ...backupOptions,
+        skipBinaryHook: true,
+      });
 
       console.log("[Backup] JSON dump completed.");
     } catch (e) {

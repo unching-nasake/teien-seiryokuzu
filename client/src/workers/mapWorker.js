@@ -210,6 +210,119 @@ function calculateClustersSAB(sab, factionsList) {
 }
 
 /**
+ * 勢力ごとのクラスタリング (旧式 Object版 - タイムラプス用)
+ */
+function calculateClustersLegacy(tiles) {
+  const factionTilesMap = {};
+
+  Object.values(tiles).forEach((t) => {
+    const fid = t.faction || t.factionId;
+    if (!fid) return;
+    if (!factionTilesMap[fid]) factionTilesMap[fid] = [];
+    factionTilesMap[fid].push(t);
+  });
+
+  const result = {};
+
+  Object.entries(factionTilesMap).forEach(([factionId, tList]) => {
+    // 高速検索用のMapを作成
+    const tileMap = new Map();
+    tList.forEach((t) => tileMap.set(`${t.x}_${t.y}`, t));
+
+    const visited = new Set();
+    const clusters = [];
+
+    tList.forEach((startTile) => {
+      const startKey = `${startTile.x}_${startTile.y}`;
+      if (visited.has(startKey)) return;
+
+      const cluster = [];
+      const queue = [startTile];
+      visited.add(startKey);
+      let hasCore = false;
+
+      while (queue.length > 0) {
+        const current = queue.shift();
+        cluster.push(current);
+
+        if (
+          current.core &&
+          current.core.factionId === (current.faction || current.factionId)
+        ) {
+          hasCore = true;
+        }
+
+        const neighbors = [
+          [0, 1],
+          [0, -1],
+          [1, 0],
+          [-1, 0],
+        ];
+        for (const [dx, dy] of neighbors) {
+          const nx = current.x + dx;
+          const ny = current.y + dy;
+          const nk = `${nx}_${ny}`;
+          const nTile = tileMap.get(nk);
+          if (nTile && !visited.has(nk)) {
+            visited.add(nk);
+            queue.push(nTile);
+          }
+        }
+      }
+      clusters.push({ tiles: cluster, hasCore });
+    });
+
+    result[factionId] = clusters.map((c) => {
+      let sumX = 0,
+        sumY = 0;
+      c.tiles.forEach((t) => {
+        sumX += t.x;
+        sumY += t.y;
+      });
+      return {
+        x: sumX / c.tiles.length,
+        y: sumY / c.tiles.length,
+        count: c.tiles.length,
+        hasCore: c.hasCore,
+      };
+    });
+  });
+
+  return result;
+}
+
+/**
+ * 勢力のエッジ計算 (旧式 Object版 - タイムラプス用)
+ */
+function calculateFactionEdgesLegacy(tiles, factionId) {
+  if (!factionId) return [];
+
+  const fTiles = Object.values(tiles).filter(
+    (t) => (t.faction || t.factionId) === factionId,
+  );
+  if (fTiles.length === 0) return [];
+
+  const tileSet = new Set(fTiles.map((t) => `${t.x}_${t.y}`));
+  const edges = [];
+
+  fTiles.forEach((t) => {
+    const { x, y } = t;
+    const checkNeighbor = (nx, ny) => tileSet.has(`${nx}_${ny}`);
+
+    if (!checkNeighbor(x, y - 1))
+      edges.push({ x1: x, y1: y, x2: x + 1, y2: y, type: "top" });
+    if (!checkNeighbor(x, y + 1))
+      edges.push({ x1: x, y1: y + 1, x2: x + 1, y2: y + 1, type: "bottom" });
+    if (!checkNeighbor(x - 1, y))
+      edges.push({ x1: x, y1: y, x2: x, y2: y + 1, type: "left" });
+    if (!checkNeighbor(x + 1, y))
+      edges.push({ x1: x + 1, y1: y, x2: x + 1, y2: y + 1, type: "right" });
+  });
+
+  return edges;
+}
+
+/**
  * 自動選択候補探索 (SAB版)
  */
 function findAutoSelectCandidates(
@@ -422,6 +535,7 @@ self.onmessage = async function (e) {
       case "CALCULATE_CLUSTERS":
         {
           const version = data.version;
+          const targetData = data.sharedData || data; // Handle both direct and nested data
           if (
             version !== undefined &&
             cache.clusters.version === version &&
@@ -429,10 +543,17 @@ self.onmessage = async function (e) {
           ) {
             result = cache.clusters.result;
           } else {
-            result = calculateClustersSAB(
-              data.sharedData.sab,
-              data.sharedData.factionsList,
-            );
+            if (targetData && targetData.sab) {
+              result = calculateClustersSAB(
+                targetData.sab,
+                targetData.factionsList,
+              );
+            } else if (targetData && !targetData.sab) {
+              // Tiles object case
+              result = calculateClustersLegacy(targetData);
+            } else {
+              result = {};
+            }
             cache.clusters.result = result;
             cache.clusters.version = version;
           }
@@ -443,15 +564,23 @@ self.onmessage = async function (e) {
         {
           const version = data.version;
           const fid = data.factionId;
+          const targetData = data.sharedData || data;
           const cached = cache.edges.get(fid);
           if (version !== undefined && cached && cached.version === version) {
             result = cached.result;
           } else {
-            result = calculateFactionEdgesSAB(
-              data.sharedData.sab,
-              fid,
-              data.sharedData.factionsList,
-            );
+            if (targetData && targetData.sab) {
+              result = calculateFactionEdgesSAB(
+                targetData.sab,
+                fid,
+                targetData.factionsList,
+              );
+            } else if (targetData && !targetData.sab) {
+              // Tiles object case
+              result = calculateFactionEdgesLegacy(targetData, fid);
+            } else {
+              result = [];
+            }
             cache.edges.set(fid, { result, version });
             if (cache.edges.size > 100)
               cache.edges.delete(cache.edges.keys().next().value);
