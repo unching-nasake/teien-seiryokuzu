@@ -1274,7 +1274,7 @@ parentPort.on("message", async (msg) => {
               const tiles = factionTileIndex.data.get(factionId);
               for (const key of tiles) {
                 const [x, y] = key.split("_").map(Number);
-                points += getTilePoints(x, y, namedCells);
+                points += getTilePoints(x, y, MAP_SIZE, namedCells);
               }
               return points;
             }
@@ -1524,7 +1524,12 @@ parentPort.on("message", async (msg) => {
                   if (!stats[fid])
                     stats[fid] = { id: fid, points: 0, tiles: 0 };
                   stats[fid].tiles++;
-                  stats[fid].points += getTilePoints(x, y, namedCells);
+                  stats[fid].points += getTilePoints(
+                    x,
+                    y,
+                    MAP_SIZE,
+                    namedCells,
+                  );
                 }
               }
             }
@@ -1541,7 +1546,7 @@ parentPort.on("message", async (msg) => {
               if (!stats[fid]) stats[fid] = { id: fid, points: 0, tiles: 0 };
               const [x, y] = key.split("_").map(Number);
               stats[fid].tiles++;
-              stats[fid].points += getTilePoints(x, y, namedCells);
+              stats[fid].points += getTilePoints(x, y, MAP_SIZE, namedCells);
             }
           });
         }
@@ -1784,7 +1789,7 @@ parentPort.on("message", async (msg) => {
               playerTilePoints: {},
             };
           }
-          const points = getTilePoints(x, y);
+          const points = getTilePoints(x, y, MAP_SIZE);
           stats.factions[fid].tileCount++;
           stats.factions[fid].totalPoints += points;
           // Note: paintedBy (PID) は現在 SAB に格納していないため、
@@ -1816,7 +1821,7 @@ parentPort.on("message", async (msg) => {
             };
           }
           const [x, y] = key.split("_").map(Number);
-          const points = getTilePoints(x, y);
+          const points = getTilePoints(x, y, MAP_SIZE);
           stats.factions[fid].tileCount++;
           stats.factions[fid].totalPoints += points;
 
@@ -2387,7 +2392,7 @@ parentPort.on("message", async (msg) => {
           factionStats[tileFid].tiles++;
           factionTiles[tileFid].push(key);
           const [x, y] = key.split("_").map(Number);
-          factionTerritoryPoints[tileFid] += getTilePoints(x, y);
+          factionTerritoryPoints[tileFid] += getTilePoints(x, y, MAP_SIZE);
         }
         if (t.core) {
           const coreFid = t.core.factionId;
@@ -2646,7 +2651,8 @@ parentPort.on("message", async (msg) => {
             if (fid) {
               stats[fid] = (stats[fid] || 0) + 1;
               pointsStats[fid] =
-                (pointsStats[fid] || 0) + getTilePoints(x, y, namedCells);
+                (pointsStats[fid] || 0) +
+                getTilePoints(x, y, MAP_SIZE, namedCells);
             }
           }
         }
@@ -2659,7 +2665,8 @@ parentPort.on("message", async (msg) => {
             stats[fid] = (stats[fid] || 0) + 1;
             const [x, y] = key.split("_").map(Number);
             pointsStats[fid] =
-              (pointsStats[fid] || 0) + getTilePoints(x, y, namedCells);
+              (pointsStats[fid] || 0) +
+              getTilePoints(x, y, MAP_SIZE, namedCells);
           }
         }
       }

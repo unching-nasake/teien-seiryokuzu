@@ -253,7 +253,8 @@ function renderTiles(data) {
   const mapScreenMaxX = Math.ceil(centerX + (MAP_SIZE - viewport.x) * tileSize);
   const mapScreenMaxY = Math.ceil(centerY + (MAP_SIZE - viewport.y) * tileSize);
 
-  // マップ領域内のみ背景色で塗りつぶす (Worker 0のみ)
+  // マップ領域内のみ背景色で塗りつぶす (Worker 0のみ) -> Unified Rendering に移行したためメインスレッドで一括で行う
+  /*
   if (workerIndex === 0) {
     const drawX = Math.max(0, mapScreenMinX);
     const drawY = Math.max(0, mapScreenMinY);
@@ -265,6 +266,7 @@ function renderTiles(data) {
       ctx.fillRect(drawX, drawY, drawW, drawH);
     }
   }
+  */
 
   // 色ごとにバッチング
   const batchDraws = new Map();
@@ -411,15 +413,13 @@ function renderTiles(data) {
     }
   }
 
-  // まとめて描画 (Flat Array)
+  // まとめて描画 (Flat Array) - 精度のために fillRect を使用
   batchDraws.forEach((rects, color) => {
-    ctx.beginPath();
+    ctx.fillStyle = color;
     // i += 4 でループ
     for (let i = 0; i < rects.length; i += 4) {
-      ctx.rect(rects[i], rects[i + 1], rects[i + 2], rects[i + 3]);
+      ctx.fillRect(rects[i], rects[i + 1], rects[i + 2], rects[i + 3]);
     }
-    ctx.fillStyle = color;
-    ctx.fill();
   });
 
   // 塗装数モード時の勢力境界線

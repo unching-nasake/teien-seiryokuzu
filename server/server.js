@@ -421,21 +421,6 @@ async function saveJSON(filePath, data, options = {}) {
     lastStatTime: stats.mtimeMs,
   });
 
-  // [NEW] DB管理下にあるファイルはファイルシステムへの書き込みをスキップ
-  // ただし、バックアップ用の強制ダンプ (forceDump) の場合は許可する
-  if (
-    !options.forceDump &&
-    (filePath === PLAYERS_PATH ||
-      filePath === FACTIONS_PATH ||
-      filePath === FACTION_NOTICES_PATH ||
-      filePath === ACTIVITY_LOG_PATH ||
-      filePath === TRUCES_PATH ||
-      filePath === WARS_PATH ||
-      filePath === ALLIANCES_PATH)
-  ) {
-    return Promise.resolve();
-  }
-
   // [NEW] マップデータの更新を SAB にも即時反映 (差分のみ)
   if (
     filePath === MAP_STATE_PATH &&
@@ -445,6 +430,78 @@ async function saveJSON(filePath, data, options = {}) {
   ) {
     syncSABWithJSON(data);
     await saveMapBinary(); // 引数は不要（内部でグローバル SAB を使用）
+    if (!options.forceDump) return; // Skip JSON write unless forced
+  } else if (filePath === PLAYERS_PATH && data && data.players) {
+    // [NEW] Save Players to SQLite
+    const db = getDB();
+    const insert = db.prepare(
+      "REPLACE INTO players (id, factionId, data) VALUES (?, ?, ?)",
+    );
+    const insertMany = db.transaction((playersMap) => {
+      for (const [id, p] of Object.entries(playersMap)) {
+        insert.run(id, p.factionId || null, JSON.stringify(p));
+      }
+    });
+    insertMany(data.players);
+    if (!options.forceDump) return;
+  } else if (filePath === FACTIONS_PATH && data && data.factions) {
+    // [NEW] Save Factions to SQLite
+    const db = getDB();
+    const insert = db.prepare("REPLACE INTO factions (id, data) VALUES (?, ?)");
+    const insertMany = db.transaction((factionsMap) => {
+      for (const [id, f] of Object.entries(factionsMap)) {
+        insert.run(id, JSON.stringify(f));
+      }
+    });
+    insertMany(data.factions);
+    if (!options.forceDump) return;
+  } else if (filePath === FACTION_NOTICES_PATH && data) {
+    // [NEW] Save Faction Notices to SQLite
+    const db = getDB();
+    const deleteValid = db.prepare("DELETE FROM faction_notices"); // Flattened structure, so refresh all
+    const insert = db.prepare(
+      "INSERT INTO faction_notices (id, factionId, userId, isRead, createdAt, data) VALUES (?, ?, ?, ?, ?, ?)",
+    );
+    const insertMany = db.transaction((noticesMap) => {
+      deleteValid.run();
+      for (const [key, list] of Object.entries(noticesMap)) {
+        const parts = key.split(":");
+        const type = parts[0];
+        const val = parts[1];
+        const fId = type === "faction" ? val : null;
+        const uId = type === "user" ? val : null;
+        if (!Array.isArray(list)) continue;
+        for (const n of list) {
+          if (!n.id) continue;
+          insert.run(
+            n.id,
+            fId,
+            uId,
+            n.isRead ? 1 : 0,
+            n.date || n.createdAt || new Date().toISOString(),
+            JSON.stringify(n),
+          );
+        }
+      }
+    });
+    insertMany(data);
+    if (!options.forceDump) return;
+  } else if (filePath === GAME_IDS_PATH && data) {
+    // [NEW] Save Game IDs to SQLite
+    const db = getDB();
+    const deleteValid = db.prepare("DELETE FROM game_ids");
+    const insert = db.prepare("INSERT INTO game_ids (id, data) VALUES (?, ?)");
+    const insertMany = db.transaction((items) => {
+      deleteValid.run();
+      for (const [id, val] of Object.entries(items)) {
+        insert.run(id, JSON.stringify(val));
+      }
+    });
+    insertMany(data);
+    if (!options.forceDump) return;
+  } else if (filePath === ACTIVITY_LOG_PATH) {
+    // Activity Log is handled separately via persistActivityLogs
+    if (!options.forceDump) return;
   } else if (filePath === NAMED_CELLS_PATH && data) {
     // [NEW] Save to SQLite
     const db = getDB();

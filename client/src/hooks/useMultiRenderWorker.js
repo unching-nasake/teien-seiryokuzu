@@ -143,7 +143,7 @@ export const useMultiRenderWorker = (
 
       // クリア & 背景塗りつぶし (ここで一括で行うことでワーカー間の隙間を防ぐ)
       ctx.imageSmoothingEnabled = false;
-      ctx.fillStyle = "#000000"; // マップ外は黒にする
+      ctx.fillStyle = "#000000";
       ctx.fillRect(0, 0, width, height);
 
       // 全パーツを合成 (背景色の描画はワーカー側で行われている前提)

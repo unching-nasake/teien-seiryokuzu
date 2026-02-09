@@ -617,7 +617,7 @@ function GameMap({
     const tileSize = TILE_SIZE * viewport.zoom;
     const centerX = width / 2;
     const centerY = height / 2;
-    const showGrid = viewport.zoom >= 2.0;
+    const showGrid = viewport.zoom >= 4.0; // ズームレベルを上げて、通常時はスッキリさせる
 
     // クリア
     ctx.clearRect(0, 0, width, height);

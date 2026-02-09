@@ -201,7 +201,7 @@ function calculateFactionPoints(
     const tile = mapState.tiles[key];
     if ((tile.factionId || tile.faction) === factionId) {
       const [x, y] = key.split("_").map(Number);
-      territoryPoints += getTilePoints(x, y, namedCells, mapSize);
+      territoryPoints += getTilePoints(x, y, mapSize, namedCells);
     }
   }
   return territoryPoints;
