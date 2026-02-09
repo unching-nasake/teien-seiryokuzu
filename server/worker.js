@@ -3418,7 +3418,13 @@ parentPort.on("message", async (msg) => {
     }
   } else if (type === "PROCESS_CESSION") {
     try {
-      const { request, filePaths, fromFactionId, toFactionId } = data;
+      const {
+        request,
+        filePaths,
+        fromFactionId,
+        toFactionId,
+        coreTileSettings,
+      } = data;
 
       const mapState = loadJSON(filePaths.mapState, { tiles: {} });
       const factions = loadJSON(filePaths.factions, { factions: {} });
@@ -3444,7 +3450,8 @@ parentPort.on("message", async (msg) => {
           if (tile.core) {
             // 割譲元の中核だった場合：中核失効カウントダウンを発動（12時間後に失効）
             if (tile.core.factionId === fromFactionId) {
-              const expireTime = Date.now() + 12 * 60 * 60 * 1000;
+              const hours = coreTileSettings?.expirationHours || 12;
+              const expireTime = Date.now() + hours * 60 * 60 * 1000;
               tile.core.expiresAt = new Date(expireTime).toISOString();
             }
             // 受け取り側の中核だった場合（奪還）：恒久化
@@ -3463,8 +3470,9 @@ parentPort.on("message", async (msg) => {
             delete tile.coreificationUntil;
             delete tile.coreificationFactionId;
           } else {
-            // 新規割譲: 12時間後に中核化完了
-            const coreificationTime = Date.now() + 12 * 60 * 60 * 1000;
+            // 新規割譲: 設定された時間後に中核化完了
+            const hours = coreTileSettings?.expirationHours || 12;
+            const coreificationTime = Date.now() + hours * 60 * 60 * 1000;
             tile.coreificationUntil = new Date(coreificationTime).toISOString();
             tile.coreificationFactionId = toFactionId;
           }

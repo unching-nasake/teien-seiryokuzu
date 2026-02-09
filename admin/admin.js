@@ -159,6 +159,8 @@ function updateUI(data) {
     ctSettings.instantCoreThreshold ?? 400;
   document.getElementById("maxCoreTiles").value =
     ctSettings.maxCoreTiles ?? 2500;
+  document.getElementById("coreExpirationHours").value =
+    ctSettings.expirationHours ?? 12;
 
   document.getElementById("maxCoreTiles").value =
     ctSettings.maxCoreTiles ?? 2500;
@@ -391,6 +393,9 @@ async function updateSettings() {
         10,
       ),
       maxCoreTiles: parseInt(document.getElementById("maxCoreTiles").value, 10),
+      expirationHours: parseFloat(
+        document.getElementById("coreExpirationHours").value,
+      ),
     },
     enclaveSettings: {
       distanceLimit: parseInt(

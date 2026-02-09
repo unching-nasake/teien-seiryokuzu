@@ -7104,8 +7104,11 @@ app.post(
           // 中核タイルのロジック
           if (tileToUpdate.core) {
             if (tileToUpdate.core.factionId !== player.factionId) {
-              // 敵の中核を奪った: 占領時間から12時間後を期限に
-              const expireTime = Date.now() + 12 * 60 * 60 * 1000;
+              // 敵の中核を奪った: 占領時間から指定された時間後を期限に
+              const hours =
+                loadJSON(SYSTEM_SETTINGS_PATH, {}).coreTileSettings
+                  ?.expirationHours || 12;
+              const expireTime = Date.now() + hours * 60 * 60 * 1000;
               tileToUpdate.core.expiresAt = new Date(expireTime).toISOString();
             } else {
               // 自勢力の中核奪還: 恒久化

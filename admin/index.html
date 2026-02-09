@@ -238,6 +238,18 @@
               <input type="number" id="maxCoreTiles" />
               <div class="help-text">1勢力が保有できる中核マスの最大数</div>
             </div>
+            <div class="setting-item">
+              <label>中核マス失効時間 (時間)</label>
+              <input
+                type="number"
+                id="coreExpirationHours"
+                min="1"
+                step="0.5"
+              />
+              <div class="help-text">
+                中核マスが占領・割譲された際の失効カウントダウン時間
+              </div>
+            </div>
           </div>
         </div>
 
