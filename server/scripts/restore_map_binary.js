@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const Database = require("better-sqlite3");
 
 // 設定
 const MAP_SIZE = 500;
@@ -8,6 +9,7 @@ const DATA_DIR = path.join(__dirname, "../data");
 const HISTORY_DIR = path.join(DATA_DIR, "history");
 const FACTIONS_PATH = path.join(DATA_DIR, "factions.json");
 const PLAYERS_PATH = path.join(DATA_DIR, "players.json");
+const DB_PATH = path.join(DATA_DIR, "game.db");
 const OUTPUT_BIN_PATH = path.join(DATA_DIR, "map_state.bin");
 const OUTPUT_JSON_PATH = path.join(DATA_DIR, "map_state.json");
 
@@ -23,33 +25,80 @@ function loadJSON(filePath, defaultValue = {}) {
 }
 
 async function restore() {
-  console.log("=== Map Data Restoration Script (Binary & JSON) ===");
+  console.log("=== Map Data Restoration Script (SQLite & Binary & JSON) ===");
 
-  // 1. マッピングの再構築
-  console.log("Loading factions and players for mapping...");
+  // 1. SQLite へのインポート
+  console.log(`Connecting to database at ${DB_PATH}...`);
+  const db = new Database(DB_PATH);
+
+  console.log("Loading factions and players from backup JSON...");
   const factionsData = loadJSON(FACTIONS_PATH, { factions: {} });
   const playersData = loadJSON(PLAYERS_PATH, { players: {} });
 
+  // トランザクションで高速一括処理
+  const importFactions = db.transaction((factions) => {
+    const upsert = db.prepare(
+      "INSERT OR REPLACE INTO factions (id, data) VALUES (?, ?)",
+    );
+    for (const [id, data] of Object.entries(factions)) {
+      upsert.run(id, JSON.stringify(data));
+    }
+  });
+
+  const importPlayers = db.transaction((players) => {
+    const upsert = db.prepare(
+      "INSERT OR REPLACE INTO players (id, factionId, data) VALUES (?, ?, ?)",
+    );
+    for (const [id, data] of Object.entries(players)) {
+      upsert.run(id, data.factionId || null, JSON.stringify(data));
+    }
+  });
+
+  const fCount = Object.keys(factionsData.factions || {}).length;
+  const pCount = Object.keys(playersData.players || {}).length;
+
+  if (fCount > 0) {
+    console.log(`Importing ${fCount} factions into DB...`);
+    importFactions(factionsData.factions);
+  }
+
+  if (pCount > 0) {
+    console.log(`Importing ${pCount} players into DB...`);
+    importPlayers(playersData.players);
+  }
+
+  // 2. マッピングの再構築 (DB から最新情報を取得)
+  console.log("Rebuilding mappings from SQLite IDs...");
+  const allFactionIds = db
+    .prepare("SELECT id FROM factions")
+    .all()
+    .map((r) => r.id)
+    .sort();
+  const allPlayerIds = db
+    .prepare("SELECT id FROM players")
+    .all()
+    .map((r) => r.id)
+    .sort();
+
   const factionIdToIndex = new Map();
-  const sortedFids = Object.keys(factionsData.factions || {}).sort();
-  sortedFids.forEach((fid, idx) => {
-    factionIdToIndex.set(fid, idx + 1);
+  allFactionIds.forEach((fid, idx) => {
+    factionIdToIndex.set(fid, idx + 1); // 1-based
   });
 
   const playerIdsMap = new Map();
-  const sortedPids = Object.keys(playersData.players || {}).sort();
-  sortedPids.forEach((pid, idx) => {
-    playerIdsMap.set(pid, idx + 1);
+  allPlayerIds.forEach((pid, idx) => {
+    playerIdsMap.set(pid, idx + 1); // 1-based
   });
 
   console.log(
-    `Mapped ${factionIdToIndex.size} factions and ${playerIdsMap.size} players.`,
+    `Mapped ${factionIdToIndex.size} factions and ${playerIdsMap.size} players from DB.`,
   );
 
-  // 2. 最新の有効な履歴ファイルを特定
+  // 3. 最新の有効な履歴ファイルを特定
   console.log(`Searching for latest history file in ${HISTORY_DIR}...`);
   if (!fs.existsSync(HISTORY_DIR)) {
     console.error("History directory not found.");
+    db.close();
     return;
   }
 
@@ -61,11 +110,12 @@ async function restore() {
       path: path.join(HISTORY_DIR, f),
       stat: fs.statSync(path.join(HISTORY_DIR, f)),
     }))
-    .filter((f) => f.stat.size > 1024) // 1KB未満は除外
+    .filter((f) => f.stat.size > 1024)
     .sort((a, b) => b.name.localeCompare(a.name));
 
   if (files.length === 0) {
     console.error("No valid history JSON files found.");
+    db.close();
     return;
   }
 
@@ -79,42 +129,44 @@ async function restore() {
   const tileCount = Object.keys(tiles).length;
   console.log(`Loaded ${tileCount} tiles from history.`);
 
-  // 3. バイナリ構築
+  // 4. バイナリ構築
   console.log("Constructing binary buffer...");
   const bufferSize = MAP_SIZE * MAP_SIZE * TILE_BYTE_SIZE;
   const buffer = Buffer.alloc(bufferSize, 0);
 
+  // 初期化 (無し = 65535)
+  for (let i = 0; i < MAP_SIZE * MAP_SIZE; i++) {
+    buffer.writeUInt16LE(65535, i * TILE_BYTE_SIZE);
+    buffer.writeUInt32LE(0xffffff, i * TILE_BYTE_SIZE + 2);
+  }
+
   for (const [key, tile] of Object.entries(tiles)) {
-    const [x, y] = key.split("_").map(Number);
+    const parts = key.split("_");
+    const x = parseInt(parts[0], 10);
+    const y = parseInt(parts[1], 10);
     if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) continue;
 
     const offset = (y * MAP_SIZE + x) * TILE_BYTE_SIZE;
 
-    // 0-1: factionId index (Uint16LE)
     const fid = tile.factionId || tile.faction;
     const fidIdx = factionIdToIndex.get(fid) || 65535;
-    buffer.writeUInt16LE(fidIdx === 65535 ? 0xffff : fidIdx, offset + 0);
+    buffer.writeUInt16LE(fidIdx, offset + 0);
 
-    // 2-5: color (Uint32LE)
     const colorStr = tile.customColor || tile.color || "#ffffff";
     const colorInt = parseInt(colorStr.replace("#", ""), 16) || 0xffffff;
     buffer.writeUInt32LE(colorInt, offset + 2);
 
-    // 6-9: paintedBy index (Uint32LE)
     const pid = tile.paintedBy;
     const pidIdx = playerIdsMap.get(pid) || 0;
     buffer.writeUInt32LE(pidIdx, offset + 6);
 
-    // 10: overpaint (Uint8)
     buffer.writeUInt8(tile.overpaint || 0, offset + 10);
 
-    // 11: flags
     let flags = 0;
     if (tile.core) flags |= 1;
     if (tile.coreificationUntil) flags |= 2;
     buffer.writeUInt8(flags, offset + 11);
 
-    // 12-19: expiry (Float64LE)
     let exp = 0;
     if (tile.core) exp = new Date(tile.core.expiresAt || 0).getTime();
     else if (tile.coreificationUntil)
@@ -122,36 +174,28 @@ async function restore() {
     if (isNaN(exp)) exp = 0;
     buffer.writeDoubleLE(exp, offset + 12);
 
-    // 20-23: paintedAt (Uint32LE)
     const pAt = tile.paintedAt
       ? Math.floor(new Date(tile.paintedAt).getTime() / 1000)
       : 0;
     buffer.writeUInt32LE(pAt, offset + 20);
   }
 
-  // 4. 保存
-  // バックアップ作成 (JSON & Binary)
+  // 5. 保存
   const timestamp = Date.now();
   if (fs.existsSync(OUTPUT_BIN_PATH)) {
-    console.log(`Backing up original binary...`);
     fs.copyFileSync(OUTPUT_BIN_PATH, `${OUTPUT_BIN_PATH}.bak_${timestamp}`);
   }
   if (fs.existsSync(OUTPUT_JSON_PATH)) {
-    console.log(`Backing up original JSON...`);
     fs.copyFileSync(OUTPUT_JSON_PATH, `${OUTPUT_JSON_PATH}.bak_${timestamp}`);
   }
 
-  console.log(`Writing rebuilt binary to ${path.basename(OUTPUT_BIN_PATH)}...`);
   fs.writeFileSync(OUTPUT_BIN_PATH, buffer);
-
-  console.log(`Writing source JSON to ${path.basename(OUTPUT_JSON_PATH)}...`);
-  // Source of Truth として JSON を書き出し
   fs.writeFileSync(OUTPUT_JSON_PATH, JSON.stringify(historyData, null, 2));
 
-  console.log("\n[SUCCESS] Restoration complete!");
+  db.close();
+  console.log("\n[SUCCESS] Restoration and DB Import complete!");
   console.log("--------------------------------------------------");
-  console.log("IMPORTANT: You must restart the server IMMEDIATELY");
-  console.log("to apply changes and avoid overwriting with old data.");
+  console.log("IMPORTANT: Restart the server NOW");
   console.log("Command: pm2 restart teien-server");
   console.log("--------------------------------------------------");
 }

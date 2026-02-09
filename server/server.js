@@ -79,6 +79,9 @@ for (let i = 0; i < MAP_SIZE * MAP_SIZE; i++) {
 
 // IDマッピングテーブル (Memory-only, for converting strings to indexes in SAB)
 const factionIdToIndex = new Map(); // factionId (string) -> index (number)
+let factions = { factions: {} };
+let players = { players: {} };
+let mapState = { tiles: {} };
 const indexToFactionId = [""]; // 0 is reserved/empty
 
 // [NEW] ZOC Map SAB (500x500 Uint16) - Stores factionIndex
@@ -142,9 +145,9 @@ async function initializeData() {
   }
 
   // 1. まず各マッピングテーブルの読み込みのみ先行 (SABの解釈に必要)
-  const factionsData = loadJSON(FACTIONS_PATH, { factions: {} });
-  const playersData = loadJSON(PLAYERS_PATH, { players: {} });
-  rebuildStableMappings(factionsData, playersData);
+  factions = loadJSON(FACTIONS_PATH, { factions: {} });
+  players = loadJSON(PLAYERS_PATH, { players: {} });
+  rebuildStableMappings(factions, players);
 
   // 2. バイナリマップがあればそれを優先ロード (高速 & 省メモリ)
   const binaryLoaded = loadMapBinary();
@@ -157,14 +160,20 @@ async function initializeData() {
     if (!fs.existsSync(MAP_STATE_PATH)) {
       saveJSON(MAP_STATE_PATH, { tiles: {} });
     }
-    const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
+    mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
     syncSABWithJSON(mapState);
   } else {
+    // バイナリからロードした場合、mapState オブジェクトも最新化しておく
+    mapState = getMapStateFromSAB();
     // バイナリからロードした場合のみ、Stats と ZOC を再構築 (バイナリにはこれらは含まれないため)
     const namedCells = loadJSON(NAMED_CELLS_PATH, {});
-    recalculateZocSAB(namedCells, factionsData);
+    recalculateZocSAB(namedCells, factions);
     // Stats再計算 (バイナリロード直後)
     recalculateFactionStatsFromSAB(namedCells);
+
+    // [NEW] バイナリ優先ロードを徹底するため、このタイミングで JSON にも書き出しておく (Source of Truth 同期)
+    await persistMapJsonState();
+    console.log("[Init] Map data synced to JSON from binary.");
   }
 
   if (!fs.existsSync(FACTIONS_PATH)) {
@@ -800,22 +809,88 @@ async function saveMapBinary() {
 
 // [NEW] バイナリマップのロード
 function loadMapBinary() {
-  if (!fs.existsSync(MAP_STATE_BIN_PATH)) return false;
+  const binaryPath = path.join(DATA_DIR, "map_state.bin");
+  if (!fs.existsSync(binaryPath)) return false;
+
   try {
-    const buffer = fs.readFileSync(MAP_STATE_BIN_PATH);
-    if (buffer.length !== sharedMapSAB.byteLength) {
+    const buffer = fs.readFileSync(binaryPath);
+    if (buffer.length !== MAP_SIZE * MAP_SIZE * TILE_BYTE_SIZE) {
       console.warn(
-        `[BinaryMap] File size mismatch: expected ${sharedMapSAB.byteLength}, got ${buffer.length}`,
+        `[Init] Map Binary size mismatch: expected ${MAP_SIZE * MAP_SIZE * TILE_BYTE_SIZE}, got ${buffer.length}`,
       );
       return false;
     }
+
     const uint8View = new Uint8Array(sharedMapSAB);
-    uint8View.set(new Uint8Array(buffer));
-    console.log(`[BinaryMap] Loaded map from binary: ${MAP_STATE_BIN_PATH}`);
+    uint8View.set(buffer);
+    console.log("[Init] Map Binary loaded into SAB successfully.");
     return true;
   } catch (e) {
-    console.error(`[BinaryMap] Failed to load binary map:`, e);
+    console.error("[Init] Failed to load map binary:", e);
     return false;
+  }
+}
+
+/**
+ * SAB (SharedArrayBuffer) からマップ状態の JSON オブジェクトを取得
+ */
+function getMapStateFromSAB() {
+  const mapState = { tiles: {} };
+  const size = MAP_SIZE;
+  for (let i = 0; i < size * size; i++) {
+    const offset = i * TILE_BYTE_SIZE;
+    const fidIdx = sharedMapView.getUint16(offset, true);
+    if (fidIdx === 65535) continue;
+
+    const fid = getFactionIdFromIdx(fidIdx);
+    if (!fid) continue;
+
+    const x = i % size;
+    const y = Math.floor(i / size);
+    const pIdx = sharedMapView.getUint32(offset + 6, true);
+    const paintedBy = pIdx > 0 ? playerIds[pIdx - 1] : null;
+    const flags = sharedMapView.getUint8(offset + 11);
+    const exp = sharedMapView.getFloat64(offset + 12, true);
+
+    const tile = {
+      factionId: fid,
+      color: `#${sharedMapView
+        .getUint32(offset + 2, true)
+        .toString(16)
+        .padStart(6, "0")}`,
+      paintedBy,
+      overpaint: sharedMapView.getUint8(offset + 10),
+      paintedAt: new Date(
+        sharedMapView.getUint32(offset + 20, true) * 1000,
+      ).toISOString(),
+    };
+    if (flags & 1)
+      tile.core = {
+        factionId: fid,
+        expiresAt: new Date(exp).toISOString(),
+      };
+    if (flags & 2) tile.coreificationUntil = new Date(exp).toISOString();
+
+    mapState.tiles[`${x}_${y}`] = tile;
+  }
+  return mapState;
+}
+
+/**
+ * 現在のマップ状態 (SAB) を JSON ファイルに保存
+ */
+async function persistMapJsonState() {
+  try {
+    const mapState = getMapStateFromSAB();
+    const backupOptions = {
+      forceDump: true,
+      skipLock: true,
+      skipBinaryHook: true,
+    };
+    await saveJSON(MAP_STATE_PATH, mapState, backupOptions);
+    console.log(`[MapSave] Map state JSON updated from memory.`);
+  } catch (e) {
+    console.error(`[MapSave] Failed to save JSON map state:`, e);
   }
 }
 
@@ -1716,25 +1791,11 @@ try {
 // 今後の方針: ディスクチェックによる手動編集を常にサポートする
 // 最適化: パース済みのオブジェクトをキャッシュし、冗長な JSON.parse() を回避
 
-// 1. 各種データのロード
-const factions = loadJSON(FACTIONS_PATH, { factions: {} });
-const players = loadJSON(PLAYERS_PATH, {});
-const mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
+// 1. 各種データのロード (初期化は initializeData で一括管理される)
+// 1720行付近の冗長な初期化コードは削除されました。
 
-// 2. マッピングの再構築（IDソートにより順序を固定）
-rebuildStableMappings(factions, players);
-
-// 3. SAB の同期 (バイナリからのロードよりも JSON (Truth) を優先して一度クリーンアップ)
-syncSABWithJSON(mapState);
-saveMapBinary(); // JSON の内容でバイナリファイルを即座に更新
-
-// [FIX] Initialize Ranking Cache Immediately
-updateRankingCache();
-
-const syncCount = Object.keys(mapState.tiles || {}).length;
-console.log(
-  `[Init] Map data initialized and synced from JSON. Total tiles: ${syncCount}, TILE_BYTE_SIZE: ${TILE_BYTE_SIZE}`,
-);
+// [FIX] Initialize Ranking Cache (Startup fallback)
+// initializeData の後で setInterval により自動的に開始されます。
 
 // game_ids.json のホットリロードは DB 化されたため不要
 // 直接 DB を参照するように各ロジックを修正済み
@@ -15508,6 +15569,7 @@ async function gracefulShutdown(signal) {
   // Always check for map save, regardless of declared pending count
   console.log(`[Shutdown] Saving map changes (Force)...`);
   promises.push(persistMapState());
+  promises.push(persistMapJsonState()); // [NEW] 終了時に JSON にも書き出す
 
   if (playerSaveTimer || FILE_CACHE.has(PLAYERS_PATH)) {
     console.log("[Shutdown] Saving pending player changes...");
@@ -15884,48 +15946,7 @@ setInterval(
       await saveJSON(ACTIVITY_LOG_PATH, logs, backupOptions);
 
       // [NEW] マップデータのJSONバックアップ (SABから全復元)
-      const mapState = { tiles: {} };
-      const size = MAP_SIZE;
-      for (let i = 0; i < size * size; i++) {
-        const offset = i * TILE_BYTE_SIZE;
-        const fidIdx = sharedMapView.getUint16(offset, true);
-        if (fidIdx === 65535) continue;
-
-        const fid = indexToFactionId[fidIdx];
-        if (!fid) continue;
-
-        const x = i % size;
-        const y = Math.floor(i / size);
-        const pIdx = sharedMapView.getUint32(offset + 6, true);
-        const paintedBy = pIdx > 0 ? playerIds[pIdx - 1] : null;
-        const flags = sharedMapView.getUint8(offset + 11);
-        const exp = sharedMapView.getFloat64(offset + 12, true);
-
-        const tile = {
-          factionId: fid,
-          color: `#${sharedMapView
-            .getUint32(offset + 2, true)
-            .toString(16)
-            .padStart(6, "0")}`,
-          paintedBy,
-          overpaint: sharedMapView.getUint8(offset + 10),
-          paintedAt: new Date(
-            sharedMapView.getUint32(offset + 20, true) * 1000,
-          ).toISOString(),
-        };
-        if (flags & 1)
-          tile.core = {
-            factionId: fid,
-            expiresAt: new Date(exp).toISOString(),
-          };
-        if (flags & 2) tile.coreificationUntil = new Date(exp).toISOString();
-
-        mapState.tiles[`${x}_${y}`] = tile;
-      }
-      await saveJSON(MAP_STATE_PATH, mapState, {
-        ...backupOptions,
-        skipBinaryHook: true,
-      });
+      await persistMapJsonState();
 
       console.log("[Backup] JSON dump completed.");
     } catch (e) {
