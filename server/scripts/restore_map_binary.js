@@ -9,6 +9,7 @@ const HISTORY_DIR = path.join(DATA_DIR, "history");
 const FACTIONS_PATH = path.join(DATA_DIR, "factions.json");
 const PLAYERS_PATH = path.join(DATA_DIR, "players.json");
 const OUTPUT_BIN_PATH = path.join(DATA_DIR, "map_state.bin");
+const OUTPUT_JSON_PATH = path.join(DATA_DIR, "map_state.json");
 
 function loadJSON(filePath, defaultValue = {}) {
   try {
@@ -22,7 +23,7 @@ function loadJSON(filePath, defaultValue = {}) {
 }
 
 async function restore() {
-  console.log("=== Map Binary Restoration Script ===");
+  console.log("=== Map Data Restoration Script (Binary & JSON) ===");
 
   // 1. マッピングの再構築
   console.log("Loading factions and players for mapping...");
@@ -60,7 +61,7 @@ async function restore() {
       path: path.join(HISTORY_DIR, f),
       stat: fs.statSync(path.join(HISTORY_DIR, f)),
     }))
-    .filter((f) => f.stat.size > 1024) // 1KB未満は空か破損の可能性
+    .filter((f) => f.stat.size > 1024) // 1KB未満は除外
     .sort((a, b) => b.name.localeCompare(a.name));
 
   if (files.length === 0) {
@@ -83,9 +84,6 @@ async function restore() {
   const bufferSize = MAP_SIZE * MAP_SIZE * TILE_BYTE_SIZE;
   const buffer = Buffer.alloc(bufferSize, 0);
 
-  // デフォルト値で初期化 (必要に応じて)
-  // すべて 0 (空タイル) となっている。
-
   for (const [key, tile] of Object.entries(tiles)) {
     const [x, y] = key.split("_").map(Number);
     if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) continue;
@@ -94,7 +92,7 @@ async function restore() {
 
     // 0-1: factionId index (Uint16LE)
     const fid = tile.factionId || tile.faction;
-    const fidIdx = factionIdToIndex.get(fid) || 65535; // 0xFFFF for none
+    const fidIdx = factionIdToIndex.get(fid) || 65535;
     buffer.writeUInt16LE(fidIdx === 65535 ? 0xffff : fidIdx, offset + 0);
 
     // 2-5: color (Uint32LE)
@@ -132,18 +130,30 @@ async function restore() {
   }
 
   // 4. 保存
+  // バックアップ作成 (JSON & Binary)
+  const timestamp = Date.now();
   if (fs.existsSync(OUTPUT_BIN_PATH)) {
-    const backupPath = `${OUTPUT_BIN_PATH}.bak_${Date.now()}`;
-    console.log(
-      `Backing up existing binary to ${path.basename(backupPath)}...`,
-    );
-    fs.copyFileSync(OUTPUT_BIN_PATH, backupPath);
+    console.log(`Backing up original binary...`);
+    fs.copyFileSync(OUTPUT_BIN_PATH, `${OUTPUT_BIN_PATH}.bak_${timestamp}`);
+  }
+  if (fs.existsSync(OUTPUT_JSON_PATH)) {
+    console.log(`Backing up original JSON...`);
+    fs.copyFileSync(OUTPUT_JSON_PATH, `${OUTPUT_JSON_PATH}.bak_${timestamp}`);
   }
 
-  console.log(`Writing rebuilt binary to ${OUTPUT_BIN_PATH}...`);
+  console.log(`Writing rebuilt binary to ${path.basename(OUTPUT_BIN_PATH)}...`);
   fs.writeFileSync(OUTPUT_BIN_PATH, buffer);
 
-  console.log("Success! Restoration complete.");
+  console.log(`Writing source JSON to ${path.basename(OUTPUT_JSON_PATH)}...`);
+  // Source of Truth として JSON を書き出し
+  fs.writeFileSync(OUTPUT_JSON_PATH, JSON.stringify(historyData, null, 2));
+
+  console.log("\n[SUCCESS] Restoration complete!");
+  console.log("--------------------------------------------------");
+  console.log("IMPORTANT: You must restart the server IMMEDIATELY");
+  console.log("to apply changes and avoid overwriting with old data.");
+  console.log("Command: pm2 restart teien-server");
+  console.log("--------------------------------------------------");
 }
 
 restore().catch((err) => {
