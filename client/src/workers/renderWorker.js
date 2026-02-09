@@ -209,7 +209,7 @@ function renderTiles(data) {
   const tileSize = TILE_SIZE * viewport.zoom;
   const centerX = width / 2;
   const centerY = height / 2;
-  const showGrid = viewport.zoom > 2.0;
+  const showGrid = viewport.zoom >= 2.0;
 
   // キャンバス全体をクリア
   ctx.imageSmoothingEnabled = false;

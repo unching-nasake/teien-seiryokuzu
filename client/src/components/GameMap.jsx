@@ -582,7 +582,7 @@ function GameMap({
     const tileSize = TILE_SIZE * viewport.zoom;
     const centerX = width / 2;
     const centerY = height / 2;
-    const showGrid = viewport.zoom > 1.0;
+    const showGrid = viewport.zoom >= 2.0;
 
     // クリア
     ctx.clearRect(0, 0, width, height);
@@ -726,7 +726,7 @@ function GameMap({
         }
 
         // ホバータイルの描画
-        if (hoverTile && showGrid && !tilePopup && viewport.zoom >= 0.2) {
+        if (hoverTile && showGrid && !tilePopup && viewport.zoom > 0.2) {
              const hx = hoverTile.x;
              const hy = hoverTile.y;
              if (hx >= startX && hx <= endX && hy >= startY && hy <= endY) {
