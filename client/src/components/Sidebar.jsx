@@ -1374,12 +1374,12 @@ function Sidebar({
                       fontSize: '0.7em',
                       padding: '2px 6px',
                       borderRadius: '4px',
-                      background: playerData.lastAuthenticated ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)',
-                      color: playerData.lastAuthenticated ? '#34d399' : '#fbbf24',
-                      border: `1px solid ${playerData.lastAuthenticated ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`,
+                      background: playerData.isGardenAuthorized ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)',
+                      color: playerData.isGardenAuthorized ? '#34d399' : '#fbbf24',
+                      border: `1px solid ${playerData.isGardenAuthorized ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`,
                       whiteSpace: 'nowrap'
                     }}>
-                      {playerData.lastAuthenticated ? '✅ 認証済' : '⚠️ 未認証'}
+                      {playerData.isGardenAuthorized ? '✅ 認証済' : '⚠️ 未認証'}
                     </span>
                   )}
                 </div>

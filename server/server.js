@@ -3072,9 +3072,10 @@ function handleApRefill(player, players, playerId, saveToDisk = true) {
   // 個人AP上限の計算（スコープ外へ移動）
   let indLimit = apConfig.limits?.individual ?? 50;
   if (settings.gardenMode) {
-    // 庭園モードON時、一度も認証(lastAuthenticated)が行われていないユーザーの上限は半分
-    // (期限切れでも過去に成功していればペナルティなし)
-    if (!player.lastAuthenticated) {
+    // 庭園モードON時、本日認証(lastAuthenticated === today)が行われていないユーザーの上限は半分
+    // (UI上の「認証済」表示は毎日リセットされるが、AP補充ペナルティも毎日リセットされるように厳密化)
+    const todayStr = getTodayString();
+    if (player.lastAuthenticated !== todayStr) {
       indLimit = Math.floor(indLimit / 2);
     }
   }
@@ -4320,6 +4321,8 @@ app.get("/api/player", authenticate, async (req, res) => {
           ...updatedPlayer,
           id: playerId,
           refilledAmount,
+          isGardenAuthorized:
+            updatedPlayer.lastAuthenticated === getTodayString(),
         };
 
         return players;

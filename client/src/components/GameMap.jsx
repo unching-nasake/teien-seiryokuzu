@@ -318,6 +318,35 @@ function GameMap({
   }, [mapJumpCoord]);
 
   const [isDragging, setIsDragging] = useState(false);
+  // [NEW] リアルタイム更新(version変更)に合わせてポップアップの内容を同期
+  useEffect(() => {
+    if (tilePopup) {
+      const latest = getTile(tilePopup.x, tilePopup.y);
+      if (latest) {
+          setTilePopup(prev => {
+              if (!prev) return null;
+              // 同じ座標なら最新化。そうでなければ（別タイルをクリックした直後など）そのまま
+              if (prev.x !== latest.x || prev.y !== latest.y) return prev;
+
+              const fName = latest.faction ? (factions[latest.faction]?.name || '不明') : null;
+              const pName = playerNames[latest.paintedBy] || latest.paintedBy || null;
+
+              return {
+                  ...prev,
+                  factionId: latest.factionId,
+                  factionName: fName,
+                  painterName: pName,
+                  paintedBy: latest.paintedBy,
+                  color: latest.color,
+                  core: latest.core,
+                  coreificationUntil: latest.coreificationUntil,
+                  coreificationFactionId: latest.coreificationFactionId
+              };
+          });
+      }
+    }
+  }, [version, getTile, factions, playerNames]);
+
   const dragStart = useRef({ x: 0, y: 0 });  // Ref化して同期的アクセスを保証
   const clickStart = useRef({ x: 0, y: 0 }); // Ref化して同期的アクセスを保証
   const [hoverTile, setHoverTile] = useState(null);
@@ -1652,7 +1681,7 @@ function GameMap({
                     ? `★ ${factions[tilePopup.core.factionId].name}の中核`
                     : `⚠ ${factions[tilePopup.core.factionId].name}の中核 (奪取)`
                   }
-                  {tilePopup.core.expiresAt && (
+                  {tilePopup.core.expiresAt && tilePopup.core.factionId !== tilePopup.factionId && (
                       <div style={{ fontSize: '0.7rem', fontWeight: 'normal' }}>
                          失効: {new Date(tilePopup.core.expiresAt).toLocaleString()}
                       </div>

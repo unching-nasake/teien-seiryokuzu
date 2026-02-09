@@ -3457,11 +3457,17 @@ parentPort.on("message", async (msg) => {
           delete tile.isCorePending;
           delete tile.coreTime;
 
-          // 中核化カウントダウンを発動（割譲されたマスを受け取り側の中核候補に）
-          // 12時間後に中核化完了
-          const coreificationTime = Date.now() + 12 * 60 * 60 * 1000;
-          tile.coreificationUntil = new Date(coreificationTime).toISOString();
-          tile.coreificationFactionId = toFactionId;
+          // 中核化判定: 既に中核(奪還)でない場合のみカウントダウン開始
+          if (tile.core && tile.core.factionId === toFactionId) {
+            // 奪還時は中核化不要 (既に中核)
+            delete tile.coreificationUntil;
+            delete tile.coreificationFactionId;
+          } else {
+            // 新規割譲: 12時間後に中核化完了
+            const coreificationTime = Date.now() + 12 * 60 * 60 * 1000;
+            tile.coreificationUntil = new Date(coreificationTime).toISOString();
+            tile.coreificationFactionId = toFactionId;
+          }
 
           updatedTiles[key] = tile;
 
