@@ -999,7 +999,7 @@ for (let i = 0; i < numWorkers; i++) {
       mapSize: MAP_SIZE,
     },
     resourceLimits: {
-      maxOldGenerationSizeMb: 512, // 個別のWorkerをより厳しく制限
+      maxOldGenerationSizeMb: parseInt(process.env.WORKER_MAX_HEAP_SIZE) || 512, // 環境変数から取得
     },
   });
   worker.on("message", (msg) => {
