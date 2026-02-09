@@ -4088,7 +4088,11 @@ function generateLiteMap(mapState, playerNames = {}) {
 
 // 領土割譲マップ画像生成
 function generateCessionMapImage(tiles, factions, highlightTiles, tempDir) {
+  console.log(
+    `[WorkerCessionDebug] highlightTiles: ${JSON.stringify(highlightTiles)}`,
+  );
   if (!highlightTiles || highlightTiles.length === 0) {
+    console.log(`[WorkerCessionDebug] highlightTiles is empty or null`);
     return null;
   }
 
@@ -4105,9 +4109,13 @@ function generateCessionMapImage(tiles, factions, highlightTiles, tempDir) {
 
   const PADDING = 10;
   minX = Math.max(0, minX - PADDING);
-  maxX = Math.min(249, maxX + PADDING);
+  maxX = Math.min(MAP_SIZE - 1, maxX + PADDING);
   minY = Math.max(0, minY - PADDING);
-  maxY = Math.min(249, maxY + PADDING);
+  maxY = Math.min(MAP_SIZE - 1, maxY + PADDING);
+
+  console.log(
+    `[WorkerCessionDebug] Bounds: incl minX=${minX}, maxX=${maxX}, minY=${minY}, maxY=${maxY}`,
+  );
 
   const viewWidth = maxX - minX + 1;
   const viewHeight = maxY - minY + 1;
@@ -4116,26 +4124,40 @@ function generateCessionMapImage(tiles, factions, highlightTiles, tempDir) {
   const canvasWidth = viewWidth * TILE_SIZE;
   const canvasHeight = viewHeight * TILE_SIZE;
 
+  console.log(
+    `[WorkerCessionDebug] Canvas dimensions: ${canvasWidth}x${canvasHeight}`,
+  );
   const canvas = createCanvas(canvasWidth, canvasHeight);
   const ctx = canvas.getContext("2d");
 
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-  Object.entries(tiles).forEach(([key, tile]) => {
-    const [x, y] = key.split("_").map(Number);
-    if (x < minX || x > maxX || y < minY || y > maxY) return;
+  if (tiles) {
+    console.log(
+      `[WorkerCessionDebug] Drawing items from ${Object.keys(tiles).length} tiles`,
+    );
+    Object.entries(tiles).forEach(([key, tile]) => {
+      const parts = key.split("_");
+      if (parts.length !== 2) return;
+      const x = parseInt(parts[0]);
+      const y = parseInt(parts[1]);
 
-    const fid = tile.faction || tile.factionId;
-    const faction = factions[fid];
+      if (x < minX || x > maxX || y < minY || y > maxY) return;
 
-    if (faction) {
-      ctx.fillStyle = faction.color || "#888888";
-      const drawX = (x - minX) * TILE_SIZE;
-      const drawY = (y - minY) * TILE_SIZE;
-      ctx.fillRect(drawX, drawY, TILE_SIZE, TILE_SIZE);
-    }
-  });
+      const fid = tile.faction || tile.factionId;
+      const faction = factions[fid];
+
+      if (faction) {
+        ctx.fillStyle = faction.color || "#888888";
+        const drawX = (x - minX) * TILE_SIZE;
+        const drawY = (y - minY) * TILE_SIZE;
+        ctx.fillRect(drawX, drawY, TILE_SIZE, TILE_SIZE);
+      }
+    });
+  } else {
+    console.log(`[WorkerCessionDebug] Tiles object is missing/null`);
+  }
 
   highlightTiles.forEach((t) => {
     const drawX = (t.x - minX) * TILE_SIZE;
@@ -4150,15 +4172,26 @@ function generateCessionMapImage(tiles, factions, highlightTiles, tempDir) {
   });
 
   if (!fs.existsSync(tempDir)) {
+    console.log(`[WorkerCessionDebug] Creating temp dir: ${tempDir}`);
     fs.mkdirSync(tempDir, { recursive: true });
   }
 
   const filename = `cession_${Date.now()}.png`;
   const filepath = path.join(tempDir, filename);
-  const buffer = canvas.toBuffer("image/png");
-  fs.writeFileSync(filepath, buffer);
+  console.log(`[WorkerCessionDebug] Writing file to: ${filepath}`);
 
-  return `/temp/cession_maps/${filename}`;
+  try {
+    const buffer = canvas.toBuffer("image/png");
+    fs.writeFileSync(filepath, buffer);
+    console.log(`[WorkerCessionDebug] File written successfully`);
+  } catch (err) {
+    console.error(`[WorkerCessionDebug] Error writing file:`, err);
+    throw err;
+  }
+
+  const resultUrl = `/temp/cession_maps/${filename}`;
+  console.log(`[WorkerCessionDebug] Returning URL: ${resultUrl}`);
+  return resultUrl;
 }
 
 // 勢力のタイルをクラスタ（連結成分）に分ける
