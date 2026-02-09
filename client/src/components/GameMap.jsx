@@ -181,8 +181,8 @@ function GameMap({
   // Debounce tile updates to avoid excessive transfers
   const [debouncedTileData, setDebouncedTileData] = useState(tileData);
   useEffect(() => {
-     setDebouncedTileData(tileData);
-     // setMapVersion(v => v + 1); // useWorldStateのversionを使用
+    setDebouncedTileData(tileData);
+    // setMapVersion(v => v + 1); // useWorldStateのversionを使用
   }, [tileData]);
 
   const {
@@ -697,7 +697,7 @@ function GameMap({
         }
 
         // ホバータイルの描画
-        if (hoverTile && showGrid && !tilePopup && viewport.zoom > 0.2) {
+        if (hoverTile && showGrid && !tilePopup && viewport.zoom >= 0.2) {
              const hx = hoverTile.x;
              const hy = hoverTile.y;
              if (hx >= startX && hx <= endX && hy >= startY && hy <= endY) {
@@ -1277,7 +1277,7 @@ function GameMap({
       const lastDist = touchState.current.startDist;
       if (lastDist > 0) {
         const ratio = dist / lastDist;
-        const minZoom = 0.1;
+        const minZoom = window.innerWidth < 768 ? 0.05 : 0.1;
         setViewport(prev => ({
           ...prev,
           zoom: Math.max(minZoom, Math.min(4, touchState.current.startZoom * ratio))
@@ -1432,13 +1432,12 @@ function GameMap({
         wheelTimeoutRef.current = null;
     }, 16);
 
-    const minZoom = 0.1;
-    // const delta = e.deltaY > 0 ? 0.9 : 1.1;
+    const minZoom = window.innerWidth < 768 ? 0.05 : 0.1;
     setViewport(prev => {
         const currentZoom = prev.zoom;
         let step = 0.25;
         if (currentZoom < 0.2) {
-            step = 0.01;
+            step = 0.02;
         } else if (currentZoom < 0.5) {
             step = 0.05;
         }
