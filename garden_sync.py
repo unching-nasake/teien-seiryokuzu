@@ -20,6 +20,7 @@ import os
 import re
 import time
 import json
+import sqlite3
 import argparse
 import sys
 from datetime import datetime, timedelta
@@ -443,7 +444,31 @@ def run_extraction():
                 del final_data[loser["gk"]]
             print(f"[Extraction] Deduplicated UID {uid}: Kept {winner}")
 
-    # Save Data
+    # Save Data (SQLite & JSON)
+    db_path = os.path.join(DATA_ROOT, "game.db")
+    try:
+        conn = sqlite3.connect(db_path)
+        # WALモード設定 (Node.js/better-sqlite3との共存に必須)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+
+        cursor = conn.cursor()
+        # テーブルがなければ作成 (念のため)
+        cursor.execute("CREATE TABLE IF NOT EXISTS game_ids (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+
+        # バルクインサート
+        # final_data: { gk: data_obj }
+        insert_data = [(gk, json.dumps(data, ensure_ascii=False)) for gk, data in final_data.items()]
+
+        cursor.execute("BEGIN TRANSACTION")
+        cursor.executemany("INSERT OR REPLACE INTO game_ids (id, data) VALUES (?, ?)", insert_data)
+        conn.commit()
+        conn.close()
+        print(f"[Extraction] Saved to SQLite: {len(insert_data)} keys")
+    except Exception as e:
+        print(f"[Extraction] SQLite Save Error: {e}")
+
+    # (Keep JSON for temporary fallback/debug)
     try:
         tmp_json = game_ids_json + ".tmp"
         with open(tmp_json, 'w', encoding='utf-8') as f:

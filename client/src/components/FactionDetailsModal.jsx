@@ -330,7 +330,7 @@ const FactionDetailsModal = ({
             {/* [NEW] Message Section */}
             {activeTab === 'diplomacy' && (faction.globalSettings?.messagesEnabled !== false) && playerData?.factionId && playerData.factionId !== factionId && (
                 <div style={{ margin: '0 16px 16px', padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', border: '1px solid rgba(251, 191, 36, 0.3)' }}>
-                    <h4 style={{ margin: '0 0 10px 0', fontSize: '0.9rem', color: '#fbbf24' }}>📧 ポイント通知 (メッセージ送信 / {apSettings?.messageCost || 5}AP)</h4>
+                    <h4 style={{ margin: '0 0 10px 0', fontSize: '0.9rem', color: '#fbbf24' }}>📧 外交メッセージ</h4>
                     <div style={{ display: 'flex', gap: '8px', flexDirection: 'column' }}>
                         <textarea
                             placeholder="勢力主・外交権限者にメッセージを送ります（200文字以内）"

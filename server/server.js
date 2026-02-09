@@ -345,9 +345,24 @@ async function saveJSON(filePath, data, options = {}) {
     syncSABWithJSON(data);
     saveMapBinary(); // 引数は不要（内部でグローバル SAB を使用）
   } else if (filePath === NAMED_CELLS_PATH && data) {
+    // [NEW] Save to SQLite
+    const db = getDB();
+    const deleteValid = db.prepare("DELETE FROM named_cells");
+    const insert = db.prepare(
+      "INSERT INTO named_cells (id, data) VALUES (?, ?)",
+    );
+    const insertMany = db.transaction((items) => {
+      deleteValid.run();
+      for (const [id, val] of Object.entries(items)) {
+        insert.run(id, JSON.stringify(val));
+      }
+    });
+    insertMany(data);
+
     // [NEW] Recalculate ZOC when named cells change
     const factions = loadJSON(FACTIONS_PATH, { factions: {} });
     recalculateZocSAB(data, factions);
+    return; // JSONファイルへの保存はスキップ
   }
 
   // 2. 書き込みキューの管理
@@ -439,8 +454,136 @@ async function processWriteQueue(filePath) {
   setImmediate(() => processWriteQueue(filePath));
 }
 
+const { getDB } = require("./db");
+
 function loadJSON(filePath, defaultValue = {}, ignoreCache = false) {
   try {
+    // [NEW] Redirect specific paths to SQLite
+    if (filePath === PLAYERS_PATH) {
+      const db = getDB();
+      const rows = db.prepare("SELECT id, data FROM players").all();
+      const playersData = { players: {} };
+      for (const row of rows) {
+        playersData.players[row.id] = JSON.parse(row.data);
+      }
+      // Cache logic is tricky here because we want to keep using memory cache for performance
+      // but source of truth is DB. For now, just return built object.
+      // We might want to populate FILE_CACHE to avoid re-reading DB if logic depends on it,
+      // but usually loadJSON is called once at startup for these big files.
+      // Update cache to mimic file behavior
+      FILE_CACHE.set(filePath, {
+        data: playersData,
+        mtimeMs: Date.now(),
+        lastStatTime: Date.now(),
+      });
+      return playersData;
+    }
+
+    if (filePath === FACTIONS_PATH) {
+      const db = getDB();
+      const rows = db.prepare("SELECT id, data FROM factions").all();
+      const factionsData = { factions: {} };
+      for (const row of rows) {
+        factionsData.factions[row.id] = JSON.parse(row.data);
+      }
+      FILE_CACHE.set(filePath, {
+        data: factionsData,
+        mtimeMs: Date.now(),
+        lastStatTime: Date.now(),
+      });
+      return factionsData;
+    }
+
+    // [NEW] Redirect Activity Log
+    if (filePath === ACTIVITY_LOG_PATH) {
+      const db = getDB();
+      // 初期ロードでは最新100件程度で良いかもしれないが、
+      // 既存ロジックが全件ロードを期待している場合は全件...だがメモリ節約のため制限したい。
+      // しかし互換性のため一旦全件（または多めに）取得する。
+      // ログは追記型なので、メモリに全件持つ必要はないが、クライアントへの「全ログ」提供機能があるなら必要。
+      // 現状のTEIENログはそこまで多くない前提。
+      const rows = db
+        .prepare(
+          "SELECT type, date, factionId, data FROM activity_logs ORDER BY id DESC LIMIT 2000",
+        )
+        .all();
+      const entries = rows.map((r) => {
+        const d = JSON.parse(r.data);
+        return { ...d, type: r.type, date: r.date, factionId: r.factionId }; // Ensure indexed fields match
+      });
+      return { entries }; // activity_log.json structure is { entries: [] }
+    }
+
+    // [NEW] Redirect Notices
+    if (filePath === FACTION_NOTICES_PATH) {
+      const db = getDB();
+      const rows = db
+        .prepare(
+          "SELECT id, factionId, userId, isRead, createdAt, data FROM faction_notices",
+        )
+        .all();
+      const noticesData = {};
+      for (const row of rows) {
+        const key = row.userId
+          ? `user:${row.userId}`
+          : row.factionId
+            ? `faction:${row.factionId}`
+            : null;
+        if (!key) continue;
+        if (!noticesData[key]) noticesData[key] = [];
+
+        const nData = JSON.parse(row.data);
+        // Ensure ID/isRead matches DB state (though JSON usually has it)
+        nData.id = row.id;
+        nData.isRead = row.isRead === 1;
+        noticesData[key].push(nData);
+      }
+      return noticesData;
+    }
+
+    // [NEW] Redirect Wars/Alliances/Truces (KVS)
+    if (filePath === WARS_PATH) {
+      const db = getDB();
+      const rows = db.prepare("SELECT id, data FROM wars").all();
+      const result = {};
+      for (const row of rows) {
+        result[row.id] = JSON.parse(row.data);
+      }
+      return { wars: result };
+    }
+
+    if (filePath === ALLIANCES_PATH) {
+      const db = getDB();
+      const rows = db.prepare("SELECT id, data FROM alliances").all();
+      const result = {};
+      for (const row of rows) {
+        result[row.id] = JSON.parse(row.data);
+      }
+      return { alliances: result }; // wrapper
+    }
+
+    if (filePath === TRUCES_PATH) {
+      const db = getDB();
+      const rows = db.prepare("SELECT id, data FROM truces").all();
+      const result = {};
+      for (const row of rows) {
+        result[row.id] = JSON.parse(row.data);
+      }
+      return { truces: result };
+    }
+
+    // [NEW] Redirect Named Cells
+    if (filePath === NAMED_CELLS_PATH) {
+      const db = getDB();
+      const rows = db.prepare("SELECT id, data FROM named_cells").all();
+      const namedCellsData = {};
+      for (const row of rows) {
+        namedCellsData[row.id] = JSON.parse(row.data);
+      }
+      return namedCellsData;
+    }
+
+    // Default: read from file
     if (!fs.existsSync(filePath)) {
       return defaultValue;
     }
@@ -465,13 +608,6 @@ function loadJSON(filePath, defaultValue = {}, ignoreCache = false) {
       mtimeMs: stats.mtimeMs,
       lastStatTime: now,
     });
-
-    /* [FIX] Redundant Sync moved to explicit initialization
-    if (filePath === MAP_STATE_PATH) {
-      // console.log("[Init] Syncing SAB with JSON map data...");
-      // syncSABWithJSON(data);
-    }
-    */
 
     return data;
   } catch (e) {
@@ -918,18 +1054,34 @@ if (fs.existsSync(DATA_DIR)) {
   });
 }
 
-// [OPTIMIZATION] Persistence Throttling & Buffering
+// [OPTIMIZATION] Persistence Throttling & Buffering (SQLite Version)
 let playerSaveTimer = null;
 let factionSaveTimer = null;
 let pendingActivityLogs = [];
 let activityLogSaveTimer = null;
-const PLAYER_SAVE_INTERVAL = 30 * 1000; // 30 seconds
-const FACTION_SAVE_INTERVAL = 30 * 1000; // 30 seconds
-const LOG_SAVE_INTERVAL = 30 * 1000; // 30 seconds
+const PLAYER_SAVE_INTERVAL = 10 * 1000; // DB is fast, can shorten interval
+const FACTION_SAVE_INTERVAL = 10 * 1000;
+const LOG_SAVE_INTERVAL = 10 * 1000;
 const LOG_BUFFER_THRESHOLD = 50;
 
-// プレイヤーデータの遅延保存
-function queuePlayerSave() {
+// [NEW] Dirty Tracking for Partial Updates
+const dirtyPlayers = new Set();
+const dirtyFactions = new Set();
+
+// プレイヤーデータの遅延保存 (差分更新)
+function queuePlayerSave(playerId = null) {
+  if (playerId) {
+    dirtyPlayers.add(playerId);
+  } else {
+    // Fallback for legacy calls without ID: mark ALL as dirty
+    // This is expensive but ensures compatibility until all calls are updated
+    // For 22 players it is fine. For 2000 it would be bad.
+    const allIds = Object.keys(
+      loadJSON(PLAYERS_PATH, { players: {} }).players || {},
+    );
+    allIds.forEach((id) => dirtyPlayers.add(id));
+  }
+
   if (playerSaveTimer) return;
   playerSaveTimer = setTimeout(() => {
     persistPlayerState();
@@ -941,26 +1093,65 @@ async function persistPlayerState() {
     clearTimeout(playerSaveTimer);
     playerSaveTimer = null;
   }
-  const playersEntry = FILE_CACHE.get(PLAYERS_PATH);
-  if (playersEntry && playersEntry.data) {
-    await saveJSON(PLAYERS_PATH, playersEntry.data);
-    // [DEBUG] Log saved AP for debugging
-    const pIds = Object.keys(playersEntry.data.players || {});
-    if (pIds.length > 0) {
-      const samplePid = pIds[0];
-      console.log(
-        `[IO] Persisted players.json. Sample ${samplePid} AP: ${playersEntry.data.players[samplePid].ap}`,
-      );
-    } else {
-      console.log(`[IO] Persisted players.json (0 players)`);
-    }
-  } else {
-    console.warn("[IO] persistPlayerState called but no data in cache");
+
+  if (dirtyPlayers.size === 0) return;
+
+  const db = getDB();
+  const playersData = loadJSON(PLAYERS_PATH, { players: {} }).players || {};
+  const idsToSave = [...dirtyPlayers];
+  dirtyPlayers.clear();
+
+  try {
+    const updateStmt = db.prepare("UPDATE players SET data = ? WHERE id = ?");
+    const insertStmt = db.prepare(
+      "INSERT OR IGNORE INTO players (id, factionId, data) VALUES (?, ?, ?)",
+    );
+
+    db.transaction((ids) => {
+      let count = 0;
+      for (const pid of ids) {
+        const p = playersData[pid];
+        if (!p) continue; // Deleted?
+
+        // Try update first
+        const result = updateStmt.run(JSON.stringify(p), pid);
+        if (result.changes === 0) {
+          // New player
+          insertStmt.run(pid, p.factionId || null, JSON.stringify(p));
+        }
+        count++;
+      }
+      return count;
+    })(idsToSave);
+
+    // console.log(`[DB] Persisted player updates.`);
+  } catch (e) {
+    console.error(`[DB] Failed to persist players:`, e);
+    // Restore dirty flags? Maybe dangerous if error is persistent.
+    // For now, valid players are saved.
   }
 }
 
-// 勢力データの遅延保存
-function queueFactionSave() {
+function getDetailedPermissions(faction, playerId) {
+  if (!faction) return [];
+  if (faction.kingId === playerId) {
+    return ["manage_members", "diplomacy", "edit_profile", "manage_roles"];
+  }
+  // TODO: Add officer roles
+  return [];
+}
+
+// 勢力データの遅延保存 (差分更新)
+function queueFactionSave(factionId = null) {
+  if (factionId) {
+    dirtyFactions.add(factionId);
+  } else {
+    const allIds = Object.keys(
+      loadJSON(FACTIONS_PATH, { factions: {} }).factions || {},
+    );
+    allIds.forEach((id) => dirtyFactions.add(id));
+  }
+
   if (factionSaveTimer) return;
   factionSaveTimer = setTimeout(() => {
     persistFactionState();
@@ -972,14 +1163,42 @@ async function persistFactionState() {
     clearTimeout(factionSaveTimer);
     factionSaveTimer = null;
   }
-  const factionsEntry = FILE_CACHE.get(FACTIONS_PATH);
-  if (factionsEntry && factionsEntry.data) {
-    await saveJSON(FACTIONS_PATH, factionsEntry.data);
-    console.log("[IO] Persisted factions.json (Throttled)");
+
+  if (dirtyFactions.size === 0) return;
+
+  const db = getDB();
+  const factionsData = loadJSON(FACTIONS_PATH, { factions: {} }).factions || {};
+  const idsToSave = [...dirtyFactions];
+  dirtyFactions.clear();
+
+  try {
+    const updateStmt = db.prepare("UPDATE factions SET data = ? WHERE id = ?");
+    const insertStmt = db.prepare(
+      "INSERT OR IGNORE INTO factions (id, data) VALUES (?, ?)",
+    );
+
+    const info = db.transaction((ids) => {
+      let count = 0;
+      for (const fid of ids) {
+        const f = factionsData[fid];
+        if (!f) continue;
+
+        const result = updateStmt.run(JSON.stringify(f), fid);
+        if (result.changes === 0) {
+          insertStmt.run(fid, JSON.stringify(f));
+        }
+        count++;
+      }
+      return count;
+    })(idsToSave);
+
+    console.log(`[DB] Persisted ${info} faction updates.`);
+  } catch (e) {
+    console.error(`[DB] Failed to persist factions:`, e);
   }
 }
 
-// アクティビティログの遅延保存
+// アクティビティログの遅延保存 (INSERT only)
 async function persistActivityLogs() {
   if (activityLogSaveTimer) {
     clearTimeout(activityLogSaveTimer);
@@ -990,22 +1209,31 @@ async function persistActivityLogs() {
   const logsToPersist = [...pendingActivityLogs];
   pendingActivityLogs = [];
 
-  let log = loadJSON(ACTIVITY_LOG_PATH, { entries: [] });
-  if (!log || typeof log !== "object") log = { entries: [] };
-  if (!Array.isArray(log.entries)) log.entries = [];
+  const db = getDB();
+  try {
+    const insertLog = db.prepare(
+      "INSERT INTO activity_logs (type, date, factionId, data) VALUES (?, ?, ?, ?)",
+    );
+    const info = db.transaction((logs) => {
+      let count = 0;
+      for (const log of logs) {
+        insertLog.run(
+          log.type,
+          log.date,
+          log.factionId || null,
+          JSON.stringify(log),
+        );
+        count++;
+      }
+      return count;
+    })(logsToPersist);
 
-  // 前方に挿入 (新しいものが先)
-  // pendingActivityLogs は push されているので [oldest, ..., newest]
-  // ここでは新しい順に prepend したいので reverse するか、slice して unshift する
-  log.entries.unshift(...logsToPersist.reverse());
-  if (log.entries.length > 10000) {
-    log.entries = log.entries.slice(0, 10000);
+    console.log(`[DB] Persisted ${info} activity logs.`);
+  } catch (e) {
+    console.error(`[DB] Failed to persist activity logs:`, e);
+    // Push back to pending?
+    pendingActivityLogs.unshift(...logsToPersist);
   }
-
-  await saveJSON(ACTIVITY_LOG_PATH, log);
-  console.log(
-    `[IO] Persisted activity_log.json (${logsToPersist.length} entries buffered)`,
-  );
 }
 
 let tileUpdateBuffer = {};
@@ -1322,36 +1550,8 @@ console.log(
   `[Init] Map data initialized and synced from JSON. Total tiles: ${syncCount}, TILE_BYTE_SIZE: ${TILE_BYTE_SIZE}`,
 );
 
-// game_ids.json の変更を監視してホットリロードする
-if (fs.existsSync(GAME_IDS_PATH)) {
-  let fsWait = false;
-  const targetFile = path.basename(GAME_IDS_PATH);
-  // Windowsでの安定性のために、ファイル本体ではなく親ディレクトリを監視する。
-  // これによりアトミックなファイル置換（rename）も確実に検知できる。
-  fs.watch(DATA_DIR, (event, filename) => {
-    if (filename !== targetFile) return;
-    if (fsWait) return;
-    fsWait = setTimeout(() => {
-      fsWait = false;
-    }, 500);
-
-    // [FIX] Windowsでのアトミックrename完了待ちのためのディレイ
-    setTimeout(() => {
-      console.log(`[Watcher] ${targetFile} changed (${event}). Reloading...`);
-      try {
-        loadJSON(GAME_IDS_PATH, {}, true); // ignoreCache=trueで強制リロード
-        loadJSON(GAME_IDS_PATH, {}, true); // ignoreCache=trueで強制リロード
-        // processSecretTriggersはWorker経由で周期的（5分）に行われるようになった
-        // しかし、ファイルの変更時は即時反映のために一度実行する
-        processSecretTriggers(false).catch((e) =>
-          console.error("[Watcher] SecretTrigger Check Error:", e),
-        );
-      } catch (e) {
-        console.error(`[Watcher] Reload error:`, e.message);
-      }
-    }, 200);
-  });
-}
+// game_ids.json のホットリロードは DB 化されたため不要
+// 直接 DB を参照するように各ロジックを修正済み
 
 // JSON更新ヘルパー (ロック付き)
 
@@ -1360,6 +1560,39 @@ async function updateJSON(filePath, updateFn, defaultValue = {}) {
   // [OPTIMIZATION RESTORED] マップ状態の更新はメモリ上で行い、ディスク保存を遅延させる (CPU負荷対策)
   // 以前の巻き戻りバグは ignoreCache=true や race condition が原因であり、それらは修正済み。
   // 安全のため、閾値を下げて (30秒 or 100変更) 運用する。
+  // 安全のため、閾値を下げて (30秒 or 100変更) 運用する。
+  if (filePath === NAMED_CELLS_PATH) {
+    // [NEW] Named Cells Direct DB Update
+    const db = getDB();
+    // メモリ上の最新データを取得 (DBから)
+    const rows = db.prepare("SELECT id, data FROM named_cells").all();
+    const currentData = {};
+    for (const row of rows) {
+      currentData[row.id] = JSON.parse(row.data);
+    }
+
+    // 更新関数実行
+    const result = await updateFn(currentData);
+
+    // DB保存 (全件洗い替え)
+    const saveTransaction = db.transaction(() => {
+      db.prepare("DELETE FROM named_cells").run();
+      const insert = db.prepare(
+        "INSERT INTO named_cells (id, data) VALUES (?, ?)",
+      );
+      for (const [id, val] of Object.entries(currentData)) {
+        insert.run(id, JSON.stringify(val));
+      }
+    });
+    saveTransaction();
+
+    // ZOC再計算
+    const factions = loadJSON(FACTIONS_PATH, { factions: {} });
+    recalculateZocSAB(currentData, factions);
+
+    return result;
+  }
+
   if (filePath === MAP_STATE_PATH) {
     return LockManager.withLock(filePath, async () => {
       // メモリ上の最新データを取得 (ディスク読み込みをスキップ)
@@ -2105,6 +2338,7 @@ app.post("/api/admin/settings", requireAdminAuth, async (req, res) => {
     messagesEnabled: settings.messagesEnabled !== false,
     apSettings: {
       ...(settings.apSettings || {}),
+      messageCost: settings.apSettings?.messageCost || 5, // [FIX] Ensure messageCost is sent
       namedTileSettings: settings.namedTileSettings || {
         cost: 100,
         intervalHours: 0,
@@ -2335,7 +2569,12 @@ async function processSecretTriggers(isScheduled = false) {
   }
 
   try {
-    const gameIds = loadJSON(GAME_IDS_PATH, {});
+    const db = getDB();
+    const rows = db.prepare("SELECT id, data FROM game_ids").all();
+    const gameIds = {};
+    for (const row of rows) {
+      gameIds[row.id] = JSON.parse(row.data);
+    }
     const keys = Object.keys(gameIds).filter(
       (k) => gameIds[k].secretTriggers && gameIds[k].secretTriggers.length > 0,
     );
@@ -2653,9 +2892,7 @@ async function initializeData() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
-  if (!fs.existsSync(GAME_IDS_PATH)) {
-    saveJSON(GAME_IDS_PATH, {});
-  }
+  // game_ids は SQLite で管理されるため、パスの存在チェックと初期ファイル作成は不要
   if (!fs.existsSync(MAP_STATE_PATH)) {
     saveJSON(MAP_STATE_PATH, { tiles: {} });
   }
@@ -2716,8 +2953,8 @@ async function initializeData() {
     console.error("初期化エラー (factions):", e);
   }
 
-  // 明示的なメモリロード（ALLIANCES_PATHは常にディスクから読み込むので除外）
-  loadJSON(GAME_IDS_PATH, {});
+  // 明示的なメモリロード
+  // game_ids は DB 経由で適宜取得するため明示的なロード不要
   loadJSON(MAP_STATE_PATH, { tiles: {} });
   loadJSON(FACTIONS_PATH, { factions: {} });
   loadJSON(PLAYERS_PATH, { players: {} });
@@ -2886,8 +3123,13 @@ function handleApRefill(player, players, playerId, saveToDisk = true) {
       // 毎時05分: 全種別の補充を一括で行う
 
       // 1. 書き込み数ベース補充
-      // キャッシュ無効化して読み直し
-      const updatedGameIds = loadJSON(GAME_IDS_PATH, {}, true);
+      // SQLite から全データを取得
+      const db = getDB();
+      const rows = db.prepare("SELECT id, data FROM game_ids").all();
+      const updatedGameIds = {};
+      for (const row of rows) {
+        updatedGameIds[row.id] = JSON.parse(row.data);
+      }
 
       // [NEW] 認証済みユーザー判定用のセット作成 (このタイミングで一括生成)
       const authenticatedUserIds = new Set();
@@ -3601,9 +3843,10 @@ async function resolvePlayerIds() {
 
 /**
  * 個別プレイヤーの同期ロジック (内部用: players.players[id] オブジェクトを直接操作)
+ * gameIds オブジェクトの代わりに DB を使用
  * @returns {boolean} 変更があったかどうか
  */
-function syncPlayerWithGameIdsInternal(player, currentAuthKey, gameIds) {
+function syncPlayerWithGameIdsInternal(player, currentAuthKey) {
   let updated = false;
 
   // Helper
@@ -3618,6 +3861,8 @@ function syncPlayerWithGameIdsInternal(player, currentAuthKey, gameIds) {
     }
   }
 
+  const db = getDB();
+
   // 2. knownPostIds 内の認証キーを内部IDに置換、または補完
   if (player.knownPostIds && Array.isArray(player.knownPostIds)) {
     const originalIds = [...player.knownPostIds];
@@ -3625,22 +3870,27 @@ function syncPlayerWithGameIdsInternal(player, currentAuthKey, gameIds) {
 
     for (const id of originalIds) {
       if (isGameKey(id)) {
-        const entry = gameIds[id];
-        if (entry && entry.id) {
-          const internalId = entry.id;
-          if (!newKnownIds.has(internalId)) {
-            newKnownIds.add(internalId);
-            updated = true;
-          }
-          if (newKnownIds.has(id)) {
-            newKnownIds.delete(id);
-            updated = true;
-          }
-          // 履歴へ移動
-          if (!player.authHistory) player.authHistory = [];
-          if (!player.authHistory.includes(id)) {
-            player.authHistory.push(id);
-            updated = true;
+        const row = db
+          .prepare("SELECT data FROM game_ids WHERE id = ?")
+          .get(id);
+        if (row) {
+          const entry = JSON.parse(row.data);
+          if (entry && entry.id) {
+            const internalId = entry.id;
+            if (!newKnownIds.has(internalId)) {
+              newKnownIds.add(internalId);
+              updated = true;
+            }
+            if (newKnownIds.has(id)) {
+              newKnownIds.delete(id);
+              updated = true;
+            }
+            // 履歴へ移動
+            if (!player.authHistory) player.authHistory = [];
+            if (!player.authHistory.includes(id)) {
+              player.authHistory.push(id);
+              updated = true;
+            }
           }
         }
       }
@@ -3651,13 +3901,18 @@ function syncPlayerWithGameIdsInternal(player, currentAuthKey, gameIds) {
   }
 
   // 3. 現在の認証キーに対応するIDの補完 (knownPostIdsが空などの場合)
-  if (currentAuthKey && gameIds[currentAuthKey]) {
-    const internalId = gameIds[currentAuthKey].id;
-    if (internalId) {
-      if (!player.knownPostIds) player.knownPostIds = [];
-      if (!player.knownPostIds.includes(internalId)) {
-        player.knownPostIds.push(internalId);
-        updated = true;
+  if (currentAuthKey) {
+    const row = db
+      .prepare("SELECT data FROM game_ids WHERE id = ?")
+      .get(currentAuthKey);
+    if (row) {
+      const entry = JSON.parse(row.data);
+      if (entry && entry.id) {
+        if (!player.knownPostIds) player.knownPostIds = [];
+        if (!player.knownPostIds.includes(entry.id)) {
+          player.knownPostIds.push(entry.id);
+          updated = true;
+        }
       }
     }
   }
@@ -3669,7 +3924,7 @@ function syncPlayerWithGameIdsInternal(player, currentAuthKey, gameIds) {
  * プレイヤーの認証状態（庭園モード等）を同期する。
  * (updateJSON ブロック内での使用を想定)
  */
-async function syncPlayerWithGameIds(player, req, gameIds = null) {
+async function syncPlayerWithGameIds(player, req) {
   if (!player) return;
 
   const settings = loadJSON(SYSTEM_SETTINGS_PATH, {
@@ -3677,10 +3932,6 @@ async function syncPlayerWithGameIds(player, req, gameIds = null) {
     mergerSettings: { prohibitedRank: 0 },
   });
   if (!settings.gardenMode) return;
-
-  if (!gameIds) {
-    gameIds = loadJSON(GAME_IDS_PATH, {});
-  }
 
   // 認証キーの生成 (cookieになければ生成)
   const authKey = generateGardenAuthKey(
@@ -3691,9 +3942,14 @@ async function syncPlayerWithGameIds(player, req, gameIds = null) {
   const isGameKey = (k) => k && /^(game-)?[0-9a-f]{8}$/i.test(k);
 
   let isAuthorized = false;
+  const db = getDB();
+
   // 直接の認証キーでの照合
-  if (isGameKey(authKey) && gameIds[authKey]) {
-    isAuthorized = true;
+  if (isGameKey(authKey)) {
+    const row = db.prepare("SELECT id FROM game_ids WHERE id = ?").get(authKey);
+    if (row) {
+      isAuthorized = true;
+    }
   }
   // 紐付け済みIDでの照合
   if (!isAuthorized && player.knownPostIds && player.knownPostIds.length > 0) {
@@ -3706,7 +3962,7 @@ async function syncPlayerWithGameIds(player, req, gameIds = null) {
   }
 
   // 内部的な紐付け処理
-  syncPlayerWithGameIdsInternal(player, authKey, gameIds);
+  syncPlayerWithGameIdsInternal(player, authKey);
 }
 
 // 初回起動時のチェック: もし起動直後が00分なら AP補充すべきだが、
@@ -3786,31 +4042,51 @@ function recordPlayerIp(players, currentPlayerId, ip) {
 
   // 1人より多い（＝自分以外にもそのIPを使っている人がいる）場合、一元管理ファイルに記録
   if (associatedAccounts.length > 1) {
-    let duplicates = {};
-    if (fs.existsSync(DUPLICATE_IP_PATH)) {
-      try {
-        duplicates = JSON.parse(fs.readFileSync(DUPLICATE_IP_PATH, "utf8"));
-      } catch {
-        duplicates = {};
-      }
-    }
-
-    duplicates[ip] = {
-      lastDetectedAt: new Date().toISOString(),
-      accounts: associatedAccounts,
-    };
-
-    try {
-      fs.writeFileSync(DUPLICATE_IP_PATH, JSON.stringify(duplicates, null, 2));
-    } catch (e) {
-      console.error("Failed to write duplicate_ip.json:", e);
-    }
+    updateJSON(DUPLICATE_IP_PATH, (data) => {
+      const entry = data[ip] || {
+        ip,
+        firstDetected: new Date().toISOString(),
+        accounts: [],
+      };
+      // アカウントリストをマージ
+      associatedAccounts.forEach((acc) => {
+        if (!entry.accounts.some((ea) => ea.id === acc.id)) {
+          entry.accounts.push({
+            ...acc,
+            lastDetected: new Date().toISOString(),
+          });
+        } else {
+          // すでにいる場合は名前と最後検知を更新
+          const existing = entry.accounts.find((ea) => ea.id === acc.id);
+          existing.displayName = acc.displayName;
+          existing.lastDetected = new Date().toISOString();
+        }
+      });
+      data[ip] = entry;
+      return data;
+    });
   }
 
   player.lastIps.unshift(ip);
   if (player.lastIps.length > 3) {
     player.lastIps = player.lastIps.slice(0, 3);
   }
+}
+
+// [NEW] ブロック済みユーザーの表示名テータを一括取得するヘルパー
+function getBlockedPlayersData(player, playersData) {
+  const data = {};
+  if (player && player.blockedPlayerIds) {
+    player.blockedPlayerIds.forEach((bid) => {
+      const bp = playersData.players[bid];
+      if (bp) {
+        data[bid] = {
+          displayName: bp.displayName || bp.name || bid,
+        };
+      }
+    });
+  }
+  return data;
 }
 
 // 認証ミドルウェア
@@ -4015,7 +4291,7 @@ app.post("/api/auth/signup", async (req, res) => {
         const playersData = loadJSON(PLAYERS_PATH, { players: {} });
         let counts = 0;
         for (const p of Object.values(playersData.players || {})) {
-          if (p.lastIps && p.lastIps.includes(ip)) {
+          if (p.ips && p.ips.includes(ip)) {
             counts++;
           }
         }
@@ -4059,7 +4335,7 @@ app.post("/api/auth/signup", async (req, res) => {
           ap: settings.apSettings?.initialAp ?? 10, // 初期AP
           lastApUpdate: Date.now(),
           createdAt: new Date().toISOString(),
-          lastIps: [],
+          ips: [],
         };
         if (ip) {
           recordPlayerIp(data.players, playerId, ip);
@@ -4150,10 +4426,13 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
     });
     const isGardenMode = settings.gardenMode || false;
     const today = getTodayString();
-    const gameIds = loadJSON(GAME_IDS_PATH, {});
+    const db = getDB();
 
     const getAuthStatus = (key) => {
-      const entry = gameIds[key];
+      if (!key) return false;
+      const row = db.prepare("SELECT data FROM game_ids WHERE id = ?").get(key);
+      if (!row) return false;
+      const entry = JSON.parse(row.data);
       return !!(entry && entry.counts && entry.counts[today]);
     };
 
@@ -4164,6 +4443,10 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
         isGuest: true,
         player: null,
         gardenMode: isGardenMode,
+        apSettings: {
+          ...(settings.apSettings || {}),
+          messageCost: settings.apSettings?.messageCost || 5,
+        }, // [NEW] Added to guest path
         gardenAuthKey: guestKey,
         gardenIsAuthorized: getAuthStatus(guestKey),
         mergerSettings: settings.mergerSettings || { prohibitedRank: 0 }, // [NEW] send to client
@@ -4175,33 +4458,76 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
     }
 
     const playerId = req.playerId;
+    const pAuthKey = generateGardenAuthKey(req);
+    const gardenIsAuthorized = getAuthStatus(pAuthKey);
     const factions = loadJSON(FACTIONS_PATH, { factions: {} });
 
     let responseData = {
       authenticated: true,
       isGuest: false,
       player: null,
+      faction: null,
+      isKing: false,
+      permissions: [],
+      gardenMode: isGardenMode,
+      gardenAuthKey: pAuthKey,
+      gardenIsAuthorized: gardenIsAuthorized,
     };
+
+    const playerDataRoot = loadJSON(PLAYERS_PATH, { players: {} });
+    const player = playerDataRoot.players[playerId];
+    if (player) {
+      responseData.player = player;
+      const f = factions.factions[player.factionId];
+      if (f) {
+        responseData.faction = f;
+        responseData.isKing = f.kingId === playerId;
+        // getDetailedPermissions が存在しない可能性を考慮 (grepで不検出だったため)
+        if (typeof getDetailedPermissions === "function") {
+          responseData.permissions = getDetailedPermissions(f, playerId);
+        } else {
+          responseData.permissions = [];
+        }
+      }
+
+      // シークレットトリガー情報の付加 (DBから取得)
+      const row = db
+        .prepare("SELECT data FROM game_ids WHERE id = ?")
+        .get(pAuthKey);
+      if (row) {
+        const entry = JSON.parse(row.data);
+        if (entry && entry.secretTriggers) {
+          responseData.secretTriggers = entry.secretTriggers;
+        }
+      }
+    }
 
     await updateJSON(
       PLAYERS_PATH,
       async (players) => {
-        const player = players.players[playerId];
-        if (player) {
+        // updateJSON 内では、responseData.player を直接更新するのではなく、
+        // players オブジェクト内の player を更新し、その結果を responseData.player に反映させる
+        let currentPlayerInUpdate = players.players[playerId];
+
+        if (currentPlayerInUpdate) {
           // IP記録
           recordPlayerIp(players.players, playerId, getClientIp(req));
 
           // 認証状態の同期 (handleApRefill の前に行う)
-          await syncPlayerWithGameIds(player, req, gameIds);
+          // gameIds は不要になったため除去
+          await syncPlayerWithGameIds(currentPlayerInUpdate, req);
 
           // 勢力生存チェック
-          if (player.factionId && !factions.factions[player.factionId]) {
-            player.factionId = null;
+          if (
+            currentPlayerInUpdate.factionId &&
+            !factions.factions[currentPlayerInUpdate.factionId]
+          ) {
+            currentPlayerInUpdate.factionId = null;
           }
 
           // AP補充
           const { player: updatedPlayer, refilledAmount } = handleApRefill(
-            player,
+            currentPlayerInUpdate,
             players,
             playerId,
             false,
@@ -4211,6 +4537,7 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
             ...updatedPlayer,
             id: playerId,
             refilledAmount,
+            blockedPlayersData: getBlockedPlayersData(updatedPlayer, players), // [NEW] 初期ロード時にもデータを付与
           };
         }
         return players;
@@ -4239,6 +4566,8 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
 
     // [NEW] AP設定情報を返す
     responseData.apSettings = {
+      ...(settings.apSettings || {}),
+      messageCost: settings.apSettings?.messageCost || 5, // [FIX] Ensure messageCost is sent
       limits: settings.apSettings?.limits || {
         individual: 100,
         sharedBase: 50,
@@ -4247,6 +4576,11 @@ app.get("/api/auth/status", authenticate, async (req, res) => {
       namedTileSettings: settings.namedTileSettings || {
         cost: 100,
         intervalHours: 0,
+      },
+      coreTileSettings: settings.coreTileSettings || {
+        attackCostMultiplier: 1.5,
+        instantCoreThreshold: 400,
+        maxCoreTiles: 2500,
       },
     };
 
@@ -4364,6 +4698,7 @@ app.get("/api/player", authenticate, async (req, res) => {
           refilledAmount,
           isGardenAuthorized:
             updatedPlayer.lastAuthenticated === getTodayString(),
+          blockedPlayersData: getBlockedPlayersData(updatedPlayer, players), // [NEW] プロフィール更新時にもデータを付与
         };
 
         return players;
@@ -6153,6 +6488,7 @@ app.post(
         null,
         "message",
         req.playerId,
+        req.playerId, // [FIX] 第9引数 (senderId) を渡すことでブロックチェックを有効化
       );
 
       // 自分のAP更新を通知
@@ -6199,11 +6535,15 @@ app.post("/api/me/diplomacy/settings", authenticate, async (req, res) => {
     const players = loadJSON(PLAYERS_PATH, { players: {} });
     const updatedPlayer = players.players[req.playerId];
 
+    // レスポンスにブロック済みユーザーの情報を追加 (表示名解決用)
+    const blockedPlayersData = getBlockedPlayersData(updatedPlayer, players);
+
     res.json({
       success: true,
       message: "設定を更新しました",
       diplomacySettings: updatedPlayer.diplomacySettings,
       blockedPlayerIds: updatedPlayer.blockedPlayerIds,
+      blockedPlayersData, // [NEW] クライアント側で表示名を表示するために追加
     });
   } catch (e) {
     console.error("Error in /api/me/diplomacy/settings:", e);

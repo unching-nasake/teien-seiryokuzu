@@ -94,7 +94,8 @@ function NoticeModal({ notices, readNoticeIds, lastNoticeReadAllTime = 0, onClos
                     onUpdateUser(prev => ({
                         ...prev,
                         diplomacySettings: data.diplomacySettings,
-                        blockedPlayerIds: data.blockedPlayerIds
+                        blockedPlayerIds: data.blockedPlayerIds,
+                        blockedPlayersData: data.blockedPlayersData // [NEW] 名前解決用
                     }));
                 }
                 setAllowMessages(data.diplomacySettings.allowMessages);
@@ -126,63 +127,86 @@ function NoticeModal({ notices, readNoticeIds, lastNoticeReadAllTime = 0, onClos
         return (
             <div className="premium-modal-overlay" onClick={onClose}>
                 <div className="premium-modal-content" onClick={e => e.stopPropagation()}>
-                    {/* 戻るボタン (修正版: div を使用してボタン特有のスタイルを回避) */}
+                    {/* 戻るボタン (青背景で強調 - index.css定義) */}
                     <div
                         onClick={() => setShowSettings(false)}
-                        className="absolute top-6 left-6 text-gray-400 hover:text-white transition-colors flex items-center gap-2 font-bold z-10 cursor-pointer"
-                        style={{ width: 'max-content', background: 'none', border: 'none', padding: '4px' }}
+                        className="diplomacy-back-btn"
                         title="戻る"
                     >
-                        <span className="text-xl">←</span> 戻る
+                        <span>← 戻る</span>
                     </div>
 
                     <button onClick={onClose} className="premium-close-btn" title="閉じる">✖</button>
 
-                    <h3 className="text-2xl font-bold mb-8 text-center text-gray-100 mt-2">外交通知設定</h3>
+                    <div className="diplomacy-title-area">
+                        <h3 className="flex items-center justify-center gap-2">
+                            <span style={{ fontSize: '1.2em' }}>🛡️</span> 外交通知設定
+                        </h3>
+                        <div className="diplomacy-title-underline"></div>
+                    </div>
 
                     <div className="space-y-6 px-4 overflow-y-auto" style={{ maxHeight: 'calc(80vh - 100px)' }}>
-                        {/* 受信設定 (カード化) */}
-                        <div className="bg-gray-800 bg-opacity-40 p-6 rounded-xl shadow-lg border border-gray-700/50 backdrop-blur-sm">
-                            <h4 className="text-lg font-bold mb-4 text-blue-300 border-b border-gray-700 pb-2">メッセージ受信設定</h4>
+                        {/* 受信設定 (マテリアルカード - index.css定義) */}
+                        <div className="diplomacy-settings-card card-blue">
+                            <h4 className="diplomacy-card-header">
+                                <div className="diplomacy-icon-wrapper">✉️</div>
+                                メッセージ受信設定
+                            </h4>
 
                             <div
-                                className={`premium-toggle ${allowMessages ? 'active' : ''}`}
+                                className={`diplomacy-toggle-row ${allowMessages ? 'active' : ''}`}
                                 onClick={!isSaving ? handleToggleAllow : undefined}
-                                style={{ opacity: isSaving ? 0.7 : 1 }}
+                                style={{ opacity: isSaving ? 0.7 : 1, cursor: 'pointer' }}
                             >
-                                <span className="premium-toggle-label text-gray-200">他勢力からの外交メッセージを受け取る</span>
-                                <div className="premium-toggle-switch">
-                                    <div className="premium-toggle-knob"></div>
+                                <span className="font-bold text-gray-100">他勢力からの外交メッセージを受け取る</span>
+                                <div className={`premium-toggle ${allowMessages ? 'active' : ''} m-0`}>
+                                    <div className="premium-toggle-switch scale-110">
+                                        <div className="premium-toggle-knob"></div>
+                                    </div>
                                 </div>
                             </div>
 
-                            <p className="text-xs text-gray-500 mt-3 ml-1">
-                                ※OFFにすると、相手には送信エラー等は表示されず、通知だけが届かなくなります。
-                            </p>
+                            <div className="diplomacy-info-box">
+                                <span style={{ color: '#3b82f6', fontWeight: 'bold', marginRight: '4px' }}>INFO:</span>
+                                OFFにすると、相手には送信エラー等は表示されず、通知だけが届かなくなります。
+                            </div>
                         </div>
 
-                        {/* ブロックリスト (カード化) */}
-                        <div className="bg-gray-800 bg-opacity-40 p-6 rounded-xl shadow-lg border border-gray-700/50 backdrop-blur-sm">
-                            <h4 className="text-lg font-bold mb-4 text-red-400 border-b border-gray-700 pb-2">
-                                ブロック済みユーザー <span className="text-sm font-normal text-gray-400 ml-2">({blockedIds.length})</span>
+                        {/* ブロックリスト (マテリアルカード - index.css定義) */}
+                        <div className="diplomacy-settings-card card-red">
+                            <h4 className="diplomacy-card-header">
+                                <div className="diplomacy-icon-wrapper">🚫</div>
+                                ブロック済みユーザー
+                                <span style={{ fontSize: '0.7em', padding: '2px 8px', background: 'rgba(239, 68, 68, 0.2)', borderRadius: '10px', marginLeft: '8px', color: '#f87171' }}>
+                                    {blockedIds.length}
+                                </span>
                             </h4>
 
-                            <div className="max-h-60 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
+                            <div className="max-h-60 overflow-y-auto space-y-3 pr-2 custom-scrollbar">
                                 {blockedIds.length === 0 ? (
-                                    <div className="text-center text-gray-500 py-6 bg-black bg-opacity-20 rounded-lg">
+                                    <div className="text-center text-gray-400 py-8 bg-black/40 rounded-xl border border-dashed border-gray-700 italic">
                                         ブロックしているユーザーはいません
                                     </div>
                                 ) : (
                                     blockedIds.map(uid => (
-                                        <div key={uid} className="flex justify-between items-center bg-black bg-opacity-30 p-3 rounded-lg border border-gray-700/30 hover:bg-opacity-40 transition-colors">
+                                        <div key={uid} className="diplomacy-block-item">
                                             <div className="flex items-center gap-3">
-                                                <span className="w-2 h-2 rounded-full bg-red-500"></span>
-                                                <span className="font-mono text-sm text-gray-300">{uid}</span>
+                                                <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: 'rgba(239, 68, 68, 0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                                    <span style={{ color: '#ef4444', fontSize: '10px', fontWeight: 'bold' }}>ID</span>
+                                                </div>
+                                                    <div className="flex flex-col items-start">
+                                                        <span className="font-bold text-gray-100">
+                                                            {currentUser?.blockedPlayersData?.[uid]?.displayName || "読み込み中..."}
+                                                        </span>
+                                                        <span className="font-mono text-xs text-gray-600">
+                                                            ({uid})
+                                                        </span>
+                                                    </div>
                                             </div>
                                             <button
                                                 onClick={() => handleUnblock(uid)}
                                                 disabled={isSaving}
-                                                className="text-xs bg-gray-700 hover:bg-gray-600 text-white px-3 py-1.5 rounded transition-colors shadow-sm"
+                                                className="diplomacy-unblock-btn"
                                             >
                                                 解除
                                             </button>

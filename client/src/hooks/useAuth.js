@@ -7,6 +7,7 @@ const useAuth = (factions, addNotification, triggerApEffect) => {
     isGuest: true,
     player: null,
     gardenMode: false,
+    apSettings: {}, // [NEW] Added initial state
   });
   const [playerData, setPlayerData] = useState(null);
 

@@ -631,25 +631,6 @@ function App() {
         setReadNoticeIds(serverReadIds);
         setLastNoticeReadAllTime(serverReadAllTime);
 
-        // 次回起動時用の初回移行処理 (localStorage -> Server)
-        const localReadIds = (() => {
-            try {
-                const saved = localStorage.getItem('teien_read_notices');
-                return saved ? JSON.parse(saved) : [];
-            } catch(e) { return []; }
-        })();
-
-        if (localReadIds.length > 0 && serverReadIds.length === 0 && serverReadAllTime === 0) {
-            console.log("[Migration] Syncing local read status to server...", localReadIds);
-            Promise.all(localReadIds.map(id =>
-                fetch(`/api/notices/${id}/read`, { method: 'POST', credentials: 'include' })
-            )).then(() => {
-                console.log("[Migration] Sync complete. Clearing localStorage.");
-                localStorage.removeItem('teien_read_notices');
-                fetchNotices(); // サーバーから最新状態を再取得
-            }).catch(e => console.error("[Migration] Sync failed:", e));
-            return; // 移行リクエストを投げたので一旦終了
-        }
 
         // 勢力主以外には要請通知（一覧含む）を表示しない
         const currentP = playerDataRef.current;
@@ -840,7 +821,9 @@ function App() {
         apSettings: newSettings.apSettings,
         isMergeEnabled: newSettings.isMergeEnabled,
         isGameStopped: newSettings.isGameStopped,
+        mergerSettings: newSettings.mergerSettings, // [NEW] added for consistency
       }));
+      // 設定変更後に勢力情報を再取得して、UI上のコスト表示などを最新化する
       fetchFactions();
     });
 
@@ -3192,6 +3175,7 @@ function App() {
             alliances={alliances}
             truces={truces}
             wars={wars}
+            apSettings={authStatus.apSettings} // [NEW] 追加
             onClose={() => setShowMemberFactionId(null)}
             onJoinFaction={handleJoinFaction}
             onKickMember={(pid) => {

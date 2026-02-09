@@ -2097,3 +2097,172 @@ body {
 .coord-link:active {
   transform: translateY(0);
 }
+
+/* --- 外交通知設定 (Diplomacy Settings) 専用スタイル --- */
+
+.diplomacy-back-btn {
+  position: absolute;
+  top: 16px; /* 24px から 16px に上げて上端に寄せる */
+  left: 16px; /* 24px から 16px に */
+  background: #2563eb; /* Blue-600 */
+  color: white;
+  padding: 6px 14px; /* 少しコンパクトに */
+  border-radius: 9999px;
+  font-weight: 800;
+  cursor: pointer;
+  display: flex !important;
+  align-items: center;
+  gap: 6px;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.4);
+  transition: all 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  z-index: 2005;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  width: fit-content !important;
+  max-width: max-content !important;
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+
+.diplomacy-back-btn:hover {
+  background: #1d4ed8; /* Blue-700 */
+  box-shadow: 0 6px 20px rgba(37, 99, 235, 0.6);
+  transform: translateY(-2px);
+  color: white;
+}
+
+.diplomacy-back-btn:active {
+  transform: translateY(0);
+}
+
+.diplomacy-title-area {
+  text-align: center;
+  margin: 40px 0 32px 0; /* 16px から 40px に増やしてボタンとの重なりを回避 */
+  position: relative;
+}
+
+.diplomacy-title-area h3 {
+  font-size: 1.6rem;
+  font-weight: 900;
+  color: #f8fafc;
+  letter-spacing: 0.1em;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.diplomacy-title-underline {
+  height: 3px;
+  width: 60px;
+  background: linear-gradient(90deg, transparent, #3b82f6, transparent);
+  margin: 10px auto;
+  border-radius: 999px;
+}
+
+.diplomacy-settings-card {
+  background: rgba(15, 23, 42, 0.8);
+  border: 2px solid rgba(71, 85, 105, 0.4);
+  border-radius: 20px;
+  padding: 24px;
+  margin-bottom: 24px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(12px);
+}
+
+.diplomacy-settings-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 5px;
+  height: 100%;
+}
+
+.card-blue::before {
+  background: #3b82f6;
+}
+.card-red::before {
+  background: #ef4444;
+}
+
+.diplomacy-card-header {
+  font-size: 1.15rem;
+  font-weight: 900;
+  margin-bottom: 20px;
+  display: flex !important;
+  align-items: center;
+  gap: 12px;
+  color: #fff;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding-bottom: 12px;
+}
+
+.diplomacy-icon-wrapper {
+  background: rgba(255, 255, 255, 0.05);
+  padding: 8px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.diplomacy-info-box {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 12px;
+  margin-top: 16px;
+  font-size: 0.8rem;
+  color: #94a3b8;
+  line-height: 1.6;
+}
+
+.diplomacy-toggle-row {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  transition: all 0.2s;
+}
+
+.diplomacy-toggle-row:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.diplomacy-block-item {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(15, 23, 42, 0.6);
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  transition: all 0.2s;
+}
+
+.diplomacy-block-item:hover {
+  border-color: rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.05);
+}
+
+.diplomacy-unblock-btn {
+  background: rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.diplomacy-unblock-btn:hover {
+  background: #ef4444;
+  color: white;
+  border-color: #ef4444;
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+}
