@@ -12,6 +12,7 @@ const ALLIANCES_PATH = path.join(DATA_DIR, "alliances.json");
 const TRUCES_PATH = path.join(DATA_DIR, "truces.json");
 const GAME_IDS_PATH = path.join(DATA_DIR, "game_ids.json");
 const NAMED_CELLS_PATH = path.join(DATA_DIR, "named_cells.json");
+const CEDE_REQUESTS_PATH = path.join(DATA_DIR, "cede_requests.json");
 
 function loadJSON(filePath, defaultValue = {}) {
   try {
@@ -224,6 +225,28 @@ function migrate() {
     console.log(`Migrated ${infoNamedCells} named cells.`);
   } else {
     console.log("No named_cells.json found, skipping.");
+  }
+
+  // 10. Migrate Cede Requests
+  if (fs.existsSync(CEDE_REQUESTS_PATH)) {
+    const cedeData = loadJSON(CEDE_REQUESTS_PATH, { requests: {} });
+    const requests = cedeData.requests || {};
+    const reqIds = Object.keys(requests);
+
+    const insertCedeRequest = db.prepare(
+      "INSERT OR REPLACE INTO cede_requests (id, data) VALUES (?, ?)",
+    );
+    const infoCedeRequests = db.transaction((ids) => {
+      let count = 0;
+      for (const rid of ids) {
+        insertCedeRequest.run(rid, JSON.stringify(requests[rid]));
+        count++;
+      }
+      return count;
+    })(reqIds);
+    console.log(`Migrated ${infoCedeRequests} cede requests.`);
+  } else {
+    console.log("No cede_requests.json found, skipping.");
   }
 
   console.log("Migration completed successfully.");

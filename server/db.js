@@ -123,6 +123,14 @@ function initDB() {
     )
   `);
 
+  // 10. Cede Requests (KVS like)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cede_requests (
+      id TEXT PRIMARY KEY,
+      data TEXT NOT NULL
+    )
+  `);
+
   console.log("[DB] Database initialized and schema ensured.");
 }
 

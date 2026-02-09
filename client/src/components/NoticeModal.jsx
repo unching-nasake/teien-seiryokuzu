@@ -194,11 +194,11 @@ function NoticeModal({ notices, readNoticeIds, lastNoticeReadAllTime = 0, onClos
                                                 <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: 'rgba(239, 68, 68, 0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                                                     <span style={{ color: '#ef4444', fontSize: '10px', fontWeight: 'bold' }}>ID</span>
                                                 </div>
-                                                    <div className="flex flex-col items-start">
-                                                        <span className="font-bold text-gray-100">
+                                                    <div className="flex flex-col items-start leading-tight">
+                                                        <span className="font-bold text-gray-100 text-sm">
                                                             {currentUser?.blockedPlayersData?.[uid]?.displayName || "読み込み中..."}
                                                         </span>
-                                                        <span className="font-mono text-xs text-gray-600">
+                                                        <span className="font-mono text-[10px] text-gray-400">
                                                             ({uid})
                                                         </span>
                                                     </div>

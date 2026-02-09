@@ -32,6 +32,7 @@ const ACTIVITY_LOG_PATH = path.join(DATA_DIR, "activity_log.json");
 const SYSTEM_NOTICES_PATH = path.join(DATA_DIR, "system_notices.json");
 const FACTION_NOTICES_PATH = path.join(DATA_DIR, "faction_notices.json");
 const SYSTEM_SETTINGS_PATH = path.join(DATA_DIR, "system_settings.json");
+const CEDE_REQUESTS_PATH = path.join(DATA_DIR, "cede_requests.json");
 const ALLIANCES_PATH = path.join(DATA_DIR, "alliances.json");
 const TRUCES_PATH = path.join(DATA_DIR, "truces.json");
 const WARS_PATH = path.join(DATA_DIR, "wars.json");
@@ -340,6 +341,21 @@ async function saveJSON(filePath, data, options = {}) {
     lastStatTime: stats.mtimeMs,
   });
 
+  // [NEW] DB管理下にあるファイルはファイルシステムへの書き込みをスキップ
+  // ただし、バックアップ用の強制ダンプ (forceDump) の場合は許可する
+  if (
+    !options.forceDump &&
+    (filePath === PLAYERS_PATH ||
+      filePath === FACTIONS_PATH ||
+      filePath === FACTION_NOTICES_PATH ||
+      filePath === ACTIVITY_LOG_PATH ||
+      filePath === TRUCES_PATH ||
+      filePath === WARS_PATH ||
+      filePath === ALLIANCES_PATH)
+  ) {
+    return Promise.resolve();
+  }
+
   // [NEW] マップデータの更新を SAB にも即時反映 (差分のみ)
   if (filePath === MAP_STATE_PATH && data && data.tiles) {
     syncSABWithJSON(data);
@@ -363,6 +379,61 @@ async function saveJSON(filePath, data, options = {}) {
     const factions = loadJSON(FACTIONS_PATH, { factions: {} });
     recalculateZocSAB(data, factions);
     return; // JSONファイルへの保存はスキップ
+  } else if (filePath === CEDE_REQUESTS_PATH && data) {
+    // [NEW] Save Cede Requests to SQLite
+    const db = getDB();
+    const deleteValid = db.prepare("DELETE FROM cede_requests");
+    const insert = db.prepare(
+      "INSERT INTO cede_requests (id, data) VALUES (?, ?)",
+    );
+    const insertMany = db.transaction((wrapper) => {
+      deleteValid.run();
+      const requests = wrapper.requests || {};
+      for (const [id, val] of Object.entries(requests)) {
+        insert.run(id, JSON.stringify(val));
+      }
+    });
+    insertMany(data);
+    return;
+  } else if (filePath === TRUCES_PATH && data && data.truces) {
+    // [NEW] Save Truces to SQLite
+    const db = getDB();
+    const deleteValid = db.prepare("DELETE FROM truces");
+    const insert = db.prepare("INSERT INTO truces (id, data) VALUES (?, ?)");
+    const insertMany = db.transaction((items) => {
+      deleteValid.run();
+      for (const [id, val] of Object.entries(items)) {
+        insert.run(id, JSON.stringify(val));
+      }
+    });
+    insertMany(data.truces);
+    if (!options.forceDump) return;
+  } else if (filePath === WARS_PATH && data && data.wars) {
+    // [NEW] Save Wars to SQLite
+    const db = getDB();
+    const deleteValid = db.prepare("DELETE FROM wars");
+    const insert = db.prepare("INSERT INTO wars (id, data) VALUES (?, ?)");
+    const insertMany = db.transaction((items) => {
+      deleteValid.run();
+      for (const [id, val] of Object.entries(items)) {
+        insert.run(id, JSON.stringify(val));
+      }
+    });
+    insertMany(data.wars);
+    if (!options.forceDump) return;
+  } else if (filePath === ALLIANCES_PATH && data && data.alliances) {
+    // [NEW] Save Alliances to SQLite
+    const db = getDB();
+    const deleteValid = db.prepare("DELETE FROM alliances");
+    const insert = db.prepare("INSERT INTO alliances (id, data) VALUES (?, ?)");
+    const insertMany = db.transaction((items) => {
+      deleteValid.run();
+      for (const [id, val] of Object.entries(items)) {
+        insert.run(id, JSON.stringify(val));
+      }
+    });
+    insertMany(data.alliances);
+    if (!options.forceDump) return;
   }
 
   // 2. 書き込みキューの管理
@@ -460,6 +531,10 @@ function loadJSON(filePath, defaultValue = {}, ignoreCache = false) {
   try {
     // [NEW] Redirect specific paths to SQLite
     if (filePath === PLAYERS_PATH) {
+      if (!ignoreCache) {
+        const cached = FILE_CACHE.get(filePath);
+        if (cached) return cached.data;
+      }
       const db = getDB();
       const rows = db.prepare("SELECT id, data FROM players").all();
       const playersData = { players: {} };
@@ -480,6 +555,10 @@ function loadJSON(filePath, defaultValue = {}, ignoreCache = false) {
     }
 
     if (filePath === FACTIONS_PATH) {
+      if (!ignoreCache) {
+        const cached = FILE_CACHE.get(filePath);
+        if (cached) return cached.data;
+      }
       const db = getDB();
       const rows = db.prepare("SELECT id, data FROM factions").all();
       const factionsData = { factions: {} };
@@ -516,6 +595,10 @@ function loadJSON(filePath, defaultValue = {}, ignoreCache = false) {
 
     // [NEW] Redirect Notices
     if (filePath === FACTION_NOTICES_PATH) {
+      if (!ignoreCache) {
+        const cached = FILE_CACHE.get(filePath);
+        if (cached) return cached.data;
+      }
       const db = getDB();
       const rows = db
         .prepare(
@@ -581,6 +664,17 @@ function loadJSON(filePath, defaultValue = {}, ignoreCache = false) {
         namedCellsData[row.id] = JSON.parse(row.data);
       }
       return namedCellsData;
+    }
+
+    // [NEW] Redirect Cede Requests
+    if (filePath === CEDE_REQUESTS_PATH) {
+      const db = getDB();
+      const rows = db.prepare("SELECT id, data FROM cede_requests").all();
+      const requests = {};
+      for (const row of rows) {
+        requests[row.id] = JSON.parse(row.data);
+      }
+      return { requests };
     }
 
     // Default: read from file
@@ -6511,7 +6605,9 @@ app.post("/api/me/diplomacy/settings", authenticate, async (req, res) => {
   try {
     const { diplomacySettings, blockedPlayerIds } = req.body;
 
-    await updateJSON(PLAYERS_PATH, (players) => {
+    // [FIX] updateJSON は更新後の players オブジェクト全体を返すため、それを利用する
+    // loadJSON(PLAYERS_PATH) は DB から読み込むため、直前の updateJSON (メモリ更新) が DB に反映されるまで古い値を返してしまう。
+    const updatedPlayers = await updateJSON(PLAYERS_PATH, (players) => {
       const player = players.players[req.playerId];
       if (!player) throw new Error("プレイヤーが見つかりません");
 
@@ -6531,19 +6627,25 @@ app.post("/api/me/diplomacy/settings", authenticate, async (req, res) => {
       return players;
     });
 
-    // 設定更新後に最新のプレイヤー情報を返す (再ロード)
-    const players = loadJSON(PLAYERS_PATH, { players: {} });
-    const updatedPlayer = players.players[req.playerId];
+    const updatedPlayer = updatedPlayers.players[req.playerId];
+
+    // [FIX] DBへの永続化を確実にする (updateJSON内ではメモリのみ更新される場合があるため)
+    queuePlayerSave(req.playerId);
+    await persistPlayerState(); // [NEW] 即時保存して完了を待つ
 
     // レスポンスにブロック済みユーザーの情報を追加 (表示名解決用)
-    const blockedPlayersData = getBlockedPlayersData(updatedPlayer, players);
+    // updatedPlayers (メモリ上の最新) を使うことで、解決も最新状態で行われる
+    const blockedPlayersData = getBlockedPlayersData(
+      updatedPlayer,
+      updatedPlayers,
+    );
 
     res.json({
       success: true,
       message: "設定を更新しました",
       diplomacySettings: updatedPlayer.diplomacySettings,
       blockedPlayerIds: updatedPlayer.blockedPlayerIds,
-      blockedPlayersData, // [NEW] クライアント側で表示名を表示するために追加
+      blockedPlayersData,
     });
   } catch (e) {
     console.error("Error in /api/me/diplomacy/settings:", e);
@@ -11164,7 +11266,7 @@ app.post(
 
     // リクエスト削除
     delete cedeRequests.requests[requestId];
-    saveJSON(SYSTEM_SETTINGS_PATH + "_cede_requests.json", cedeRequests);
+    saveJSON(CEDE_REQUESTS_PATH, cedeRequests);
 
     res.json({
       success: true,
@@ -11250,12 +11352,13 @@ app.get("/api/truces", (req, res) => {
 
   Object.entries(truces.truces).forEach(([key, truce]) => {
     const enrichedTruce = { ...truce };
-    enrichedTruce.factionNames = truce.factions.map((fid) => {
+    const factionIds = Array.isArray(truce.factions) ? truce.factions : [];
+    enrichedTruce.factionNames = factionIds.map((fid) => {
       const f = factions.factions[fid];
       return f
         ? f.name
-        : truce.factionNames
-          ? truce.factionNames[truce.factions.indexOf(fid)]
+        : truce.factionNames && truce.factionNames[factionIds.indexOf(fid)]
+          ? truce.factionNames[factionIds.indexOf(fid)]
           : "不明な勢力";
     });
     enrichedTruces[key] = enrichedTruce;
@@ -13749,19 +13852,8 @@ app.post(
       return res.status(400).json({ error: "有効な同盟要請がありません" });
     }
 
-    // 期限チェック (12時間)
-    const checkTime = Date.now();
-    const EXPIRE_TIME = 12 * 60 * 60 * 1000;
-    if (checkTime - requestObj.requestedAt > EXPIRE_TIME) {
-      // 期限切れのリクエストを削除
-      myFaction.allianceRequests = myFaction.allianceRequests.filter(
-        (r) => r.id !== requesterFactionId,
-      );
-      saveJSON(FACTIONS_PATH, factions);
-      return res
-        .status(400)
-        .json({ error: "要請の期限(24時間)が切れています" });
-    }
+    // [MODIFIED] 期限チェックは定期実行関数(checkDiplomacyExpirations)に移行しました。
+    // ここでは存在確認のみ行います。
 
     myFaction.allianceRequests = myFaction.allianceRequests.filter(
       (r) => r.id !== requesterFactionId,
@@ -15486,57 +15578,115 @@ server.listen(PORT, "0.0.0.0", async () => {
   }
 });
 
-// 停戦申請の期限切れチェック
-const checkTruceRequestExpirations = async () => {
+// 外交リクエストの期限切れチェック (停戦・同盟・併合・割譲)
+const checkDiplomacyExpirations = async () => {
+  const now = Date.now();
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
   try {
+    // 1. Factions dealt with (Truce, Alliance, Merge)
     await updateJSON(FACTIONS_PATH, (data) => {
       const factions = data.factions;
       let changed = false;
-      const expiredRequests = []; // { requester: id, target: id, expiry: string }
+      const expiredTruceRequests = []; // For notification
 
-      // 全勢力の受信リクエストをチェック
       Object.values(factions).forEach((targetFaction) => {
+        // --- A. Truce Requests (Existing logic) ---
         if (
-          !targetFaction.truceRequestsReceived ||
-          targetFaction.truceRequestsReceived.length === 0
-        )
-          return;
+          targetFaction.truceRequestsReceived &&
+          targetFaction.truceRequestsReceived.length > 0
+        ) {
+          const remaining = [];
+          targetFaction.truceRequestsReceived.forEach((req) => {
+            const reqObj = typeof req === "string" ? { id: req } : req;
+            if (!reqObj.expiresAt) {
+              remaining.push(req);
+              return;
+            }
+            const expiryTime = new Date(reqObj.expiresAt).getTime();
+            // 期限の5分前 (original logic preserved)
+            const threshold = expiryTime - 5 * 60 * 1000;
 
-        const remaining = [];
-        targetFaction.truceRequestsReceived.forEach((req) => {
-          const reqObj = typeof req === "string" ? { id: req } : req;
-
-          // 期限が設定されていない場合は対象外（またはデフォルト扱いだが、今回は明示されたもののみ対象とする）
-          // 期限情報が無い場合はスキップ（従来通り手動拒否待ち）
-          if (!reqObj.expiresAt) {
-            remaining.push(req);
-            return;
+            if (now > threshold) {
+              // Expired
+              expiredTruceRequests.push({
+                requester: reqObj.id,
+                target: targetFaction.id,
+                expiry: reqObj.expiresAt,
+              });
+              changed = true;
+            } else {
+              remaining.push(req);
+            }
+          });
+          if (targetFaction.truceRequestsReceived.length !== remaining.length) {
+            targetFaction.truceRequestsReceived = remaining;
           }
+        }
 
-          const expiryTime = new Date(reqObj.expiresAt).getTime();
-          // 期限の5分前 (5 * 60 * 1000 ms)
-          // if (now > expiry - 5min) -> expire
-          const threshold = expiryTime - 5 * 60 * 1000;
-          if (Date.now() > threshold) {
-            // 期限切れ (無効化)
-            expiredRequests.push({
-              requester: reqObj.id,
-              target: targetFaction.id,
-              expiry: reqObj.expiresAt,
-            });
+        // --- B. Alliance Requests (24H) ---
+        if (
+          targetFaction.allianceRequests &&
+          targetFaction.allianceRequests.length > 0
+        ) {
+          const remaining = [];
+          targetFaction.allianceRequests.forEach((req) => {
+            const reqObj = typeof req === "string" ? { id: req } : req;
+            const requestedAt = reqObj.requestedAt || 0;
+            if (now - requestedAt > ONE_DAY_MS) {
+              addFactionNotice(
+                targetFaction.id,
+                "同盟要請期限切れ",
+                `24時間経過したため、同盟要請が自動的に破棄されました。`,
+                "canDiplomacy",
+                { requesterFactionId: reqObj.id },
+                null,
+                "gray",
+              );
+              changed = true;
+            } else {
+              remaining.push(req);
+            }
+          });
+          if (targetFaction.allianceRequests.length !== remaining.length) {
+            targetFaction.allianceRequests = remaining;
             changed = true;
-          } else {
-            remaining.push(req);
           }
-        });
+        }
 
-        if (targetFaction.truceRequestsReceived.length !== remaining.length) {
-          targetFaction.truceRequestsReceived = remaining;
+        // --- C. Merge Requests (24H) ---
+        if (
+          targetFaction.mergeRequests &&
+          targetFaction.mergeRequests.length > 0
+        ) {
+          const remaining = [];
+          targetFaction.mergeRequests.forEach((req) => {
+            const reqObj = typeof req === "string" ? { id: req } : req;
+            const requestedAt = reqObj.requestedAt || 0;
+            if (now - requestedAt > ONE_DAY_MS) {
+              addFactionNotice(
+                targetFaction.id,
+                "併合要請期限切れ",
+                `24時間経過したため、併合要請が自動的に破棄されました。`,
+                "canDiplomacy",
+                { requesterFactionId: reqObj.id },
+                null,
+                "gray",
+              );
+              changed = true;
+            } else {
+              remaining.push(req);
+            }
+          });
+          if (targetFaction.mergeRequests.length !== remaining.length) {
+            targetFaction.mergeRequests = remaining;
+            changed = true;
+          }
         }
       });
 
-      // 申請元の方も掃除 & 通知イベント発火
-      expiredRequests.forEach((exp) => {
+      // Truce Notification (Existing logic)
+      expiredTruceRequests.forEach((exp) => {
         const requesterFaction = factions[exp.requester];
         const targetFaction = factions[exp.target];
 
@@ -15546,10 +15696,7 @@ const checkTruceRequestExpirations = async () => {
               const id = typeof req === "string" ? req : req.id;
               return id !== exp.target;
             });
-          changed = true;
         }
-
-        // 通知
         io.emit("truce:expired", {
           requesterFactionId: exp.requester,
           requesterFactionName: requesterFaction
@@ -15563,12 +15710,69 @@ const checkTruceRequestExpirations = async () => {
 
       return changed ? data : null;
     });
+
+    // 2. Cede Requests (DB managed, 24H)
+    const cedeData = loadJSON(CEDE_REQUESTS_PATH, { requests: {} });
+    const requests = cedeData.requests || {};
+    let cedeChanged = false;
+    const validRequests = {};
+
+    Object.values(requests).forEach((req) => {
+      const requestedAt = new Date(req.requestedAt).getTime();
+      if (now - requestedAt > ONE_DAY_MS) {
+        addFactionNotice(
+          req.toFactionId,
+          "割譲要請期限切れ",
+          `24時間経過したため、領土割譲要請が自動的に破棄されました。`,
+          "canDiplomacy",
+          { requesterFactionId: req.fromFactionId },
+          null,
+          "gray",
+        );
+        cedeChanged = true;
+      } else {
+        validRequests[req.id] = req;
+      }
+    });
+
+    if (cedeChanged) {
+      cedeData.requests = validRequests;
+      saveJSON(CEDE_REQUESTS_PATH, cedeData);
+    }
   } catch (e) {
-    console.error("Error in checkTruceRequestExpirations:", e);
+    console.error("Error in checkDiplomacyExpirations:", e);
   }
 };
 
-setInterval(checkTruceRequestExpirations, 60 * 1000); // 1分ごとにチェック
+setInterval(checkDiplomacyExpirations, 60 * 1000); // 1分ごとにチェック
+
+// [NEW] 定期的なJSONダンプ (バックアップ用)
+// SQLite化したデータを1時間に1回JSONファイルとして出力する
+setInterval(
+  async () => {
+    try {
+      console.log("[Backup] Dumping JSON files from DB/Cache...");
+      const backupOptions = { forceDump: true, skipLock: true };
+
+      const players = loadJSON(PLAYERS_PATH, { players: {} });
+      await saveJSON(PLAYERS_PATH, players, backupOptions);
+
+      const factions = loadJSON(FACTIONS_PATH, { factions: {} });
+      await saveJSON(FACTIONS_PATH, factions, backupOptions);
+
+      const notices = loadJSON(FACTION_NOTICES_PATH, {});
+      await saveJSON(FACTION_NOTICES_PATH, notices, backupOptions);
+
+      const logs = loadJSON(ACTIVITY_LOG_PATH, { entries: [] });
+      await saveJSON(ACTIVITY_LOG_PATH, logs, backupOptions);
+
+      console.log("[Backup] JSON dump completed.");
+    } catch (e) {
+      console.error("[Backup] Failed to dump JSON:", e);
+    }
+  },
+  60 * 60 * 1000,
+); // 1時間ごと
 
 // ===== 全体マップ画像生成 =====
 const FULL_MAP_IMAGE_DIR = path.join(DATA_DIR, "map_images");
