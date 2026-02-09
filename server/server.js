@@ -2381,6 +2381,14 @@ async function processSecretTriggers(isScheduled = false) {
     );
 
     const { appliedTriggers, ranksMap } = results;
+    // [FIX] 並列処理エラーチェック
+    if (results.success === false) {
+      console.error(
+        "[SecretTrigger] Parallel processing failed:",
+        results.error,
+      );
+      return;
+    }
 
     if (!appliedTriggers || appliedTriggers.length === 0) {
       if (!isScheduled)
@@ -10406,11 +10414,22 @@ app.post(
 
     // マップ画像生成
     // const cessionMapData = loadJSON(MAP_STATE_PATH, { tiles: {} }); // 削除済み (REMOVED): Worker内で読み込む
-    const imageUrl = await generateCessionMapImage(
-      null, // cessionMapData.tiles,
-      factions.factions,
-      tiles,
+    const tempDirPath = path.join(__dirname, "../temp/cession_maps");
+    console.log(
+      `[CessionDebug] Generating image. TempDir: ${tempDirPath}, Tiles: ${tiles.length}`,
     );
+
+    let imageUrl = null;
+    try {
+      imageUrl = await generateCessionMapImage(
+        null, // cessionMapData.tiles,
+        factions.factions,
+        tiles,
+      );
+      console.log(`[CessionDebug] Image URL: ${imageUrl}`);
+    } catch (err) {
+      console.error(`[CessionDebug] Error generating image:`, err);
+    }
 
     // 対象勢力に通知
     addFactionNotice(
@@ -14008,6 +14027,12 @@ async function recalculateAllFactionPoints() {
     },
   );
 
+  // [FIX] 並列処理エラーチェック
+  if (results.success === false) {
+    console.error(`[Rank] Parallel recalculation failed:`, results.error);
+    return;
+  }
+
   const { updates, destroyedFids, destroyedTileKeys } = results;
   let factionsChanged = false;
 
@@ -14338,7 +14363,8 @@ async function processDailyBonus() {
     },
   );
 
-  if (!parallelResults.success) {
+  // [FIX] successプロパティが存在しない場合は成功とみなすため、falseの場合のみエラーとする
+  if (parallelResults.success === false) {
     console.error(
       "[DailyBonus] Parallel processing failed:",
       parallelResults.error,
