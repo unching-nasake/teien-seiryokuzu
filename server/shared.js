@@ -10,7 +10,7 @@ const SPECIAL_TILE_HALF_WIDTH = 25;
 
 const MAX_POINTS = 10;
 const MIN_POINTS = 1;
-const GRADIENT_STEP = 5; // 5 tiles step
+const GRADIENT_STEP = 10; // 10 tiles step
 const NAMED_CELL_BONUS = 20;
 
 const NAMED_CELL_CREATE_COST = 100;
@@ -57,8 +57,8 @@ function getTilePoints(x, y, mapSize, namedCells = null) {
     const distY = y < min ? min - y : y > max ? y - max : 0;
     const distance = Math.max(distX, distY);
 
-    // Decrease 1 point every 5 tiles
-    const reduction = Math.floor(distance / GRADIENT_STEP);
+    // Decrease 1 point every GRADIENT_STEP tiles
+    const reduction = Math.floor((distance - 1) / GRADIENT_STEP);
     basePoints = Math.max(MIN_POINTS, 9 - reduction);
   }
 

@@ -7,7 +7,7 @@ const TILE_SIZE = 16;
 const VIEWPORT_PADDING = 50;
 export const MAX_POINTS = 10;
 export const MIN_POINTS = 1;
-export const GRADIENT_STEP = 5;
+export const GRADIENT_STEP = 10;
 export const NAMED_CELL_BONUS = 20;
 
 // Helper to get special tile range
@@ -35,7 +35,7 @@ export const getTilePoints = (x, y, mapSize, namedCells = null) => {
     const distX = x < min ? min - x : x > max ? x - max : 0;
     const distY = y < min ? min - y : y > max ? y - max : 0;
     const distance = Math.max(distX, distY);
-    const reduction = Math.floor(distance / GRADIENT_STEP);
+    const reduction = Math.floor((distance - 1) / GRADIENT_STEP);
     basePoints = Math.max(MIN_POINTS, 9 - reduction);
   }
 

@@ -215,10 +215,18 @@ function calculateClustersSAB(sab, factionsList) {
 function calculateClustersLegacy(tiles) {
   const factionTilesMap = {};
 
-  Object.values(tiles).forEach((t) => {
+  Object.entries(tiles).forEach(([key, t]) => {
     const fid = t.faction || t.factionId;
     if (!fid) return;
     if (!factionTilesMap[fid]) factionTilesMap[fid] = [];
+
+    // [FIX] 座標がない場合はキーから復元
+    if (t.x === undefined || t.y === undefined) {
+      const [x, y] = key.split("_").map(Number);
+      t.x = x;
+      t.y = y;
+    }
+
     factionTilesMap[fid].push(t);
   });
 
