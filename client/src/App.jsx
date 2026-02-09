@@ -134,12 +134,8 @@ function App() {
   const [activeNotice, setActiveNotice] = useState(null);
   const [showNoticePopup, setShowNoticePopup] = useState(false);
   const [showNoticeList, setShowNoticeList] = useState(false);
-  const [readNoticeIds, setReadNoticeIds] = useState(() => {
-    try {
-      const saved = localStorage.getItem('teien_read_notices');
-      return saved ? JSON.parse(saved) : [];
-    } catch(e) { return []; }
-  });
+  const [readNoticeIds, setReadNoticeIds] = useState([]);
+  const [lastNoticeReadAllTime, setLastNoticeReadAllTime] = useState(0);
 
   const [pendingMergeRequest, setPendingMergeRequest] = useState(null);
   const [pendingAllianceRequest, setPendingAllianceRequest] = useState(null);
@@ -487,14 +483,11 @@ function App() {
   const markNoticeAsRead = useCallback((noticeId) => {
     if (readNoticeIds.includes(noticeId)) return;
 
-    // サーバー側の既読ステータス管理はパフォーマンス最適化のため廃止
-    // fetch(`/api/notices/${noticeId}/read`, { method: 'POST', credentials: 'include' })
-    //   .catch(e => console.error("既読マークエラー:", e));
+    fetch(`/api/notices/${noticeId}/read`, { method: 'POST', credentials: 'include' })
+      .catch(e => console.error("既読マークエラー:", e));
 
     const next = [...readNoticeIds, noticeId];
     setReadNoticeIds(next);
-    // ローカルストレージに保存して、オフライン時や次回起動時の既読状態を維持
-    localStorage.setItem('teien_read_notices', JSON.stringify(next));
   }, [readNoticeIds]);
 
   const handleShowNotice = useCallback((notice) => {
@@ -506,23 +499,18 @@ function App() {
 
   // 一括既読
   const handleMarkAllNoticesRead = useCallback(() => {
-    const allIds = notices.map(n => n.id);
-    const next = Array.from(new Set([...readNoticeIds, ...allIds]));
+    const timestamp = Date.now();
 
-    // Server logic
-    // サーバー側の既読管理はパフォーマンス上の理由で廃止済み
-    /*
     fetch('/api/notices/read-all', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ noticeIds: allIds }),
+      body: JSON.stringify({ lastReadAllTime: timestamp }),
       credentials: 'include'
     }).catch(e => console.error("All read mark error:", e));
-    */
 
-    setReadNoticeIds(next);
-    localStorage.setItem('teien_read_notices', JSON.stringify(next));
-  }, [notices, readNoticeIds]);
+    setReadNoticeIds([]);
+    setLastNoticeReadAllTime(timestamp);
+  }, []);
 
 
 
@@ -584,6 +572,7 @@ function App() {
         }
       };
 
+
       try {
         // 1. キャッシュから読み込み（即座に表示）
         const cached = await getCachedTiles();
@@ -636,6 +625,31 @@ function App() {
       .then(res => res.ok ? res.json() : Promise.reject('Status: ' + res.status))
       .then(data => {
         let list = data.notices || [];
+        const serverReadIds = data.readNoticeIds || [];
+        const serverReadAllTime = data.lastNoticeReadAllTime || 0;
+
+        setReadNoticeIds(serverReadIds);
+        setLastNoticeReadAllTime(serverReadAllTime);
+
+        // 次回起動時用の初回移行処理 (localStorage -> Server)
+        const localReadIds = (() => {
+            try {
+                const saved = localStorage.getItem('teien_read_notices');
+                return saved ? JSON.parse(saved) : [];
+            } catch(e) { return []; }
+        })();
+
+        if (localReadIds.length > 0 && serverReadIds.length === 0 && serverReadAllTime === 0) {
+            console.log("[Migration] Syncing local read status to server...", localReadIds);
+            Promise.all(localReadIds.map(id =>
+                fetch(`/api/notices/${id}/read`, { method: 'POST', credentials: 'include' })
+            )).then(() => {
+                console.log("[Migration] Sync complete. Clearing localStorage.");
+                localStorage.removeItem('teien_read_notices');
+                fetchNotices(); // サーバーから最新状態を再取得
+            }).catch(e => console.error("[Migration] Sync failed:", e));
+            return; // 移行リクエストを投げたので一旦終了
+        }
 
         // 勢力主以外には要請通知（一覧含む）を表示しない
         const currentP = playerDataRef.current;
@@ -677,32 +691,24 @@ function App() {
              });
         }
 
-        // Server-side read status check is deprecated.
-        // We trust localStorage.
-
         setNotices(list);
+
         if (list.length > 0) {
           const latest = list[0];
-          // Use server read status instead of local lastSeenId
-          // However, we want to show popup ONLY if it hasn't been read.
-          // Note: data.readNoticeIds might be empty on first load if we don't sync properly.
-          // But we just set it.
-
-          // If latest notice is NOT in the read list (local state), show it.
-          const isRead = readNoticeIdsRef.current.includes(latest.id);
+          // 既読判定: 個別IDに含まれるか、または「すべて既読」のタイムスタンプより前か
+          const isRead = serverReadIds.includes(latest.id) || (new Date(latest.date).getTime() <= serverReadAllTime);
 
           if (!isRead) {
-            // [Fix] 支援物資通知(support)はポップアップしない
+            // 支援物資通知(support)はポップアップしない
             if (!latest.id.startsWith('notice-support-')) {
                 setActiveNotice(latest);
                 setShowNoticePopup(true);
             }
-            // 閉じた時またはアクション時に既読にするため、ここでは何もしない
           }
         }
       })
       .catch(e => console.error("Notices fetch error:", e));
-  }, [markNoticeAsRead]);
+  }, []);
 
 
   // Socket.io イベント
@@ -1533,6 +1539,11 @@ function App() {
     });
     socket.on('truce:request', () => {
         fetchFactions();
+    });
+
+    // [NEW] プレイヤーデータ更新 (サーバーからの通知)
+    socket.on('player:updated', (data) => {
+        setPlayerData(prev => ({ ...prev, ...data }));
     });
 
     return () => {
@@ -2602,26 +2613,31 @@ function App() {
         case 'alliance:accept':
             if (window.confirm("この勢力からの同盟加入申請を承認しますか？")) {
                 await handleAllianceRespond(rid, true);
+                setShowNoticePopup(false);
             }
             break;
         case 'alliance:reject':
             if (window.confirm("この勢力からの同盟加入申請を拒否しますか？")) {
                 await handleAllianceRespond(rid, false);
+                setShowNoticePopup(false);
             }
             break;
         case 'merge:accept':
             if (window.confirm("【重要】本当に勢力の併合（吸収）を承認しますか？\n承認すると相手の勢力は消滅し、領土とメンバーがあなたの勢力に吸収されます。")) {
                 await handleMergeRespond(rid, true);
+                setShowNoticePopup(false);
             }
             break;
         case 'merge:reject':
             if (window.confirm("この勢力からの併合要請を拒否しますか？")) {
                 await handleMergeRespond(rid, false);
+                setShowNoticePopup(false);
             }
             break;
         case 'truce:accept':
             if (window.confirm("この勢力からの停戦要請を承認しますか？")) {
                 await handleTruceAccept(rid);
+                setShowNoticePopup(false);
             }
             break;
         case 'truce:reject':
@@ -2639,7 +2655,10 @@ function App() {
                 })
                 .then(res => res.json())
                 .then(data => {
-                    if (data.success) alert('領土割譲を承認しました');
+                    if (data.success) {
+                        alert('領土割譲を承認しました');
+                        setShowNoticePopup(false);
+                    }
                     else alert(data.error || 'エラーが発生しました');
                     fetchFactions();
                 })
@@ -2658,7 +2677,10 @@ function App() {
                 })
                 .then(res => res.json())
                 .then(data => {
-                    if (data.success) alert('領土割譲を拒否しました');
+                    if (data.success) {
+                        alert('領土割譲を拒否しました');
+                        setShowNoticePopup(false);
+                    }
                     else alert(data.error || 'エラーが発生しました');
                 })
                 .catch(() => alert('通信エラー'));
@@ -2777,7 +2799,11 @@ function App() {
              style={{ position: 'relative' }}
            >
              ✉️
-             {notices.filter(n => !readNoticeIds.includes(n.id)).length > 0 && (
+             {notices.filter(n =>
+                 !readNoticeIds.includes(n.id) &&
+                 new Date(n.date).getTime() > (playerData?.lastNoticeReadAllTime || 0) &&
+                 new Date(n.date).getTime() > (playerData?.lastNoticeClearTime || 0) // 消去済みはカウントしない
+             ).length > 0 && (
                <span style={{
                  position: 'absolute',
                  top: -4,
@@ -3211,22 +3237,60 @@ function App() {
 
       {/* お知らせリストモーダル */}
       {showNoticeList && (
+        // [NEW] 履歴消去ハンドラ
+        (() => {
+            const handleClearNoticeHistory = async () => {
+                if(!window.confirm("通知履歴を消去しますか？\n（現在表示されている通知がすべて非表示になります）")) return;
+
+                try {
+                    const res = await fetch('/api/notices/clear-history', {
+                        method: 'POST',
+                        credentials: 'include'
+                    });
+                    const data = await res.json();
+                    if(data.success) {
+                        setPlayerData(prev => ({
+                            ...prev,
+                            readNoticeIds: [],
+                            lastNoticeReadAllTime: data.lastNoticeClearTime,
+                            lastNoticeClearTime: data.lastNoticeClearTime
+                        }));
+                        setShowNoticePopup(false);
+                        // NoticeModalは開いたまま（ただし中身は空になる）
+                    } else {
+                        alert(data.error || "消去に失敗しました");
+                    }
+                } catch(e) {
+                    alert("通信エラー");
+                }
+            };
+
+        return (
         <NoticeModal
-          notices={notices}
+          notices={notices.filter(n => new Date(n.date).getTime() > (playerData?.lastNoticeClearTime || 0))} // [MOD]
           readNoticeIds={readNoticeIds}
+          lastNoticeReadAllTime={lastNoticeReadAllTime}
+          currentUser={playerData} // [NEW]
+          onUpdateUser={setPlayerData} // [NEW]
           onClose={() => setShowNoticeList(false)}
           onMarkAllRead={handleMarkAllNoticesRead}
+          onClearHistory={handleClearNoticeHistory} // [NEW]
           onShowDetail={(notice) => {
+            // 詳細表示時はモーダルを閉じる
             handleShowNotice(notice);
             setShowNoticeList(false);
           }}
         />
+        );
+        })()
       )}
 
       {/* お知らせポップアップ */}
       {showNoticePopup && (
         <NoticePopup
           notice={activeNotice}
+          currentUser={playerData} // [NEW]
+          onUpdateUser={setPlayerData} // [NEW]
           onAction={handleNoticeAction}
           onClose={() => {
             if (activeNotice) {
@@ -3258,6 +3322,7 @@ function App() {
                    console.log("Notice Accept (Alliance): rid =", rid);
                    if (rid) {
                      handleAllianceRespond(rid, true);
+                     setShowNoticePopup(false);
                    } else {
                      alert("要請の詳細が見つかりません。");
                    }
@@ -3281,6 +3346,7 @@ function App() {
                    console.log("Notice Accept (Merge): rid =", rid);
                    if (rid) {
                      handleMergeRespond(rid, true);
+                     setShowNoticePopup(false);
                    } else {
                      alert("要請の詳細が見つかりません。");
                    }
@@ -3303,6 +3369,7 @@ function App() {
                    console.log("Notice Accept (Truce): rid =", rid);
                    if (rid) {
                      handleTruceAccept(rid);
+                     setShowNoticePopup(false);
                    } else {
                      alert("要請の詳細が見つかりません。");
                    }
@@ -3325,6 +3392,7 @@ function App() {
                     .then(data => {
                       if (data.success) {
                         alert('領土割譲を承認しました');
+                        setShowNoticePopup(false);
                       } else {
                         alert(data.error || 'エラーが発生しました');
                       }
@@ -3352,6 +3420,7 @@ function App() {
                     .then(data => {
                       if (data.success) {
                         addNotification("戦争に参戦しました", "参戦完了");
+                        setShowNoticePopup(false);
                       } else {
                         addNotification(data.error || '参戦に失敗しました', "エラー");
                       }
@@ -3382,7 +3451,10 @@ function App() {
                    }
 
                    if (!window.confirm("同盟加入申請を拒否しますか？")) return;
-                   if (rid) handleAllianceRespond(rid, false);
+                   if (rid) {
+                     handleAllianceRespond(rid, false);
+                     setShowNoticePopup(false);
+                   }
                 };
               }
               if (noticeText.includes("参戦提案") || activeNotice?.title === "参戦提案") {
@@ -3412,6 +3484,7 @@ function App() {
                     .then(data => {
                       if (data.success) {
                         addNotification("参戦要請を拒否しました", "拒否完了");
+                        setShowNoticePopup(false);
                       }
                     });
                   }
@@ -3431,7 +3504,10 @@ function App() {
                    }
 
                    if (!window.confirm("併合要請を拒否しますか？")) return;
-                   if (rid) handleMergeRespond(rid, false);
+                   if (rid) {
+                     handleMergeRespond(rid, false);
+                     setShowNoticePopup(false);
+                   }
                 };
               }
               if (noticeText.includes("停戦要請が届きました")) {
@@ -3447,7 +3523,10 @@ function App() {
                    }
 
                    if (!window.confirm("停戦要請を拒否しますか？")) return;
-                   if (rid) handleTruceReject(rid);
+                   if (rid) {
+                     handleTruceReject(rid);
+                     setShowNoticePopup(false);
+                   }
                 };
               }
               // 領土割譲の提案
@@ -3467,6 +3546,7 @@ function App() {
                     .then(data => {
                       if (data.success !== undefined) {
                         alert('領土割譲を拒否しました');
+                        setShowNoticePopup(false);
                       } else {
                         alert(data.error || 'エラーが発生しました');
                       }

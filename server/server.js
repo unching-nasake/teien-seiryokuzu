@@ -3331,7 +3331,47 @@ async function addFactionNotice(
   options = null, // { actions: [{ label, action, style }] }
   type = "info", // "info", "join_request", etc.
   requesterId = null,
+  senderId = null, // [NEW] ブロック判定用
 ) {
+  // [NEW] 外交メッセージのブロック対応: 勢力宛の場合はメンバー個別に展開して保存
+  if (type === "message" && !factionId.startsWith("user:") && senderId) {
+    const factions = loadJSON(FACTIONS_PATH, { factions: {} });
+    const targetFaction = factions.factions[factionId];
+    if (targetFaction && targetFaction.members) {
+      const players = loadJSON(PLAYERS_PATH, { players: {} });
+
+      // ブロックチェック＆個別配送
+      for (const mid of targetFaction.members) {
+        const p = players.players[mid];
+        // ブロックチェック
+        if (p && p.blockedPlayerIds && p.blockedPlayerIds.includes(senderId)) {
+          // ブロックされているのでスキップ
+          continue;
+        }
+
+        // 再帰呼び出し (user:MID 宛)
+        // メタデータなどはそのまま渡す
+        await addFactionNotice(
+          `user:${mid}`,
+          title,
+          content,
+          requiredPermission,
+          metadata,
+          options,
+          type,
+          requesterId,
+          senderId,
+        );
+      }
+      return; // 勢力共有リストには保存しない
+    }
+  }
+  // SenderId マージ
+  const finalMetadata = metadata || {};
+  if (senderId) {
+    finalMetadata.senderId = senderId;
+  }
+
   const notice = {
     id: `fn-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
     title,
@@ -3339,10 +3379,11 @@ async function addFactionNotice(
     requiredPermission,
     date: new Date().toISOString(),
     isFactionNotice: !factionId.startsWith("user:"), // ユーザー宛の場合は勢力通知フラグをオフ
-    data: metadata,
+    data: finalMetadata,
     options,
     type,
     requesterId,
+    senderId, // [NEW]
     processedBy: null, // { playerId, name, at }
     result: null, // "approved" (承認済み), "rejected" (却下)
   };
@@ -5056,7 +5097,7 @@ app.post(
 // 過去のマップデータ取得
 
 // お知らせ一覧取得
-app.get("/api/notices", authenticate, (req, res) => {
+app.get("/api/notices", authenticate, async (req, res) => {
   try {
     // 必要なデータを冒頭で一括読み込み (ReferenceError防止)
     const allFactionNotices = loadJSON(FACTION_NOTICES_PATH, {});
@@ -5153,10 +5194,68 @@ app.get("/api/notices", authenticate, (req, res) => {
       .sort((a, b) => new Date(b.date) - new Date(a.date))
       .slice(0, 1000);
 
-    // [DEPRECATED] 既読情報は client の localStorage で管理するように移行
-    const readNoticeIds = [];
+    // [MOD] 既読情報の管理 (Smart Sync: サーバー上の通知と同期してIDクリーンアップ)
+    let readNoticeIds = player ? player.readNoticeIds || [] : [];
+    let lastReadAllTime = player ? player.lastNoticeReadAllTime || 0 : 0;
 
-    res.json({ notices: merged, readNoticeIds });
+    // 現在取得できたお知らせIDの集合を作成
+    const currentNoticeIds = new Set(merged.map((n) => n.id));
+
+    // 存在しないIDは削除（肥大化防止 - Step 1: 期限切れIDのクリーンアップ）
+    let validReadIds = readNoticeIds.filter((id) => currentNoticeIds.has(id));
+
+    // [NEW] 自動圧縮ロジック (Step 2: 全件既読ならタイムスタンプ管理へ移行)
+    let shouldUpdate = false;
+
+    // 現在のリストに含まれる未読のお知らせを探す
+    // 未読 = (IDリストに含まれていない) AND (タイムスタンプより新しい)
+    const hasUnread = merged.some((n) => {
+      const isReadById = validReadIds.includes(n.id);
+      const isReadByTime = new Date(n.date).getTime() <= lastReadAllTime;
+      return !isReadById && !isReadByTime;
+    });
+
+    if (!hasUnread && merged.length > 0) {
+      // 全て既読の場合 -> 圧縮実行
+      // タイムスタンプを最新のお知らせの日時（または現在時刻）に更新し、IDリストを空にする
+      const latestDate = Math.max(
+        ...merged.map((n) => new Date(n.date).getTime()),
+        Date.now(),
+      );
+      if (latestDate > lastReadAllTime) {
+        lastReadAllTime = latestDate;
+        validReadIds = []; // IDリストを空に
+        shouldUpdate = true;
+      } else if (validReadIds.length > 0) {
+        // タイムスタンプは十分新しいが、無駄なIDが残っている場合
+        validReadIds = [];
+        shouldUpdate = true;
+      }
+    } else {
+      // まだ未読がある場合 -> 通常のクリーンアップのみチェック
+      if (validReadIds.length !== readNoticeIds.length) {
+        shouldUpdate = true;
+      }
+    }
+
+    // 変更があれば保存
+    if (player && shouldUpdate) {
+      await updateJSON(PLAYERS_PATH, (playersData) => {
+        const p = playersData.players[req.playerId];
+        if (p) {
+          p.readNoticeIds = validReadIds;
+          p.lastNoticeReadAllTime = lastReadAllTime;
+        }
+        return playersData;
+      });
+      readNoticeIds = validReadIds;
+    }
+
+    res.json({
+      notices: merged,
+      readNoticeIds,
+      lastNoticeReadAllTime: lastReadAllTime,
+    });
   } catch (e) {
     console.error("Error reading notices:", e);
     res.status(500).json({ error: "お知らせの取得に失敗しました" });
@@ -5166,8 +5265,17 @@ app.get("/api/notices", authenticate, (req, res) => {
 // お知らせ一括既読化 API
 app.post("/api/notices/:id/read", authenticate, async (req, res) => {
   try {
-    // [DEPRECATED] 既読情報は client の localStorage で管理するように移行するため
-    // サーバー側の players.json への保存は廃止
+    const noticeId = req.params.id;
+    await updateJSON(PLAYERS_PATH, (playersData) => {
+      const p = playersData.players[req.playerId];
+      if (p) {
+        if (!p.readNoticeIds) p.readNoticeIds = [];
+        if (!p.readNoticeIds.includes(noticeId)) {
+          p.readNoticeIds.push(noticeId);
+        }
+      }
+      return playersData;
+    });
     res.json({ success: true });
   } catch (e) {
     console.error("Error marking notice as read:", e);
@@ -5175,22 +5283,83 @@ app.post("/api/notices/:id/read", authenticate, async (req, res) => {
   }
 });
 
+// [NEW] Helper to get sockets by playerId
+function getSocketsByPlayerId(playerId) {
+  const targets = [];
+  if (typeof io !== "undefined" && io) {
+    io.sockets.sockets.forEach((s) => {
+      if (s.playerId === playerId) {
+        targets.push(s);
+      }
+    });
+  }
+  return targets;
+}
+
 // お知らせ一括既読化 API (すべて)
 app.post("/api/notices/read-all", authenticate, async (req, res) => {
-  const { noticeIds } = req.body;
-  if (!Array.isArray(noticeIds)) {
-    return res.status(400).json({ error: "noticeIds must be an array" });
-  }
-
   try {
-    // [DEPRECATED] 既読情報は client の localStorage で管理するように移行するため
-    // サーバー側の players.json への保存は廃止
+    const { lastReadAllTime } = req.body;
+    const timestamp = lastReadAllTime || Date.now();
+
+    await updateJSON(PLAYERS_PATH, (playersData) => {
+      const p = playersData.players[req.playerId];
+      if (p) {
+        // ID リストを空にしてタイムスタンプで管理（容量節約）
+        p.readNoticeIds = [];
+        p.lastNoticeReadAllTime = timestamp;
+      }
+      return playersData;
+    });
     res.json({ success: true });
   } catch (e) {
     console.error("Error marking all notices as read:", e);
     res.status(500).json({ error: "一括既読処理に失敗しました" });
   }
 });
+
+// [NEW] 通知履歴消去 (非表示にする)
+app.post(
+  "/api/notices/clear-history",
+  authenticate,
+  requireAuth,
+  async (req, res) => {
+    try {
+      const now = Date.now();
+      let updatedPlayer = null;
+
+      await updateJSON(PLAYERS_PATH, (playersData) => {
+        const p = playersData.players[req.playerId];
+        if (p) {
+          // 全消去 = 全既読かつ非表示 (Smart Sync)
+          p.readNoticeIds = [];
+          p.lastNoticeReadAllTime = now;
+          p.lastNoticeClearTime = now;
+          updatedPlayer = p;
+        }
+        return playersData;
+      });
+
+      if (updatedPlayer) {
+        // ソケット通知
+        const sockets = getSocketsByPlayerId(req.playerId);
+        sockets.forEach((s) => {
+          s.emit("player:update", {
+            readNoticeIds: [],
+            lastNoticeReadAllTime: now,
+            lastNoticeClearTime: now,
+          });
+        });
+        res.json({ success: true, lastNoticeClearTime: now });
+      } else {
+        res.status(404).json({ error: "プレイヤーが見つかりません" });
+      }
+    } catch (e) {
+      console.error("Error clearing notice history:", e);
+      res.status(500).json({ error: "履歴消去に失敗しました" });
+    }
+  },
+);
 
 // 勢力作成
 app.post(
@@ -5976,7 +6145,11 @@ app.post(
         noticeTitle,
         noticeContent,
         "canDiplomacy", // 外交権限者または主のみ
-        { senderId: req.playerId, senderFactionId: player.factionId },
+        {
+          senderId: req.playerId,
+          senderFactionId: player.factionId,
+          senderName,
+        }, // [MOD] senderName 追加
         null,
         "message",
         req.playerId,
@@ -5996,6 +6169,47 @@ app.post(
     }
   },
 );
+
+// [NEW] 外交設定更新 API
+app.post("/api/me/diplomacy/settings", authenticate, async (req, res) => {
+  try {
+    const { diplomacySettings, blockedPlayerIds } = req.body;
+
+    await updateJSON(PLAYERS_PATH, (players) => {
+      const player = players.players[req.playerId];
+      if (!player) throw new Error("プレイヤーが見つかりません");
+
+      if (diplomacySettings) {
+        player.diplomacySettings = {
+          ...player.diplomacySettings,
+          ...diplomacySettings,
+        };
+      }
+
+      if (Array.isArray(blockedPlayerIds)) {
+        // 最大100件まで保持
+        const uniqueIds = [...new Set(blockedPlayerIds)].slice(0, 100);
+        player.blockedPlayerIds = uniqueIds;
+      }
+
+      return players;
+    });
+
+    // 設定更新後に最新のプレイヤー情報を返す (再ロード)
+    const players = loadJSON(PLAYERS_PATH, { players: {} });
+    const updatedPlayer = players.players[req.playerId];
+
+    res.json({
+      success: true,
+      message: "設定を更新しました",
+      diplomacySettings: updatedPlayer.diplomacySettings,
+      blockedPlayerIds: updatedPlayer.blockedPlayerIds,
+    });
+  } catch (e) {
+    console.error("Error in /api/me/diplomacy/settings:", e);
+    res.status(500).json({ error: "設定の更新に失敗しました" });
+  }
+});
 
 // 勢力脱退
 app.post(
@@ -10613,7 +10827,7 @@ app.post(
     saveJSON(SYSTEM_SETTINGS_PATH + "_cede_requests.json", cedeRequests);
 
     res.json({
-      success: accept,
+      success: true,
       message: accept ? "割譲を承認しました" : "割譲を拒否しました",
     });
   },
@@ -14843,6 +15057,33 @@ if (!playersForSystem.players["system-capture"]) {
   };
   saveJSON(PLAYERS_PATH, playersForSystem);
 }
+
+// [NEW] プレイヤーデータのマイグレーション (外交設定など)
+function migratePlayerDiplomacySettings() {
+  const playersData = loadJSON(PLAYERS_PATH, { players: {} });
+  let changed = false;
+
+  if (playersData.players) {
+    Object.values(playersData.players).forEach((p) => {
+      if (!p.diplomacySettings) {
+        p.diplomacySettings = { allowMessages: true }; // デフォルト許可
+        changed = true;
+      }
+      if (!p.blockedPlayerIds) {
+        p.blockedPlayerIds = [];
+        changed = true;
+      }
+    });
+
+    if (changed) {
+      console.log(
+        "[Migration] Updating players with default diplomacy settings...",
+      );
+      saveJSON(PLAYERS_PATH, playersData);
+    }
+  }
+}
+migratePlayerDiplomacySettings();
 
 // サーバー起動
 server.listen(PORT, "0.0.0.0", async () => {

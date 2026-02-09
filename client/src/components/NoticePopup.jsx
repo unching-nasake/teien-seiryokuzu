@@ -1,7 +1,9 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
 
-function NoticePopup({ notice, onClose, onAccept, onReject, onAction }) {
+function NoticePopup({ notice, onClose, onAccept, onReject, onAction, currentUser, onUpdateUser }) {
+  const [isBlocking, setIsBlocking] = useState(false);
+
   if (!notice) return null;
 
   const noticeActions = notice.options?.actions || [];
@@ -18,6 +20,54 @@ function NoticePopup({ notice, onClose, onAccept, onReject, onAction }) {
                     noticeText.includes("参戦提案が届きました") ||
                     notice.title === "参戦提案" ||
                     notice.title === "領土割譲の提案";
+
+  // 送信者IDの取得 (外交メッセージの場合)
+  const senderId = notice.data?.senderId || notice.senderId;
+  const canBlock = senderId && currentUser && currentUser.id !== senderId;
+
+  // ブロック処理
+  const handleBlockUser = async () => {
+    if (!window.confirm("このユーザーをブロックしますか？\n今後このユーザーからのメッセージ通知は届かなくなります。")) return;
+
+    setIsBlocking(true);
+    try {
+        const currentBlocked = currentUser.blockedPlayerIds || [];
+        // 既にブロック済みなら何もしない
+        if (currentBlocked.includes(senderId)) {
+            alert("既にブロックしています");
+            return;
+        }
+
+        const newBlocked = [...currentBlocked, senderId];
+
+        const res = await fetch('/api/me/diplomacy/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                blockedPlayerIds: newBlocked
+            }),
+            credentials: 'include'
+        });
+        const data = await res.json();
+        if (data.success) {
+            if (onUpdateUser) {
+                onUpdateUser(prev => ({
+                    ...prev,
+                    blockedPlayerIds: data.blockedPlayerIds
+                }));
+            }
+            alert("ブロックしました");
+            onClose(); // 閉じる
+        } else {
+            alert(data.error || "ブロックに失敗しました");
+        }
+    } catch (e) {
+        console.error(e);
+        alert("通信エラー");
+    } finally {
+        setIsBlocking(false);
+    }
+  };
 
   // 画像URLを抽出して埋め込み表示用に処理
   const imageUrlMatch = notice.content?.match(/📍 割譲対象マップ: (.+)/);
@@ -46,9 +96,25 @@ function NoticePopup({ notice, onClose, onAccept, onReject, onAction }) {
 
   return createPortal(
     <div className="modal-overlay" style={{ zIndex: 1000000 }}>
-      <div className="modal-content" style={{ maxWidth: '500px', width: '90%' }}>
+      {/* クリックで閉じる (Overlay) */}
+      <div className="absolute inset-0" onClick={onClose}></div>
+
+      <div className="modal-content relative" style={{ maxWidth: '500px', width: '90%' }} onClick={e => e.stopPropagation()}>
+
+        {/* ブロックボタン (右上) */}
+        {canBlock && (
+            <button
+                onClick={handleBlockUser}
+                disabled={isBlocking}
+                className="absolute top-2 right-12 text-gray-500 hover:text-red-500 text-sm border border-gray-700 hover:border-red-500 px-2 py-1 rounded transition-colors"
+                title="このユーザーをブロック"
+            >
+                🚫 ブロック
+            </button>
+        )}
+
         <div className="modal-header" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '4px' }}>
-          <h2 style={{ margin: 0, fontSize: '1.2rem' }}>{notice.title}</h2>
+          <h2 style={{ margin: 0, fontSize: '1.2rem', paddingRight: '60px' }}>{notice.title}</h2>
           <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
             {new Date(notice.date).toLocaleString('ja-JP')}
           </div>
@@ -78,10 +144,10 @@ function NoticePopup({ notice, onClose, onAccept, onReject, onAction }) {
         <div className="modal-footer" style={{ justifyContent: 'flex-end', gap: '10px' }}>
           {/* Specific Legacy Handlers (if provided) */}
           {isRequest && onAccept && !hasActions && (
-              <button className="btn btn-primary" onClick={() => { onAccept(); onClose(); }}>承認する</button>
+              <button className="btn btn-primary" onClick={() => { onAccept(); }}>承認する</button>
           )}
           {isRequest && onReject && !hasActions && (
-              <button className="btn btn-danger" onClick={() => { onReject(); onClose(); }}>拒否する</button>
+              <button className="btn btn-danger" onClick={() => { onReject(); }}>拒否する</button>
           )}
 
           {/* Standardized Actions (Season 2 style) */}
@@ -92,7 +158,6 @@ function NoticePopup({ notice, onClose, onAccept, onReject, onAction }) {
                   onClick={() => {
                       if (onAction) {
                           onAction(notice.id, action.action, action);
-                          onClose();
                       }
                   }}
               >
