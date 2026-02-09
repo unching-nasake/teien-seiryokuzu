@@ -161,6 +161,9 @@ async function initializeData() {
       saveJSON(MAP_STATE_PATH, { tiles: {} });
     }
     mapState = loadJSON(MAP_STATE_PATH, { tiles: {} });
+    if (fs.existsSync(MAP_STATE_PATH)) {
+      lastMapJsonSaveTime = fs.statSync(MAP_STATE_PATH).mtimeMs; // [NEW] ロードした時刻を記録
+    }
     syncSABWithJSON(mapState);
   } else {
     // バイナリからロードした場合、mapState オブジェクトも最新化しておく
@@ -800,10 +803,25 @@ function loadJSON(filePath, defaultValue = {}, ignoreCache = false) {
 
 // [NEW] バイナリマップの保存
 async function saveMapBinary() {
+  // [NEW] 外部変更チェック
+  if (fs.existsSync(MAP_STATE_BIN_PATH)) {
+    const stats = fs.statSync(MAP_STATE_BIN_PATH);
+    if (stats.mtimeMs > lastMapBinarySaveTime + 1000) {
+      // 1秒以上の差があれば外部変更とみなす
+      console.warn(
+        `[BinaryMap] Skipping save: Disk file has been modified externally (${stats.mtimeMs} > ${lastMapBinarySaveTime})`,
+      );
+      return;
+    }
+  }
+
   const buffer = Buffer.from(sharedMapSAB);
   const tempPath = `${MAP_STATE_BIN_PATH}.tmp.${process.pid}.${Date.now()}`;
   await fs.promises.writeFile(tempPath, buffer);
   await safeRename(tempPath, MAP_STATE_BIN_PATH);
+
+  // 更新後の時刻を記録
+  lastMapBinarySaveTime = fs.statSync(MAP_STATE_BIN_PATH).mtimeMs;
   console.log(`[BinaryMap] Persisted binary map to ${MAP_STATE_BIN_PATH}`);
 }
 
@@ -813,6 +831,7 @@ function loadMapBinary() {
   if (!fs.existsSync(binaryPath)) return false;
 
   try {
+    const stats = fs.statSync(binaryPath);
     const buffer = fs.readFileSync(binaryPath);
     if (buffer.length !== MAP_SIZE * MAP_SIZE * TILE_BYTE_SIZE) {
       console.warn(
@@ -823,6 +842,7 @@ function loadMapBinary() {
 
     const uint8View = new Uint8Array(sharedMapSAB);
     uint8View.set(buffer);
+    lastMapBinarySaveTime = stats.mtimeMs; // [NEW] ロードしたファイルの時刻を記録
     console.log("[Init] Map Binary loaded into SAB successfully.");
     return true;
   } catch (e) {
@@ -881,13 +901,27 @@ function getMapStateFromSAB() {
  */
 async function persistMapJsonState() {
   try {
-    const mapState = getMapStateFromSAB();
+    // [NEW] 外部変更チェック
+    if (fs.existsSync(MAP_STATE_PATH)) {
+      const stats = fs.statSync(MAP_STATE_PATH);
+      if (stats.mtimeMs > lastMapJsonSaveTime + 1000) {
+        console.warn(
+          `[MapJson] Skipping save: Disk file has been modified externally (${stats.mtimeMs} > ${lastMapJsonSaveTime})`,
+        );
+        return;
+      }
+    }
+
+    const mapStateForJson = getMapStateFromSAB(); // 変数名重複回避
     const backupOptions = {
       forceDump: true,
       skipLock: true,
       skipBinaryHook: true,
     };
-    await saveJSON(MAP_STATE_PATH, mapState, backupOptions);
+    await saveJSON(MAP_STATE_PATH, mapStateForJson, backupOptions);
+
+    // 更新後の時刻を記録
+    lastMapJsonSaveTime = fs.statSync(MAP_STATE_PATH).mtimeMs;
     console.log(`[MapSave] Map state JSON updated from memory.`);
   } catch (e) {
     console.error(`[MapSave] Failed to save JSON map state:`, e);
@@ -1991,6 +2025,8 @@ function queueMapUpdateInternal() {
 // [OPTIMIZATION] マップ変更のバッチ処理用
 const pendingChanges = new Map();
 let lastMapSaveTime = Date.now();
+let lastMapBinarySaveTime = 0; // [NEW] バイナリの最終保存/ロード時刻
+let lastMapJsonSaveTime = 0; // [NEW] JSON の最終保存/ロード時刻
 let mapSaveTimer = null;
 const MAP_SAVE_INTERVAL = 20 * 1000; // 20秒 (定期フル保存) - 負荷対策しつつ、データロストを最小限に。30秒指定だが余裕を持って20秒。
 const MAP_SAVE_THRESHOLD = 50; // 変更件数閾値 (これを超えたら即保存)
