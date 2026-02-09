@@ -48,13 +48,13 @@ export function useRenderWorker() {
   /**
    * OffscreenCanvasを転送してWorkerを初期化
    */
-  const initCanvas = useCallback((canvas) => {
+  const initCanvas = useCallback((canvas, options = {}) => {
     if (!workerRef.current || canvasTransferredRef.current) return false;
 
     try {
       const offscreen = canvas.transferControlToOffscreen();
       workerRef.current.postMessage(
-        { type: "INIT", data: { canvas: offscreen } },
+        { type: "INIT", data: { canvas: offscreen, ...options } },
         [offscreen],
       );
       canvasTransferredRef.current = true;

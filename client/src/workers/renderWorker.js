@@ -5,7 +5,7 @@
  */
 
 // 定数
-const MAP_SIZE = 500;
+let MAP_SIZE = 500;
 const TILE_SIZE = 16;
 const CHUNK_SIZE = 8;
 
@@ -24,7 +24,7 @@ let isDualMode = false;
 let cachedTiles = {}; // 互換性のため維持 (部分更新用)
 // [NEW] フラット配列: インデックス = y * MAP_SIZE + x
 // 要素: Tile Object (参照)
-const tilesFlatArray = new Array(MAP_SIZE * MAP_SIZE).fill(null);
+let tilesFlatArray = new Array(MAP_SIZE * MAP_SIZE).fill(null);
 
 let cachedFactions = {};
 let cachedAlliances = {};
@@ -44,6 +44,11 @@ let totalWorkers = 1;
 // [NEW] Unified Rendering Mode (Returns ImageBitmap)
 let internalCanvas = null;
 let internalCtx = null;
+
+// [NEW] SharedArrayBuffer Views (Shared across functions)
+let sabView = null;
+let zocSabView = null;
+let statsSabView = null;
 
 /**
  * 初期化: OffscreenCanvasを受け取る (単一キャンバスモード)
@@ -105,9 +110,26 @@ function renderChunks(data) {
   // マルチレイヤーの場合、最下層以外は透明である必要がある。
   // 今回は一旦、全Workerでクリアし、背景色は描画しない（GameMap側で背景divを持つ想定）
   // または、workerIndex === 0 のみ背景を描画する。
+  // 背景色はWorker 0のみが描画 (マップ領域内のみ)
   if (workerIndex === 0) {
-    ctx.fillStyle = blankTileColor || "#ffffff";
-    ctx.fillRect(0, 0, width, height);
+    const mapScreenMinX = Math.floor(centerX + (0 - viewport.x) * tileSize);
+    const mapScreenMinY = Math.floor(centerY + (0 - viewport.y) * tileSize);
+    const mapScreenMaxX = Math.ceil(
+      centerX + (MAP_SIZE - viewport.x) * tileSize,
+    );
+    const mapScreenMaxY = Math.ceil(
+      centerY + (MAP_SIZE - viewport.y) * tileSize,
+    );
+
+    const drawX = Math.max(0, mapScreenMinX);
+    const drawY = Math.max(0, mapScreenMinY);
+    const drawW = Math.min(width, mapScreenMaxX) - drawX;
+    const drawH = Math.min(height, mapScreenMaxY) - drawY;
+
+    if (drawW > 0 && drawH > 0) {
+      ctx.fillStyle = blankTileColor || "#ffffff";
+      ctx.fillRect(drawX, drawY, drawW, drawH);
+    }
   }
 
   // 表示範囲計算
@@ -201,7 +223,9 @@ function renderTiles(data) {
 
   // [NEW] SharedArrayBuffer Support
   const sab = cachedTheme.sab;
-  const sabView = sab ? new DataView(sab) : null;
+  if (sab && !sabView) {
+    sabView = new DataView(sab);
+  }
   const TILE_BYTE_SIZE = 24;
 
   if (!ctx || !canvas) return;
@@ -223,6 +247,25 @@ function renderTiles(data) {
   const endX = Math.ceil(viewport.x + tilesX / 2);
   const endY = Math.ceil(viewport.y + tilesY / 2);
 
+  // [NEW] マップ境界のスクリーン座標計算
+  const mapScreenMinX = Math.floor(centerX + (0 - viewport.x) * tileSize);
+  const mapScreenMinY = Math.floor(centerY + (0 - viewport.y) * tileSize);
+  const mapScreenMaxX = Math.ceil(centerX + (MAP_SIZE - viewport.x) * tileSize);
+  const mapScreenMaxY = Math.ceil(centerY + (MAP_SIZE - viewport.y) * tileSize);
+
+  // マップ領域内のみ背景色で塗りつぶす (Worker 0のみ)
+  if (workerIndex === 0) {
+    const drawX = Math.max(0, mapScreenMinX);
+    const drawY = Math.max(0, mapScreenMinY);
+    const drawW = Math.min(width, mapScreenMaxX) - drawX;
+    const drawH = Math.min(height, mapScreenMaxY) - drawY;
+
+    if (drawW > 0 && drawH > 0) {
+      ctx.fillStyle = blankTileColor || "#ffffff";
+      ctx.fillRect(drawX, drawY, drawW, drawH);
+    }
+  }
+
   // 色ごとにバッチング
   const batchDraws = new Map();
   const factionBorderRects = [];
@@ -242,21 +285,28 @@ function renderTiles(data) {
       if (sabView) {
         // [NEW] SharedArrayBufferから直接読み取り (ゼロコピー)
         const offset = (y * MAP_SIZE + x) * TILE_BYTE_SIZE;
-        fidIdx = sabView.getUint16(offset + 0, true);
-        colorInt = sabView.getUint32(offset + 2, true);
-        paintedByIdx = sabView.getUint32(offset + 6, true);
-        // overpaint = sabView.getUint8(offset + 10);
-        flags = sabView.getUint8(offset + 11);
-        exp = sabView.getFloat64(offset + 12, true); // [FIX] Offset 12
 
-        // tileオブジェクトの最小限のシミュレーション（互換性のため）
-        if (fidIdx !== 65535) {
-          tile = {
-            factionId: cachedTheme.factionsList
-              ? cachedTheme.factionsList[fidIdx]
-              : null,
-          };
-          if (flags & 1) tile.core = { factionId: tile.factionId };
+        // [SAFETY] 境界チェック
+        if (offset + TILE_BYTE_SIZE <= sabView.byteLength) {
+          fidIdx = sabView.getUint16(offset + 0, true);
+          colorInt = sabView.getUint32(offset + 2, true);
+          paintedByIdx = sabView.getUint32(offset + 6, true);
+          // overpaint = sabView.getUint8(offset + 10);
+          flags = sabView.getUint8(offset + 11);
+          exp = sabView.getFloat64(offset + 12, true);
+
+          // tileオブジェクトの最小限のシミュレーション（互換性のため）
+          if (fidIdx !== 65535) {
+            tile = {
+              factionId: cachedTheme.factionsList
+                ? cachedTheme.factionsList[fidIdx]
+                : null,
+            };
+            if (flags & 1) tile.core = { factionId: tile.factionId };
+          }
+        } else {
+          // 範囲外の場合はスキップまたはデフォルト値
+          // console.warn("[RenderWorker] Access out of bounds:", offset, sabView.byteLength);
         }
       } else {
         // フォールバック: 従来Objectベース
@@ -298,9 +348,11 @@ function renderTiles(data) {
               : "#cccccc";
         } else if (mapColorMode === "overpaint") {
           // overpaintはSABから取得
-          const overpaint = sabView.getUint8(
-            (y * MAP_SIZE + x) * TILE_BYTE_SIZE + 10,
-          );
+          const offset = (y * MAP_SIZE + x) * TILE_BYTE_SIZE + 10;
+          let overpaint = 0;
+          if (offset < sabView.byteLength) {
+            overpaint = sabView.getUint8(offset);
+          }
           const count = Math.min(4, overpaint);
           const ratio = count / 4;
           color = `hsl(${240 + ratio * 60}, ${60 + ratio * 40}%, ${45 + ratio * 30}%)`;
@@ -450,6 +502,10 @@ self.onmessage = function (e) {
     if (type === "SETUP_WORKER") {
       workerIndex = data.workerIndex;
       totalWorkers = data.totalWorkers;
+      if (data.mapSize) {
+        MAP_SIZE = data.mapSize;
+        tilesFlatArray = new Array(MAP_SIZE * MAP_SIZE).fill(null);
+      }
     } else if (type === "INIT") {
       // Handle both nested data (legacy) and flat (new)
       const setup = data || e.data;
@@ -457,6 +513,13 @@ self.onmessage = function (e) {
 
       if (setup.sab) sabView = new DataView(setup.sab);
       if (setup.zocSab) zocSabView = new Uint16Array(setup.zocSab);
+
+      if (setup.mapSize) {
+        MAP_SIZE = setup.mapSize;
+        if (tilesFlatArray.length !== MAP_SIZE * MAP_SIZE) {
+          tilesFlatArray = new Array(MAP_SIZE * MAP_SIZE).fill(null);
+        }
+      }
 
       if (setup.isDualMode) {
         // initDualMode logic if needed
@@ -476,7 +539,13 @@ self.onmessage = function (e) {
       self.postMessage({ type: "RESIZE_COMPLETE", success: true });
     } else if (type === "UPDATE_TILES") {
       // [Stateful] タイルデータ更新
-      const { tiles, replace } = data;
+      const { tiles, replace, mapSize, sab } = data;
+
+      if (mapSize && MAP_SIZE !== mapSize) {
+        MAP_SIZE = mapSize;
+        tilesFlatArray = new Array(MAP_SIZE * MAP_SIZE).fill(null);
+      }
+
       if (replace) {
         cachedTiles = tiles || {};
         // Full Reset Flat Array
@@ -499,7 +568,16 @@ self.onmessage = function (e) {
       }
 
       // [NEW] SharedArrayBuffer や リストの更新を確実に反映
-      if (data.sab) cachedTheme.sab = data.sab;
+      if (sab) {
+        cachedTheme.sab = sab;
+        sabView = new DataView(sab);
+      }
+      if (data.zocSab) {
+        zocSabView = new Uint16Array(data.zocSab);
+      }
+      if (data.statsSab) {
+        statsSabView = new Int32Array(data.statsSab);
+      }
       if (data.factionsList) cachedTheme.factionsList = data.factionsList;
       if (data.playersList) cachedTheme.playersList = data.playersList;
       if (data.mapVersion !== undefined)

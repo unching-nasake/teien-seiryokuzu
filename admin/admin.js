@@ -104,6 +104,7 @@ function updateUI(data) {
   }
 
   // 各項目の更新
+  document.getElementById("mapSize").value = String(data.mapSize ?? 500);
   document.getElementById("gardenMode").checked = !!gardenMode;
   document.getElementById("initialAp").value = ap.initialAp ?? 10;
   document.getElementById("apPerPost").value = ap.apPerPost ?? 10;
@@ -328,6 +329,7 @@ async function fetchSettings() {
 
 async function updateSettings() {
   const settings = {
+    mapSize: parseInt(document.getElementById("mapSize").value, 10),
     gardenMode: document.getElementById("gardenMode").checked,
     messagesEnabled: document.getElementById("messagesEnabled").checked,
     apSettings: {

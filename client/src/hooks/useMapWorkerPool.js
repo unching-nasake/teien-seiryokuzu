@@ -98,6 +98,19 @@ export function useMapWorkerPool() {
     [getNextWorker],
   );
 
+  // 全てのWorkerに同じタスクを送信 (初期設定用など)
+  const broadcastTask = useCallback((type, data) => {
+    return Promise.all(
+      workersRef.current.map((worker) => {
+        return new Promise((resolve) => {
+          const id = idCounterRef.current++;
+          callbacksRef.current.set(id, { resolve, reject: resolve }); // エラー時も継続
+          worker.postMessage({ type, data, id });
+        });
+      }),
+    );
+  }, []);
+
   // 複数タスクを並列実行
   const sendParallelTasks = useCallback(
     (tasks) => {
@@ -162,6 +175,7 @@ export function useMapWorkerPool() {
     poolSize: poolSize.current,
     sendTask,
     sendParallelTasks,
+    broadcastTask,
     // 既存API互換
     calculateClusters,
     calculateEdges,

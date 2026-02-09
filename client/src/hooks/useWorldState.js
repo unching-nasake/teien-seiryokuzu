@@ -16,21 +16,22 @@ import { useCallback, useMemo, useRef, useState } from "react";
  * ※注意: 現状 TILE_BYTE_SIZE = 24 なので、[20-23] もパディングまたは属性として利用。
  */
 
-const MAP_SIZE = 500;
-const TILE_COUNT = MAP_SIZE * MAP_SIZE;
-const TILE_BYTE_SIZE = 24;
-const TOTAL_SIZE = TILE_COUNT * TILE_BYTE_SIZE;
-
-// [NEW] ZOC & Stats Constants
-const ZOC_SIZE = TILE_COUNT * 2; // Uint16
-const MAX_FACTIONS = 2000;
+// [NEW] Dynamic Map Size
+// Default initialization (will be resized via setMapSize)
+const INTERNAL_TILE_BYTE_SIZE = 24;
 const STATS_INTS = 16;
-const STATS_SIZE = MAX_FACTIONS * STATS_INTS * 4; // Int32 = 4 bytes
+const MAX_FACTIONS = 2000;
+const STATS_SIZE = MAX_FACTIONS * STATS_INTS * 4;
 
 export function useWorldState() {
-  // SharedArrayBufferの初期化 (一回のみ)
-  const sabRef = useRef(new SharedArrayBuffer(TOTAL_SIZE));
-  const zocSabRef = useRef(new SharedArrayBuffer(ZOC_SIZE));
+  const [mapSize, setMapSizeState] = useState(500);
+  const mapSizeRef = useRef(500);
+
+  // SharedArrayBuffer (Re-allocatable)
+  const sabRef = useRef(
+    new SharedArrayBuffer(500 * 500 * INTERNAL_TILE_BYTE_SIZE),
+  );
+  const zocSabRef = useRef(new SharedArrayBuffer(500 * 500 * 2));
   const statsSabRef = useRef(new SharedArrayBuffer(STATS_SIZE));
   const [version, setVersion] = useState(0);
 
@@ -40,11 +41,29 @@ export function useWorldState() {
   const playerMapRef = useRef(new Map()); // id -> index
   const playerListRef = useRef([]); // index -> id
 
-  // DataViewのキャッシュ (毎回生成しない)
-  const dvRef = useRef(null);
-  if (!dvRef.current) {
+  // DataViewのキャッシュ
+  const dvRef = useRef(new DataView(sabRef.current));
+
+  // [NEW] Resize Handler
+  const setMapSize = useCallback((newSize) => {
+    if (newSize === mapSizeRef.current) return;
+    console.log(`[useWorldState] Resizing map to ${newSize}x${newSize}`);
+    mapSizeRef.current = newSize;
+    setMapSizeState(newSize);
+
+    // Re-allocate SABs
+    const tileCount = newSize * newSize;
+    sabRef.current = new SharedArrayBuffer(tileCount * INTERNAL_TILE_BYTE_SIZE);
+    zocSabRef.current = new SharedArrayBuffer(tileCount * 2);
+    // Stats SAB is fixed size (based on factions), so we keep it or recreate if needed.
+    // Ideally we keep stats? But assume fresh start on resize usually.
+    // statsSabRef.current = new SharedArrayBuffer(STATS_SIZE);
+
+    // Update DataView
     dvRef.current = new DataView(sabRef.current);
-  }
+
+    setVersion((v) => v + 1);
+  }, []);
 
   const getFactionIndex = useCallback((id) => {
     if (!id) return 65535; // null
@@ -114,10 +133,12 @@ export function useWorldState() {
   );
 
   // 公開用 setTile
+  // 公開用 setTile
   const setTile = useCallback(
     (x, y, data) => {
-      if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) return;
-      const offset = (y * MAP_SIZE + x) * TILE_BYTE_SIZE;
+      const size = mapSizeRef.current;
+      if (x < 0 || x >= size || y < 0 || y >= size) return;
+      const offset = (y * size + x) * INTERNAL_TILE_BYTE_SIZE;
       setTileInternal(offset, data);
       setVersion((v) => v + 1);
     },
@@ -125,8 +146,10 @@ export function useWorldState() {
   );
 
   // 大量タイルの書き込み
+  // 大量タイルの書き込み
   const setTiles = useCallback(
     (tiles) => {
+      const size = mapSizeRef.current;
       const entries = Object.entries(tiles);
       if (entries.length === 0) return;
 
@@ -135,8 +158,8 @@ export function useWorldState() {
         const x = parseInt(parts[0], 10);
         const y = parseInt(parts[1], 10);
 
-        if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) return;
-        const offset = (y * MAP_SIZE + x) * TILE_BYTE_SIZE;
+        if (x < 0 || x >= size || y < 0 || y >= size) return;
+        const offset = (y * size + x) * INTERNAL_TILE_BYTE_SIZE;
 
         if (data === null) {
           // タイル消去 (現状はfactionIndexをnullにする)
@@ -199,16 +222,17 @@ export function useWorldState() {
   );
 
   const getTile = useCallback((x, y) => {
-    if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) return null;
+    const size = mapSizeRef.current;
+    if (x < 0 || x >= size || y < 0 || y >= size) return null;
     const dv = dvRef.current;
-    const offset = (y * MAP_SIZE + x) * TILE_BYTE_SIZE;
+    const offset = (y * size + x) * INTERNAL_TILE_BYTE_SIZE;
 
     const fidIdx = dv.getUint16(offset + 0, true);
     const colorInt = dv.getUint32(offset + 2, true);
     const paintedByIdx = dv.getUint32(offset + 6, true);
     const overpaint = dv.getUint8(offset + 10);
     const flags = dv.getUint8(offset + 11);
-    const exp = dv.getFloat64(offset + 12, true); // [FIX] Offset 12
+    const exp = dv.getFloat64(offset + 12, true);
     const pAtSec = dv.getUint32(offset + 20, true);
 
     const safeISOString = (ms) => {
@@ -261,8 +285,11 @@ export function useWorldState() {
   const sharedData = useMemo(
     () => ({
       sab: sabRef.current,
+      zocSab: zocSabRef.current,
+      statsSab: statsSabRef.current,
       factionsList: factionListRef.current,
       playersList: playerListRef.current,
+      mapSize: mapSizeRef.current,
     }),
     [version],
   );
@@ -282,5 +309,7 @@ export function useWorldState() {
     zocSab: zocSabRef.current,
     statsSab: statsSabRef.current,
     updateFactionStats,
+    mapSize, // [NEW] Export mapSize
+    setMapSize, // [NEW] Export setter
   };
 }

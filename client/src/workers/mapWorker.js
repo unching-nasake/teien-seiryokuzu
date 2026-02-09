@@ -3,7 +3,7 @@
  * 重い計算をメインスレッドから分離し、バイナリデータを直接操作して高速化
  */
 
-const MAP_SIZE = 500;
+let MAP_SIZE = 500;
 const TILE_BYTE_SIZE = 24;
 
 // キャッシュ
@@ -228,11 +228,13 @@ function findAutoSelectCandidates(
 
   for (let i = 0; i < MAP_SIZE * MAP_SIZE; i++) {
     const offset = i * TILE_BYTE_SIZE;
-    const fidIdx = sabView.getUint16(offset, true);
-    if (fidIdx !== 65535) {
-      occupiedCount++;
-      if (fidIdx === myFactionIdx) {
-        myTiles.push(i);
+    if (offset + TILE_BYTE_SIZE <= sabView.byteLength) {
+      const fidIdx = sabView.getUint16(offset, true);
+      if (fidIdx !== 65535) {
+        occupiedCount++;
+        if (fidIdx === myFactionIdx) {
+          myTiles.push(i);
+        }
       }
     }
   }
@@ -259,6 +261,8 @@ function findAutoSelectCandidates(
         if (seen.has(ni)) return;
 
         const offset = ni * TILE_BYTE_SIZE;
+        if (offset + TILE_BYTE_SIZE > sabView.byteLength) return;
+
         const nFidIdx = sabView.getUint16(offset, true);
 
         if (nFidIdx === myFactionIdx) {
@@ -301,7 +305,7 @@ self.onmessage = async function (e) {
   try {
     let result;
 
-    // [NEW] Extract sab/zocSab directly from event data for INIT
+    // [NEW] Extract sab/zocSab directly from data for INIT
     const {
       sab,
       zocSab,
@@ -309,10 +313,12 @@ self.onmessage = async function (e) {
       factions,
       factionsList: fList,
       namedCells: nc,
-    } = e.data;
+      mapSize,
+    } = data;
 
     switch (type) {
       case "INIT":
+        if (mapSize) MAP_SIZE = mapSize;
         if (sab) sabView = new DataView(sab);
         if (zocSab) zocSabView = new Uint16Array(zocSab);
         if (statsSab) statsSabView = new Int32Array(statsSab);

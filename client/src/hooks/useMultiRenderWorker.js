@@ -206,8 +206,11 @@ export const useMultiRenderWorker = (
           tiles,
           replace,
           sab: tileData?.sab,
+          zocSab: tileData?.zocSab,
+          statsSab: tileData?.statsSab,
           factionsList: tileData?.factionsList,
           playersList: tileData?.playersList,
+          mapSize: tileData?.mapSize,
           mapVersion: theme.mapVersion,
         },
       });

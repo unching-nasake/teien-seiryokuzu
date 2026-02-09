@@ -6,14 +6,33 @@ const { createCanvas } = require("canvas");
 const path = require("path");
 const fs = require("fs");
 
-// 定数
-const MAP_SIZE = 500; // 500x500タイル
+// パス設定
+const DATA_DIR = path.join(__dirname, "data");
+const SYSTEM_SETTINGS_PATH = path.join(DATA_DIR, "system_settings.json");
+
+// 設定の読み込み、および MAP_SIZE の初期化
+function loadMapSizeFromSettings() {
+  if (!fs.existsSync(SYSTEM_SETTINGS_PATH)) return 500;
+  try {
+    const raw = fs.readFileSync(SYSTEM_SETTINGS_PATH, "utf8");
+    const settings = JSON.parse(raw);
+    return settings.mapSize || 500;
+  } catch (e) {
+    console.warn(
+      "[MapImageGenerator] Failed to load mapSize from settings:",
+      e.message,
+    );
+    return 500;
+  }
+}
+
+// 定数 (動的に取得)
+const MAP_SIZE = loadMapSizeFromSettings();
 const TILE_SIZE = 2; // 1タイルあたり2px
 const PADDING_X = 150; // 左右の余白 (150px)
 const PADDING_Y = 25; // 上下の余白 (25px)
 
 // パス設定
-const DATA_DIR = path.join(__dirname, "data");
 const OUTPUT_DIR = path.join(DATA_DIR, "map_images");
 const MAP_STATE_PATH = path.join(DATA_DIR, "map_state.json");
 const FACTIONS_PATH = path.join(DATA_DIR, "factions.json");

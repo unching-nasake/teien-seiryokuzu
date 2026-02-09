@@ -2,59 +2,62 @@ const fs = require("fs");
 const path = require("path");
 
 // ===== Constants =====
-const MAP_SIZE = 500;
+// ===== Constants =====
+// MAP_SIZE is now dynamic, passed as argument
 const TILE_BYTE_SIZE = 24;
-// 特別タイル: 中央50×50 (225～274)
-const SPECIAL_TILE_MIN = 225;
-const SPECIAL_TILE_MAX = 274;
+// Special Tile Size: 50x50
+const SPECIAL_TILE_HALF_WIDTH = 25;
 
 const MAX_POINTS = 10;
 const MIN_POINTS = 1;
-const GRADIENT_STEP = 5; // 5タイルごとにポイント減少
+const GRADIENT_STEP = 5; // 5 tiles step
 const NAMED_CELL_BONUS = 20;
 
 const NAMED_CELL_CREATE_COST = 100;
 
 // ===== Helper Functions =====
-function isSpecialTile(x, y) {
-  return (
-    x >= SPECIAL_TILE_MIN &&
-    x <= SPECIAL_TILE_MAX &&
-    y >= SPECIAL_TILE_MIN &&
-    y <= SPECIAL_TILE_MAX
-  );
+function getSpecialTileRange(mapSize) {
+  const center = Math.floor(mapSize / 2);
+  return {
+    min: center - SPECIAL_TILE_HALF_WIDTH,
+    max: center + SPECIAL_TILE_HALF_WIDTH - 1,
+  };
+}
+
+function isSpecialTile(x, y, mapSize = 500) {
+  const { min, max } = getSpecialTileRange(mapSize);
+  return x >= min && x <= max && y >= min && y <= max;
 }
 
 /**
- * タイルのポイントを計算（グラデーション制）
- * @param {number} x - タイルX座標
- * @param {number} y - タイルY座標
- * @param {Object} namedCells - ネームドセルデータ（オプション）
- * @returns {number} ポイント（1～10、ネームドセルは+20）
+ * Calculate tile points (Gradient system)
+ * @param {number} x
+ * @param {number} y
+ * @param {number} mapSize
+ * @param {Object} namedCells
+ * @returns {number}
  */
-function getTilePoints(x, y, namedCells = null) {
+function getTilePoints(x, y, mapSize, namedCells = null) {
+  if (mapSize === undefined) {
+    console.warn(
+      "[shared] getTilePoints: mapSize is undefined. Defaulting to 500.",
+    );
+    mapSize = 500;
+  }
   let basePoints;
 
-  if (isSpecialTile(x, y)) {
-    // 特別タイル内は最大ポイント
+  const { min, max } = getSpecialTileRange(mapSize);
+
+  if (x >= min && x <= max && y >= min && y <= max) {
+    // Inside special tile area
     basePoints = MAX_POINTS;
   } else {
-    // 特別タイル範囲からの距離を計算
-    const distX =
-      x < SPECIAL_TILE_MIN
-        ? SPECIAL_TILE_MIN - x
-        : x > SPECIAL_TILE_MAX
-          ? x - SPECIAL_TILE_MAX
-          : 0;
-    const distY =
-      y < SPECIAL_TILE_MIN
-        ? SPECIAL_TILE_MIN - y
-        : y > SPECIAL_TILE_MAX
-          ? y - SPECIAL_TILE_MAX
-          : 0;
+    // Calculate distance from special tile area
+    const distX = x < min ? min - x : x > max ? x - max : 0;
+    const distY = y < min ? min - y : y > max ? y - max : 0;
     const distance = Math.max(distX, distY);
 
-    // 5タイルごとに1ポイント減少（特別タイル外は9ptからスタート）
+    // Decrease 1 point every 5 tiles
     const reduction = Math.floor(distance / GRADIENT_STEP);
     basePoints = Math.max(MIN_POINTS, 9 - reduction);
   }
@@ -187,13 +190,18 @@ class LockManager {
 
 // exports at the bottom
 
-function calculateFactionPoints(factionId, mapState, namedCells = null) {
+function calculateFactionPoints(
+  factionId,
+  mapState,
+  namedCells = null,
+  mapSize = 500,
+) {
   let territoryPoints = 0;
   for (const key in mapState.tiles) {
     const tile = mapState.tiles[key];
     if ((tile.factionId || tile.faction) === factionId) {
       const [x, y] = key.split("_").map(Number);
-      territoryPoints += getTilePoints(x, y, namedCells);
+      territoryPoints += getTilePoints(x, y, namedCells, mapSize);
     }
   }
   return territoryPoints;
@@ -286,9 +294,7 @@ function calculateFactionSharedAPLimit(
 }
 
 module.exports = {
-  MAP_SIZE,
-  SPECIAL_TILE_MIN,
-  SPECIAL_TILE_MAX,
+  getSpecialTileRange,
   MAX_POINTS,
   MIN_POINTS,
   GRADIENT_STEP,

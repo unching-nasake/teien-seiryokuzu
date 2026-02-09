@@ -3,7 +3,7 @@
  * 隣接タイル検索を高速化するためのデータ構造
  */
 
-const MAP_SIZE = 500;
+// const MAP_SIZE = 500; // Removed, passed dynamically
 const MAX_ITEMS_PER_NODE = 10;
 const MAX_DEPTH = 8;
 
@@ -173,12 +173,11 @@ class QuadTree {
 /**
  * マップ用Quadtreeインスタンスを作成
  */
-function createMapQuadTree() {
-  return new QuadTree({ x: 0, y: 0, width: MAP_SIZE, height: MAP_SIZE });
+function createMapQuadTree(mapSize = 500) {
+  return new QuadTree({ x: 0, y: 0, width: mapSize, height: mapSize });
 }
 
 module.exports = {
   QuadTree,
   createMapQuadTree,
-  MAP_SIZE,
 };

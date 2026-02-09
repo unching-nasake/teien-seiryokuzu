@@ -2,29 +2,38 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMultiRenderWorker } from '../hooks/useMultiRenderWorker';
 
-// マップ定数
-const MAP_SIZE = 500;
+// [REMOVED] Hardcoded MAP_SIZE = 500
 const TILE_SIZE = 16;
 const VIEWPORT_PADDING = 50;
-// 特別タイル: 中央50×50 (225～274)
-const SPECIAL_TILE_MIN = 225;
-const SPECIAL_TILE_MAX = 274;
 const MAX_POINTS = 10;
 const MIN_POINTS = 1;
 const GRADIENT_STEP = 5;
 const NAMED_CELL_BONUS = 20;
 
-const isSpecialTile = (x, y) => x >= SPECIAL_TILE_MIN && x <= SPECIAL_TILE_MAX && y >= SPECIAL_TILE_MIN && y <= SPECIAL_TILE_MAX;
+// Helper to get special tile range
+const getSpecialTileRange = (mapSize) => {
+  const center = Math.floor(mapSize / 2);
+  return {
+    min: center - 25,
+    max: center + 24,
+  };
+};
+
+const isSpecialTile = (x, y, mapSize) => {
+  const { min, max } = getSpecialTileRange(mapSize);
+  return x >= min && x <= max && y >= min && y <= max;
+};
 
 // グラデーションポイント計算
-const getTilePoints = (x, y, namedCells = null) => {
+const getTilePoints = (x, y, mapSize, namedCells = null) => {
   let basePoints;
+  const { min, max } = getSpecialTileRange(mapSize);
 
-  if (isSpecialTile(x, y)) {
+  if (x >= min && x <= max && y >= min && y <= max) {
     basePoints = MAX_POINTS;
   } else {
-    const distX = x < SPECIAL_TILE_MIN ? SPECIAL_TILE_MIN - x : x > SPECIAL_TILE_MAX ? x - SPECIAL_TILE_MAX : 0;
-    const distY = y < SPECIAL_TILE_MIN ? SPECIAL_TILE_MIN - y : y > SPECIAL_TILE_MAX ? y - SPECIAL_TILE_MAX : 0;
+    const distX = x < min ? min - x : x > max ? x - max : 0;
+    const distY = y < min ? min - y : y > max ? y - max : 0;
     const distance = Math.max(distX, distY);
     const reduction = Math.floor(distance / GRADIENT_STEP);
     basePoints = Math.max(MIN_POINTS, 9 - reduction);
@@ -42,13 +51,13 @@ const getTilePoints = (x, y, namedCells = null) => {
 };
 
 // クライアント側支配チェック
-const checkClientDomination = (cx, cy, level, factionId, getTileFunc) => {
+const checkClientDomination = (cx, cy, level, factionId, getTileFunc, mapSize) => {
     const radius = level;
     for (let dy = -radius; dy <= radius; dy++) {
         for (let dx = -radius; dx <= radius; dx++) {
              const tx = cx + dx;
              const ty = cy + dy;
-             if (tx < 0 || tx >= MAP_SIZE || ty < 0 || ty >= MAP_SIZE) return false;
+             if (tx < 0 || tx >= mapSize || ty < 0 || ty >= mapSize) return false;
              const t = getTileFunc(tx, ty);
              if (!t || (t.factionId || t.faction) !== factionId) return false;
         }
@@ -89,6 +98,7 @@ function GameMap({
   onZoomChange = null, // [NEW] ズームレベル変更コールバック
   workerPool = null, // [NEW] 共有WorkerPoolを受け取る
   version,
+  mapSize = 500, // [NEW] Accept mapSize prop
 }) {
 
 
@@ -128,17 +138,17 @@ function GameMap({
   // 高速なFactionID取得 (オブジェクト生成なし)
   const getFactionIdRaw = useCallback((x, y) => {
     if (!sabView) return null;
-    if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) return null; // MAP_SIZE constant
-    const offset = (y * MAP_SIZE + x) * 24;
+    if (x < 0 || x >= mapSize || y < 0 || y >= mapSize) return null; // MAP_SIZE constant
+    const offset = (y * mapSize + x) * 24;
     const fidIdx = sabView.getUint16(offset + 0, true);
     return fidIdx === 65535 ? null : (tileData.factionsList ? tileData.factionsList[fidIdx] : null);
-  }, [sabView, tileData]);
+  }, [sabView, tileData, mapSize]);
 
   const getTile = useCallback((x, y) => {
     if (!sabView) return null;
-    if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) return null;
+    if (x < 0 || x >= mapSize || y < 0 || y >= mapSize) return null;
 
-    const offset = (y * MAP_SIZE + x) * 24; // TILE_BYTE_SIZE = 24
+    const offset = (y * mapSize + x) * 24; // TILE_BYTE_SIZE = 24
 
     const fidIdx = sabView.getUint16(offset + 0, true);
     const colorInt = sabView.getUint32(offset + 2, true);
@@ -201,7 +211,8 @@ function GameMap({
           blankTileColor,
           highlightCoreOnly,
           mapColorMode,
-          mapVersion // Pass version to worker
+          mapVersion, // Pass version to worker
+          mapSize // [FIX] Pass mapSize to worker
       }
   );
 
@@ -610,10 +621,11 @@ function GameMap({
     // 金枠 (50x50センターエリア)
     // 座標: SPECIAL_TILE_MIN〜SPECIAL_TILE_MAX
     if (showSpecialBorder) {
-        const goldStart = SPECIAL_TILE_MIN;
+        const { min: specialMin, max: specialMax } = getSpecialTileRange(mapSize);
+        const goldStart = specialMin;
         const goldRectX = centerX + (goldStart - viewport.x) * tileSize;
         const goldRectY = centerY + (goldStart - viewport.y) * tileSize;
-        const goldRectSize = (SPECIAL_TILE_MAX - SPECIAL_TILE_MIN + 1) * tileSize;
+        const goldRectSize = (specialMax - specialMin + 1) * tileSize;
 
         ctx.strokeStyle = '#FFD700'; // Gold
         ctx.lineWidth = 3;
@@ -752,8 +764,8 @@ function GameMap({
         if (viewport.zoom > 0.3) {
             ctx.fillStyle = `rgba(255, 255, 255, ${alpha * 0.2})`;
             // 画面内ループ (SABから直接読み取り、オブジェクト生成なし)
-            for (let x = Math.max(0, startX); x <= Math.min(MAP_SIZE - 1, endX); x++) {
-                for (let y = Math.max(0, startY); y <= Math.min(MAP_SIZE - 1, endY); y++) {
+            for (let x = Math.max(0, startX); x <= Math.min(mapSize - 1, endX); x++) {
+                for (let y = Math.max(0, startY); y <= Math.min(mapSize - 1, endY); y++) {
                     const fid = getFactionIdRaw(x, y);
                     if (fid === activeFactionId) {
                         const screenX = centerX + (x - viewport.x) * tileSize;
@@ -1024,7 +1036,7 @@ function GameMap({
 
     const tile = screenToTile(x, y);
     // タイルホバー
-    if (tile.x >= 0 && tile.x < MAP_SIZE && tile.y >= 0 && tile.y < MAP_SIZE) {
+    if (tile.x >= 0 && tile.x < mapSize && tile.y >= 0 && tile.y < mapSize) {
       setHoverTile(tile);
     } else {
       setHoverTile(null);
@@ -1042,7 +1054,7 @@ function GameMap({
         let foundId = null;
 
         // 1. マウス下のタイルが勢力のものか確認
-        if (tile.x >= 0 && tile.x < MAP_SIZE && tile.y >= 0 && tile.y < MAP_SIZE) {
+        if (tile.x >= 0 && tile.x < mapSize && tile.y >= 0 && tile.y < mapSize) {
              const t = getTile(tile.x, tile.y);
              if (t && (t.faction || t.factionId)) {
                  foundId = t.faction || t.factionId;
@@ -1071,7 +1083,7 @@ function GameMap({
 
     if (isDragging) {
         if (brushToggleMode) { // use prop
-             if (tile.x >= 0 && tile.x < MAP_SIZE && tile.y >= 0 && tile.y < MAP_SIZE) {
+             if (tile.x >= 0 && tile.x < mapSize && tile.y >= 0 && tile.y < mapSize) {
                   const currentKey = `${tile.x}_${tile.y}`;
                   if (lastSelectedRef.current !== currentKey) {
                       onTileClick(tile.x, tile.y); // Drag Paint
@@ -1083,8 +1095,8 @@ function GameMap({
              const dy = (e.clientY - dragStart.current.y) / (TILE_SIZE * viewport.zoom);
              setViewport(prev => ({
                  ...prev,
-                 x: Math.max(0, Math.min(MAP_SIZE - 1, prev.x - dx)),
-                 y: Math.max(0, Math.min(MAP_SIZE - 1, prev.y - dy))
+                 x: Math.max(0, Math.min(mapSize - 1, prev.x - dx)),
+                 y: Math.max(0, Math.min(mapSize - 1, prev.y - dy))
              }));
              dragStart.current = { x: e.clientX, y: e.clientY };
         }
@@ -1276,7 +1288,7 @@ function GameMap({
                  const tile = { x: tileX, y: tileY };
 
                  const currentKey = `${tile.x}_${tile.y}`;
-                 if (tile.x >= 0 && tile.x < MAP_SIZE && tile.y >= 0 && tile.y < MAP_SIZE) {
+                 if (tile.x >= 0 && tile.x < mapSize && tile.y >= 0 && tile.y < mapSize) {
                      if (lastSelectedRef.current !== currentKey) {
                          onTileClick(tile.x, tile.y);
                          lastSelectedRef.current = currentKey;
@@ -1315,35 +1327,35 @@ function GameMap({
     } else if (e.touches.length === 1 && isDragging && !touchState.current.wasPinching) {
       const touch = e.touches[0];
       if (brushToggleMode) { // touch move paint
-           const canvas = canvasRef.current;
-           if (!canvas) return;
-           const rect = canvas.getBoundingClientRect();
-           const x = touch.clientX - rect.left;
-           const y = touch.clientY - rect.top;
+          const canvas = canvasRef.current;
+          if (!canvas) return;
+          const rect = canvas.getBoundingClientRect();
+          const x = touch.clientX - rect.left;
+          const y = touch.clientY - rect.top;
 
-           const width = canvas.width;
-           const height = canvas.height;
-           const tileSize = TILE_SIZE * currentViewport.zoom;
-           const centerX = width / 2;
-           const centerY = height / 2;
-           const tileX = Math.floor((x - centerX) / tileSize + currentViewport.x);
-           const tileY = Math.floor((y - centerY) / tileSize + currentViewport.y);
-           const tile = { x: tileX, y: tileY };
+          const width = canvas.width;
+          const height = canvas.height;
+          const tileSize = TILE_SIZE * currentViewport.zoom;
+          const centerX = width / 2;
+          const centerY = height / 2;
+          const tileX = Math.floor((x - centerX) / tileSize + currentViewport.x);
+          const tileY = Math.floor((y - centerY) / tileSize + currentViewport.y);
+          const tile = { x: tileX, y: tileY };
 
-           const currentKey = `${tile.x}_${tile.y}`;
-           if (tile.x >= 0 && tile.x < MAP_SIZE && tile.y >= 0 && tile.y < MAP_SIZE) {
-               if (lastSelectedRef.current !== currentKey) {
-                   onTileClick(tile.x, tile.y);
-                   lastSelectedRef.current = currentKey;
-               }
-           }
+          const currentKey = `${tile.x}_${tile.y}`;
+          if (tile.x >= 0 && tile.x < mapSize && tile.y >= 0 && tile.y < mapSize) {
+              if (lastSelectedRef.current !== currentKey) {
+                  onTileClick(tile.x, tile.y);
+                  lastSelectedRef.current = currentKey;
+              }
+          }
       } else {
           const dx = (touch.clientX - dragStart.current.x) / (TILE_SIZE * currentViewport.zoom);
           const dy = (touch.clientY - dragStart.current.y) / (TILE_SIZE * currentViewport.zoom);
           setViewport(prev => ({
             ...prev,
-            x: Math.max(0, Math.min(MAP_SIZE - 1, prev.x - dx)),
-            y: Math.max(0, Math.min(MAP_SIZE - 1, prev.y - dy))
+            x: Math.max(0, Math.min(mapSize - 1, prev.x - dx)),
+            y: Math.max(0, Math.min(mapSize - 1, prev.y - dy))
           }));
           dragStart.current = { x: touch.clientX, y: touch.clientY };
           if (tilePopup) setTilePopup(null);
@@ -1355,20 +1367,20 @@ function GameMap({
           const touch = e.touches[0];
           const canvas = canvasRef.current;
           if (canvas) {
-             const rect = canvas.getBoundingClientRect();
-             const x = touch.clientX - rect.left;
-             const y = touch.clientY - rect.top;
+            const rect = canvas.getBoundingClientRect();
+            const x = touch.clientX - rect.left;
+            const y = touch.clientY - rect.top;
 
-             const tSize = TILE_SIZE * currentViewport.zoom;
-             const cX = canvas.width / 2;
-             const cY = canvas.height / 2;
+            const tSize = TILE_SIZE * currentViewport.zoom;
+            const cX = canvas.width / 2;
+            const cY = canvas.height / 2;
 
-             const tileX = Math.floor((x - cX) / tSize + currentViewport.x);
-             const tileY = Math.floor((y - cY) / tSize + currentViewport.y);
+            const tileX = Math.floor((x - cX) / tSize + currentViewport.x);
+            const tileY = Math.floor((y - cY) / tSize + currentViewport.y);
 
-             if (tileX >= 0 && tileX < MAP_SIZE && tileY >= 0 && tileY < MAP_SIZE) {
-                 setHoverTile({ x: tileX, y: tileY });
-             }
+            if (tileX >= 0 && tileX < mapSize && tileY >= 0 && tileY < mapSize) {
+                setHoverTile({ x: tileX, y: tileY });
+            }
           }
     }
   }, [isDragging, brushToggleMode, onTileClick, tilePopup]);
@@ -1381,75 +1393,66 @@ function GameMap({
 
     if (e.touches.length === 0) {
         if (isDragging && !touchState.current.wasPinching) {
-             if (!brushToggleMode && e.changedTouches.length === 1) {
-                 const touch = e.changedTouches[0];
-                 const dist = Math.sqrt(Math.pow(touch.clientX - clickStart.current.x, 2) + Math.pow(touch.clientY - clickStart.current.y, 2));
+            if (!brushToggleMode && e.changedTouches.length === 1) {
+                const touch = e.changedTouches[0];
+                const dist = Math.sqrt(Math.pow(touch.clientX - clickStart.current.x, 2) + Math.pow(touch.clientY - clickStart.current.y, 2));
 
-                 if (dist < 20) {
-                     // タッチクリック: ポップアップ
-                     const canvas = canvasRef.current;
-                     if (!canvas) return;
+                if (dist < 20) {
+                    // タッチクリック: ポップアップ
+                    const canvas = canvasRef.current;
+                    if (!canvas) return;
                       const rect = canvas.getBoundingClientRect();
                       const x = touch.clientX - rect.left;
                       const y = touch.clientY - rect.top;
 
-                      // タップハイライト用の座標計算 (画面外判定などは後続のロジックで行うが、
-                      // ここで temporary に highlight を更新するのもありだが、
-                      // 実際の描画更新は requestAnimationFrame や state 依存なので
-                      // handleTouchEnd で確定させるのが無難。
-                      // ただし「押している間」のフィードバックならここで…
-                      // いや、GameMapは mouseUp/touchEnd でアクション確定なので
-                      // touchStart/Move ではドラッグかどうかの判定のみ。
-                      // touchEnd で popUp or select.
+                    const width = canvas.width;
+                    const height = canvas.height;
+                    const tileSize = TILE_SIZE * currentViewport.zoom;
+                    const centerX = width / 2;
+                    const centerY = height / 2;
+                    const tileX = Math.floor((x - centerX) / tileSize + currentViewport.x);
+                    const tileY = Math.floor((y - centerY) / tileSize + currentViewport.y);
+                    const tile = { x: tileX, y: tileY };
 
-                     const width = canvas.width;
-                     const height = canvas.height;
-                     const tileSize = TILE_SIZE * currentViewport.zoom;
-                     const centerX = width / 2;
-                     const centerY = height / 2;
-                     const tileX = Math.floor((x - centerX) / tileSize + currentViewport.x);
-                     const tileY = Math.floor((y - centerY) / tileSize + currentViewport.y);
-                     const tile = { x: tileX, y: tileY };
+                    if (tile.x >= 0 && tile.x < mapSize && tile.y >= 0 && tile.y < mapSize) {
+                      const key = `${tile.x}_${tile.y}`;
+                      {
+                            const tData = getTile(tile.x, tile.y);
+                            const fName = tData?.faction ? (factions[tData.faction]?.name || '不明') : null;
+                            const pName = playerNames[tData?.paintedBy] || tData?.paintedBy || null;
+                            const coreData = tData?.core || null;
 
-                     if (tile.x >= 0 && tile.x < MAP_SIZE && tile.y >= 0 && tile.y < MAP_SIZE) {
-                        const key = `${tile.x}_${tile.y}`;
-                        {
-                             const tData = getTile(tile.x, tile.y);
-                             const fName = tData?.faction ? (factions[tData.faction]?.name || '不明') : null;
-                             const pName = playerNames[tData?.paintedBy] || tData?.paintedBy || null;
-                             const coreData = tData?.core || null;
-
-                             setTilePopup(prev => {
-                               if (prev && prev.x === tile.x && prev.y === tile.y) {
-                                   return {
-                                       ...prev,
-                                       factionName: fName,
-                                       painterName: pName,
-                                       factionId: tData?.faction || tData?.factionId,
-                                       core: coreData
-                                   };
-                               }
-                               return {
-                                   x: tile.x,
-                                   y: tile.y,
-                                   screenX: touch.clientX,
-                                   screenY: touch.clientY,
-                                   factionName: fName,
-                                   painterName: pName,
-                                   paintedBy: tData?.paintedBy, // [FIX] IDを保存
-                                   factionId: tData?.faction || tData?.factionId,
-                                   core: coreData
-                               };
-                             });
-                        }
-                     }
-                 } else {
-                     setTilePopup(null);
-                 }
-             }
-        }
-       setIsDragging(false);
-       touchState.current.mode = 'none';
+                            setTilePopup(prev => {
+                              if (prev && prev.x === tile.x && prev.y === tile.y) {
+                                  return {
+                                      ...prev,
+                                      factionName: fName,
+                                      painterName: pName,
+                                      factionId: tData?.faction || tData?.factionId,
+                                      core: coreData
+                                  };
+                              }
+                              return {
+                                  x: tile.x,
+                                  y: tile.y,
+                                  screenX: touch.clientX,
+                                  screenY: touch.clientY,
+                                  factionName: fName,
+                                  painterName: pName,
+                                  paintedBy: tData?.paintedBy, // [FIX] IDを保存
+                                  factionId: tData?.faction || tData?.factionId,
+                                  core: coreData
+                              };
+                            });
+                      }
+                    }
+                } else {
+                    setTilePopup(null);
+                }
+            }
+      }
+      setIsDragging(false);
+      touchState.current.mode = 'none';
     }
   }, [isDragging, brushToggleMode, getTile, factions, namedCells, onNamedCellClick, playerNames]); // viewport removed
 
@@ -1461,7 +1464,7 @@ function GameMap({
         wheelTimeoutRef.current = null;
     }, 16);
 
-    const minZoom = window.innerWidth < 768 ? 0.05 : 0.1;
+    const minZoom = window.innerWidth < 1000 ? 0.02 : 0.05;
     setViewport(prev => {
         const currentZoom = prev.zoom;
         let step = 0.25;
@@ -1564,7 +1567,7 @@ function GameMap({
             }}
           >
             <div>座標: ({hoverTile.x}, {hoverTile.y})</div>
-            <div>ポイント: {getTilePoints(hoverTile.x, hoverTile.y, namedCells)}pt</div>
+            <div>ポイント: {getTilePoints(hoverTile.x, hoverTile.y, mapSize, namedCells)}pt</div>
             {factionName && <div>勢力: {factionName}</div>}
             {painterName && painterName !== 'Unknown' && <div>塗った人: {painterName}</div>}
            </div>
@@ -1609,7 +1612,7 @@ function GameMap({
           >
             <div className="popup-inner">
               <div className="popup-coords">座標: ({tilePopup.x}, {tilePopup.y})</div>
-              <div className="popup-detail highlight-points">ポイント: {getTilePoints(tilePopup.x, tilePopup.y, namedCells)}pt</div>
+              <div className="popup-detail highlight-points">ポイント: {getTilePoints(tilePopup.x, tilePopup.y, mapSize, namedCells)}pt</div>
               {tilePopup.factionName && (
                 <div
                   className="popup-detail clickable-faction"

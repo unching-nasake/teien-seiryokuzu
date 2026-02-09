@@ -5,7 +5,6 @@ const { createCanvas, registerFont } = require("canvas");
 const shared = require("./shared");
 const {
   LockManager,
-  MAP_SIZE,
   getTilePoints,
   calculateFactionPoints,
   getTop3AllianceIds,
@@ -126,6 +125,7 @@ let workerFactionStatsSAB = null;
 let workerFactionStatsView = null;
 let MAX_FACTIONS_LIMIT = 2000;
 let STATS_INTS_PER_FACTION = 16;
+let MAP_SIZE = 500; // Default
 
 if (workerData) {
   if (workerData.sharedMapSAB) {
@@ -142,6 +142,9 @@ if (workerData) {
     MAX_FACTIONS_LIMIT = workerData.MAX_FACTIONS_LIMIT || 2000;
     STATS_INTS_PER_FACTION = workerData.STATS_INTS_PER_FACTION || 16;
   }
+  if (workerData.mapSize) {
+    MAP_SIZE = workerData.mapSize;
+  }
 }
 
 /**
@@ -149,7 +152,7 @@ if (workerData) {
  */
 function getTileFromSAB(x, y) {
   if (!workerMapView) return null;
-  const size = 500;
+  const size = MAP_SIZE;
   if (x < 0 || x >= size || y < 0 || y >= size) return null;
 
   const offset = (y * size + x) * TILE_BYTE_SIZE;
@@ -195,7 +198,7 @@ function buildCoordinateIndex(mapState) {
   if (workerMapView) return null;
 
   // MAP_SIZEはsharedから取得したいが、ここでは定数500を使用 (shared.MAP_SIZE)
-  const size = 500;
+  const size = MAP_SIZE;
   // ... (existing code for fallback)
   const index = new Array(size);
   for (let y = 0; y < size; y++) {
@@ -223,7 +226,7 @@ function buildCoordinateIndex(mapState) {
  */
 function getTileAt(x, y, mapState) {
   // 範囲チェック
-  if (x < 0 || x >= 500 || y < 0 || y >= 500) {
+  if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) {
     return null;
   }
 
@@ -249,7 +252,7 @@ function buildFactionTileIndex(mapState) {
 
   // [NEW] SABがあればバイナリ走査 (超高速)
   if (workerMapView) {
-    const size = 500;
+    const size = MAP_SIZE;
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
         const offset = (y * size + x) * TILE_BYTE_SIZE;
@@ -388,7 +391,7 @@ function buildCoreCoordsMap(mapState) {
 
   // [NEW] SABがあればバイナリ走査
   if (workerMapView) {
-    const size = 500;
+    const size = MAP_SIZE;
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
         const offset = (y * size + x) * TILE_BYTE_SIZE;
@@ -478,7 +481,7 @@ function ensureCachesValid(mapState, namedCells, factions, alliances) {
 function checkZocWithCache(x, y, targetFactionId, playerFactionId, alliedFids) {
   // [NEW] SAB Optimization
   if (workerZocMapView) {
-    const size = 500;
+    const size = MAP_SIZE;
     const offset = y * size + x;
     const zocIdx = workerZocMapView[offset];
     if (zocIdx === 0) return { isZoc: false, isZocReduced: false };
@@ -605,7 +608,7 @@ function getFactionClusterInfo(
   }
   // 3. SAB環境: インデックスがない場合は全走査 (フォールバック)
   else if (workerMapView) {
-    const size = 500;
+    const size = MAP_SIZE;
     const fidsToCheck = alliedFids || new Set([factionId]);
     for (let i = 0; i < size * size; i++) {
       const offset = i * TILE_BYTE_SIZE;
@@ -715,7 +718,7 @@ function calculatePaintCost(
   // [NEW] 接続性判定のための中心座標の事前抽出 (SAB 優先)
   const validCoreCoords = [];
   if (workerMapView) {
-    const size = 500;
+    const size = MAP_SIZE;
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
         const offset = (y * size + x) * TILE_BYTE_SIZE;
@@ -745,7 +748,7 @@ function calculatePaintCost(
 
   // [FIX] Landlocked Check Implementation
   if (workerMapView && workerIndexToFactionId) {
-    const size = 500;
+    const size = MAP_SIZE;
     // Full scan of SAB (250k items) - fast enough
     for (let i = 0; i < size * size; i++) {
       const offset = i * TILE_BYTE_SIZE;
@@ -1165,6 +1168,9 @@ parentPort.on("message", async (msg) => {
   if (data.indexToFactionId) {
     workerIndexToFactionId = data.indexToFactionId;
   }
+  if (data.mapSize) {
+    MAP_SIZE = data.mapSize;
+  }
   if (data.playerIds) {
     workerIndexToPlayerId = data.playerIds;
   }
@@ -1210,7 +1216,7 @@ parentPort.on("message", async (msg) => {
         }
       } else if (workerMapView) {
         // [NEW] バイナリ走査による統計計算 (超低メモリ)
-        const size = 500;
+        const size = MAP_SIZE;
         for (let y = 0; y < size; y++) {
           for (let x = 0; x < size; x++) {
             const offset = (y * size + x) * TILE_BYTE_SIZE;
@@ -1506,7 +1512,7 @@ parentPort.on("message", async (msg) => {
             }
           } else {
             // バイナリ走査 (超高速)
-            const size = 500;
+            const size = MAP_SIZE;
             for (let y = 0; y < size; y++) {
               for (let x = 0; x < size; x++) {
                 const offset = (y * size + x) * TILE_BYTE_SIZE;
@@ -1763,7 +1769,7 @@ parentPort.on("message", async (msg) => {
         // [NEW] バイナリ走査
         for (const key of targetKeys) {
           const [x, y] = key.split("_").map(Number);
-          const offset = (y * 500 + x) * TILE_BYTE_SIZE;
+          const offset = (y * MAP_SIZE + x) * TILE_BYTE_SIZE;
           const fidIdx = workerMapView.getUint16(offset, true);
           if (fidIdx === 65535) continue;
 
@@ -1850,7 +1856,7 @@ parentPort.on("message", async (msg) => {
         // [NEW] バイナリ走査
         for (const key of targetKeys) {
           const [x, y] = key.split("_").map(Number);
-          const offset = (y * 500 + x) * TILE_BYTE_SIZE;
+          const offset = (y * MAP_SIZE + x) * TILE_BYTE_SIZE;
           const fidIdx = workerMapView.getUint16(offset, true);
           if (fidIdx === 65535) continue;
 
@@ -2066,7 +2072,7 @@ parentPort.on("message", async (msg) => {
       // 1. 期限切れチェック & カウントダウン完了 & 恒久化
       if (canUseSAB) {
         // SAB走査
-        const size = 500;
+        const size = MAP_SIZE;
         for (let y = 0; y < size; y++) {
           for (let x = 0; x < size; x++) {
             const offset = (y * size + x) * TILE_BYTE_SIZE;
@@ -2246,7 +2252,7 @@ parentPort.on("message", async (msg) => {
               if (updatedTiles[key]) return;
 
               const [tx, ty] = key.split("_").map(Number);
-              const offset = (ty * 500 + tx) * TILE_BYTE_SIZE;
+              const offset = (ty * MAP_SIZE + tx) * TILE_BYTE_SIZE;
 
               // Check existing Core
               const flags = workerMapView.getUint8(offset + 11);
@@ -2630,7 +2636,7 @@ parentPort.on("message", async (msg) => {
       const pointsStats = {};
 
       if (workerMapView) {
-        const size = 500;
+        const size = MAP_SIZE;
         for (let y = 0; y < size; y++) {
           for (let x = 0; x < size; x++) {
             const offset = (y * size + x) * TILE_BYTE_SIZE;
@@ -3042,7 +3048,7 @@ parentPort.on("message", async (msg) => {
       // SABが利用可能な場合は、SABを走査して対象勢力のタイルを特定する (高速 & メモリ効率良)
       // JSONの Object.entries を使うと、巨大な配列が生成されGC負荷が高い。
       if (workerMapView) {
-        const size = 500;
+        const size = MAP_SIZE;
         for (let y = 0; y < size; y++) {
           for (let x = 0; x < size; x++) {
             const offset = (y * size + x) * TILE_BYTE_SIZE;
@@ -3244,9 +3250,9 @@ parentPort.on("message", async (msg) => {
 
       // [NEW] 勢力一覧の抽出 (SAB 優先)
       if (workerMapView) {
-        const size = 500;
+        const size = MAP_SIZE;
         for (let i = 0; i < size * size; i++) {
-          const offset = i * 20;
+          const offset = i * TILE_BYTE_SIZE;
           const fidIdx = workerMapView.getUint16(offset, true);
           if (fidIdx === 65535) continue;
           const fid = workerIndexToFactionId[fidIdx];
@@ -3262,9 +3268,9 @@ parentPort.on("message", async (msg) => {
       const factionList = Array.from(factionsSet);
       const factionMap = new Map(factionList.map((f, i) => [f, i]));
 
-      // [OPTIMIZATION] tileCount は 25万固定 (SAB時) または現在のJSONエントリ数
+      // [OPTIMIZATION] tileCount は ダイナミック固定 (SAB時) または現在のJSONエントリ数
       const tileCount = workerMapView
-        ? 500 * 500
+        ? MAP_SIZE * MAP_SIZE
         : Object.keys(mapState.tiles).length;
 
       let factionNamesSize = 0;
@@ -3335,7 +3341,7 @@ parentPort.on("message", async (msg) => {
         offset += sabBuffer.length;
       } else {
         // Fallback (JSONから構築)
-        const size = 500;
+        const size = MAP_SIZE;
         for (let i = 0; i < size * size; i++) {
           const x = i % size;
           const y = Math.floor(i / size);
@@ -3641,7 +3647,7 @@ parentPort.on("message", async (msg) => {
       buffer.writeUInt16LE(keys.length, offset);
       offset += 2;
 
-      const size = 500; // MAP_SIZE
+      const size = MAP_SIZE; // MAP_SIZE
       const sabMap = workerMapView; // Global
 
       keys.forEach((key) => {
@@ -3770,7 +3776,7 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
   // タイル描画
   // [OPTIMIZATION] SABが利用可能な場合は、SABを走査して描画 (高速 & メモリ削減)
   if (workerMapView) {
-    const size = 500;
+    const size = MAP_SIZE;
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
         const offset = (y * size + x) * TILE_BYTE_SIZE;
@@ -3860,7 +3866,7 @@ function generateFullMapImage(mapState, factions, namedCells, alliances, mode) {
 
   if (workerMapView) {
     // [NEW] SAB対応: mapState.tiles が空でもSABから重心を計算可能
-    const size = 500;
+    const size = MAP_SIZE;
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
         const offset = (y * size + x) * TILE_BYTE_SIZE;
@@ -4441,7 +4447,7 @@ function recalculateAllFactionCores(mapState, factions, coreTileSettings = {}) {
   const updatedTiles = {};
 
   if (workerMapView) {
-    const size = 500;
+    const size = MAP_SIZE;
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
         const offset = (y * size + x) * TILE_BYTE_SIZE;
@@ -4516,7 +4522,7 @@ async function checkAllIntegrity(filePaths) {
 
   if (workerMapView) {
     // SAB 走査によるチェック
-    const size = 500;
+    const size = MAP_SIZE;
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
         const key = `${x}_${y}`;

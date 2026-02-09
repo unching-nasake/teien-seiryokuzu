@@ -68,8 +68,26 @@ function App() {
   // Worker Pool (Parallel Loading & Calculations)
   const mapWorkerPool = useMapWorkerPool();
 
+  // [NEW] マップサイズ変更監視 (別useEffectで独立させる)
+  useEffect(() => {
+    const onMapResized = (data) => {
+      console.log("[App] Map resized, reloading...", data);
+      if (data.restart) {
+         alert("マップサイズが変更されました。整合性維持のためサーバーを再起動します。\n数秒後に自動的に再読み込みされます。");
+         setTimeout(() => window.location.reload(), 3000);
+      } else {
+         alert("マップサイズが変更されました。ページを再読み込みします。");
+         window.location.reload();
+      }
+    };
+    socket.on("system:map_resized", onMapResized);
+    return () => {
+      socket.off("system:map_resized", onMapResized);
+    };
+  }, []);
+
   // ===== カスタムフックによる状態管理の抽出 =====
-  const { setTiles, sharedData, version: worldVersion, importMappings, getTile, updateFactionStats } = useWorldState();
+  const { setTiles, sharedData, version: worldVersion, importMappings, getTile, updateFactionStats, mapSize, setMapSize, sab, zocSab, statsSab } = useWorldState();
 
   const {
     skipConfirmation, setSkipConfirmation,
@@ -166,6 +184,18 @@ function App() {
 
   // プレイヤーデータの変更をRefに同期（Socket通信時のクロージャ対策）
   useEffect(() => { playerDataRef.current = playerData; }, [playerData]);
+  useEffect(() => {
+    if (authStatus.mapSize) {
+      setMapSize(authStatus.mapSize);
+      // WorkerPool にも通知 (SAB も渡す)
+      mapWorkerPool.broadcastTask('INIT', {
+        mapSize: authStatus.mapSize,
+        sab: sab,
+        zocSab: zocSab,
+        statsSab: statsSab
+      });
+    }
+  }, [authStatus.mapSize, setMapSize, mapWorkerPool, sab, zocSab, statsSab]);
   useEffect(() => { readNoticeIdsRef.current = readNoticeIds; }, [readNoticeIds]);
   useEffect(() => { addNotificationRef.current = addNotification; }, [addNotification]);
 
@@ -253,7 +283,7 @@ function App() {
   const handleExportMap = useCallback(async () => {
     if (!sharedData || !sharedData.sab) return;
 
-    const MAP_DIM = 500;
+    const MAP_DIM = mapSize;
     const TILE_RES = 4; // 高解像度化 (2000x2000)
     const canvas = document.createElement('canvas');
     canvas.width = MAP_DIM * TILE_RES;
@@ -410,6 +440,7 @@ function App() {
             .then(data => {
                 if(data.authenticated && data.player) {
                     setPlayerData(data.player);
+                    if (data.mapSize) setMapSize(data.mapSize);
                 }
             })
             .catch(e => console.error("Periodic check error:", e));
@@ -2753,6 +2784,7 @@ function App() {
 
           onZoomChange={setZoomLevel} // [NEW] ズームレベル更新
           workerPool={mapWorkerPool} // [NEW] 共有WorkerPool
+          mapSize={mapSize} // [NEW] Pass mapSize prop
         />
 
         {/* マップモード切り替えボタン & オプション */}

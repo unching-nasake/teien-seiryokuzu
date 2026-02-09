@@ -8,6 +8,7 @@ const useAuth = (factions, addNotification, triggerApEffect) => {
     player: null,
     gardenMode: false,
     apSettings: {}, // [NEW] Added initial state
+    mapSize: 500, // [NEW] Default map size
   });
   const [playerData, setPlayerData] = useState(null);
 
@@ -29,6 +30,7 @@ const useAuth = (factions, addNotification, triggerApEffect) => {
         gardenRefillAmount: data.gardenRefillAmount,
         apSettings: data.apSettings,
         mergerSettings: data.mergerSettings, // [NEW] receive merger settings
+        mapSize: data.mapSize || 500, // [NEW] Map Size
       });
 
       if (data.player) {

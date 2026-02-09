@@ -1245,9 +1245,14 @@ function Sidebar({
             if (tileData?.sab) {
                 const dv = new DataView(tileData.sab);
                 const fIdx = tileData.factionsList.indexOf(playerData.factionId);
+                const size = tileData.mapSize ?? 500;
+                const TILE_BYTE_SIZE = 24;
                 if (fIdx !== -1) {
-                    for(let i=0; i<250000; i++) {
-                        if (dv.getUint16(i*20, true) === fIdx) currentTotal++;
+                    for(let i=0; i < size * size; i++) {
+                        const offset = i * TILE_BYTE_SIZE;
+                        if (offset + TILE_BYTE_SIZE <= dv.byteLength) {
+                            if (dv.getUint16(offset, true) === fIdx) currentTotal++;
+                        }
                     }
                 }
             }
