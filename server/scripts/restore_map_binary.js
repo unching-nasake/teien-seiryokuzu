@@ -9,6 +9,14 @@ const DATA_DIR = path.join(__dirname, "../data");
 const HISTORY_DIR = path.join(DATA_DIR, "history");
 const FACTIONS_PATH = path.join(DATA_DIR, "factions.json");
 const PLAYERS_PATH = path.join(DATA_DIR, "players.json");
+const ALLIANCES_PATH = path.join(DATA_DIR, "alliances.json");
+const WARS_PATH = path.join(DATA_DIR, "wars.json");
+const TRUCES_PATH = path.join(DATA_DIR, "truces.json");
+const NAMED_CELLS_PATH = path.join(DATA_DIR, "named_cells.json");
+const FACTION_NOTICES_PATH = path.join(DATA_DIR, "faction_notices.json");
+const GAME_IDS_PATH = path.join(DATA_DIR, "game_ids.json");
+const CEDE_REQUESTS_PATH = path.join(DATA_DIR, "cede_requests.json");
+const ACTIVITY_LOG_PATH = path.join(DATA_DIR, "activity_log.json");
 const DB_PATH = path.join(DATA_DIR, "game.db");
 const OUTPUT_BIN_PATH = path.join(DATA_DIR, "map_state.bin");
 const OUTPUT_JSON_PATH = path.join(DATA_DIR, "map_state.json");
@@ -65,6 +73,85 @@ async function restore() {
   if (pCount > 0) {
     console.log(`Importing ${pCount} players into DB...`);
     importPlayers(playersData.players);
+  }
+
+  // 追加の全 JSON 同期
+  const kvsFiles = [
+    { path: ALLIANCES_PATH, table: "alliances", key: "alliances" },
+    { path: WARS_PATH, table: "wars", key: "wars" },
+    { path: TRUCES_PATH, table: "truces", key: "truces" },
+    { path: NAMED_CELLS_PATH, table: "named_cells" },
+    { path: GAME_IDS_PATH, table: "game_ids" },
+    { path: CEDE_REQUESTS_PATH, table: "cede_requests", key: "requests" },
+  ];
+
+  for (const item of kvsFiles) {
+    const data = loadJSON(item.path);
+    const entries = item.key ? data[item.key] || {} : data || {};
+    const count = Object.keys(entries).length;
+    if (count > 0) {
+      console.log(`Importing ${count} items into ${item.table}...`);
+      db.transaction((items) => {
+        const upsert = db.prepare(
+          `INSERT OR REPLACE INTO ${item.table} (id, data) VALUES (?, ?)`,
+        );
+        for (const [id, val] of Object.entries(items)) {
+          upsert.run(id, JSON.stringify(val));
+        }
+      })(entries);
+    }
+  }
+
+  // Faction Notices (Array structure)
+  const noticesData = loadJSON(FACTION_NOTICES_PATH);
+  if (Object.keys(noticesData).length > 0) {
+    console.log("Importing faction notices into DB...");
+    db.transaction((noticesMap) => {
+      db.prepare("DELETE FROM faction_notices").run();
+      const insert = db.prepare(
+        "INSERT INTO faction_notices (id, factionId, userId, isRead, createdAt, data) VALUES (?, ?, ?, ?, ?, ?)",
+      );
+      for (const [key, list] of Object.entries(noticesMap)) {
+        const parts = key.split(":");
+        const type = parts[0];
+        const val = parts[1];
+        const fId = type === "faction" ? val : null;
+        const uId = type === "user" ? val : null;
+        if (!Array.isArray(list)) continue;
+        for (const n of list) {
+          if (!n.id) continue;
+          insert.run(
+            n.id,
+            fId,
+            uId,
+            n.isRead ? 1 : 0,
+            n.date || n.createdAt || new Date().toISOString(),
+            JSON.stringify(n),
+          );
+        }
+      }
+    })(noticesData);
+  }
+
+  // Activity Logs
+  const activityData = loadJSON(ACTIVITY_LOG_PATH);
+  const logEntries = activityData.entries || [];
+  if (logEntries.length > 0) {
+    console.log(`Importing ${logEntries.length} activity logs into DB...`);
+    db.transaction((logs) => {
+      db.prepare("DELETE FROM activity_logs").run();
+      const insert = db.prepare(
+        "INSERT INTO activity_logs (type, date, factionId, data) VALUES (?, ?, ?, ?)",
+      );
+      for (const log of logs) {
+        insert.run(
+          log.type,
+          log.date,
+          log.factionId || null,
+          JSON.stringify(log),
+        );
+      }
+    })(logEntries);
   }
 
   // 2. マッピングの再構築 (DB から最新情報を取得)
