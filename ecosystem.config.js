@@ -6,8 +6,8 @@ module.exports = {
       instances: 1, // シングルプロセス（Worker Threadsで計算分散）
       exec_mode: "fork",
       watch: false,
-      max_memory_restart: "3G",
-      node_args: "--max-old-space-size=3072",
+      max_memory_restart: "2G",
+      node_args: "--max-old-space-size=2048",
       env: {
         NODE_ENV: "production",
       },
