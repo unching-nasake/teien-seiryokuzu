@@ -1,0 +1,36 @@
+[package]
+name = "teien-seiryokuzu-server"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# 開発環境向けの既定は同梱 SQLite。本番 Linux/Docker 等では `--no-default-features --features sqlite-unbundled` で OS 側 libsqlite3 を動的リンク可能
+default = ["sqlite-bundled"]
+sqlite-bundled = ["sqlx/sqlite"]
+sqlite-unbundled = ["sqlx/sqlite-unbundled"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors", "compression-gzip", "set-header", "trace"] }
+sqlx = { version = "0.8", features = ["runtime-tokio"] }
+rayon = "1.10"
+bytemuck = { version = "1.19", features = ["derive"] }
+argon2 = "0.5"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+flate2 = "1"
+dashmap = "6"
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+parking_lot = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,16 @@
+# Rust ビルド成果物・SQLite DB データ
+server/target/
+server/data/
+
+# フロントエンド依存関係・ビルド成果物
+client/node_modules/
+client/dist/
+
+# 環境変数・機密情報
+.env
+.env.*
+
+# ログ・OS一時ファイル
+*.log
+.DS_Store
+Thumbs.db
